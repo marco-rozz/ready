@@ -1,8 +1,6 @@
 version: "2"
 run:
   issues-exit-code: 0
-  skip-dirs:
-    - ready-landing
 linters:
   default: none
   enable:

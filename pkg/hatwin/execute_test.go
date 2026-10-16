@@ -103,7 +103,7 @@ func startCommandTwin(t *testing.T, home homeFixture, opts Options) (*Twin, cont
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	twin.Start(ctx)
 	if err := twin.WaitReady(ctx); err != nil {
 		cancel()

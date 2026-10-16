@@ -304,16 +304,23 @@ func computeBackoff(opts Options, attempt int) time.Duration {
 	if attempt <= 0 {
 		return opts.InitialBackoff
 	}
+	// Clamp in the float64 domain BEFORE converting to time.Duration: for
+	// large attempts float64(initial)*factor exceeds int64 and the float→int
+	// conversion is architecture-dependent (arm64 saturates to MaxInt64 —
+	// harmless, the clamp below would catch it anyway — while amd64 yields
+	// the indefinite value MinInt64, which turned into a reset to
+	// InitialBackoff instead of clamping to MaxBackoff).
 	factor := math.Pow(opts.BackoffFactor, float64(attempt-1))
-	delay := time.Duration(float64(opts.InitialBackoff) * factor)
-	if delay > opts.MaxBackoff {
+	delayF := float64(opts.InitialBackoff) * factor
+	maxF := float64(opts.MaxBackoff)
+	if delayF >= maxF || math.IsInf(delayF, 1) {
 		return opts.MaxBackoff
 	}
-	if delay < opts.InitialBackoff {
+	if delayF <= float64(opts.InitialBackoff) {
 		return opts.InitialBackoff
 	}
 
-	return delay
+	return time.Duration(delayF)
 }
 
 // onRegistryEvent schedules a debounced topology-change signal.
