@@ -199,7 +199,10 @@ func TestReplayTerminalEmulation(t *testing.T) {
 
 	prog.Quit()
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("program exited with error after Quit: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("program did not exit after Quit")
 	}
