@@ -116,7 +116,7 @@ main() {
     # mktemp -d creates a 0700 directory; keep the trap tight.
     trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 
-    ARCHIVE_NAME="$BIN_NAME_${ASSET_LOCAL}_${ASSET_ARCH}"
+    ARCHIVE_NAME="${BIN_NAME}_${ASSET_LOCAL}_${ASSET_ARCH}"
     case "$ASSET_LOCAL" in
         windows) ARCHIVE_EXT=".zip" ;;
         *) ARCHIVE_EXT=".tar.gz" ;;
