@@ -1,0 +1,45 @@
+# READY.
+
+> An agentic home-automation daemon in Go: it orchestrates Home Assistant
+> through an LLM using the ReAct pattern with native tool calling, exposed
+> over a terminal client (ZeroMQ), PETSCII serial for a Commodore 64,
+> Telegram and WhatsApp. Any provider works — Ollama, OpenRouter, OpenCode and
+> an experimental ChatGPT (Codex subscription) OAuth provider — wired as a
+> live failover chain. Home-lab operators on Raspberry Pi, macOS and Windows
+> install it with one command:
+> `curl -fsSL https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.sh | bash`
+> (Windows: `irm https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.ps1 | iex`).
+
+## Docs
+
+- [README](README.md): overview, architecture, configuration reference and the
+  `ready chat` exit-code contract.
+- [Configuration example](config.example.yaml): the complete, commented
+  YAML reference for every subsystem (LLM providers with failover, channels,
+  MCP servers, the Home Assistant digital twin, skills, sessions, compaction,
+  logging).
+- [How READY. finds its config](README.md#how-ready-finds-its-config): the
+  config resolution chain, the runtime-home rule and the Install home layout
+  (`bin/`, `config.yaml`, `library/skills/`, `skills/`, `oauth/`).
+
+## Install
+
+- [Install (README section)](README.md#install): one-liners, parameter
+  passing for options, `VERSION=` pinning, upgrade and uninstall semantics.
+- [install.sh](scripts/install.sh): POSIX-sh installer (Linux amd64/arm64/arm-v6,
+  macOS amd64/arm64).
+- [install.ps1](scripts/install.ps1): Windows PowerShell 5.1+ installer (amd64).
+- [GitHub Releases](https://github.com/marco-rozz/ready/releases): platform
+  archives (`ready_<os>_<arch>.tar.gz` / `.zip`), `checksums.txt`.
+
+## Configuration
+
+- [Environment variables](README.md#environment-variables): `READY_ADDR`,
+  `READY_TOKEN`, `READY_MCP_PROFILE`, `READY_LOG_LEVEL`, `READY_LOGO`,
+  `READY_SHIFT_ENTER`.
+
+## Optional
+
+- [LICENSE](LICENSE): MIT.
+- [.goreleaser.yaml](.goreleaser.yaml): the release pipeline (build matrix,
+  archive composition).

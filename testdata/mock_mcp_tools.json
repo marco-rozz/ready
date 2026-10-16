@@ -1,0 +1,41 @@
+{
+  "tools": [
+    {
+      "name": "light/turn_on",
+      "description": "Turn on a light entity",
+      "parameters": {
+        "entity_id": {"type": "string", "required": true, "description": "The entity ID of the light"},
+        "brightness": {"type": "number", "required": false, "description": "Brightness level 0-255"}
+      }
+    },
+    {
+      "name": "light/turn_off",
+      "description": "Turn off a light entity",
+      "parameters": {
+        "entity_id": {"type": "string", "required": true, "description": "The entity ID of the light"}
+      }
+    },
+    {
+      "name": "climate/set_temperature",
+      "description": "Set the target temperature for a climate entity",
+      "parameters": {
+        "entity_id": {"type": "string", "required": true, "description": "The entity ID of the climate device"},
+        "temperature": {"type": "number", "required": true, "description": "Target temperature in degrees"}
+      }
+    },
+    {
+      "name": "switch/toggle",
+      "description": "Toggle a switch entity",
+      "parameters": {
+        "entity_id": {"type": "string", "required": true, "description": "The entity ID of the switch"}
+      }
+    },
+    {
+      "name": "homeassistant/get_state",
+      "description": "Get the current state of a Home Assistant entity",
+      "parameters": {
+        "entity_id": {"type": "string", "required": true, "description": "The entity ID to query"}
+      }
+    }
+  ]
+}

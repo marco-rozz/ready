@@ -1,0 +1,90 @@
+version: "2"
+run:
+  issues-exit-code: 0
+  skip-dirs:
+    - ready-landing
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - bodyclose
+    - copyloopvar
+    - dogsled
+    - dupl
+    - durationcheck
+    - errcheck
+    - errorlint
+    - forbidigo
+    - forcetypeassert
+    - gochecknoglobals
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - makezero
+    - misspell
+    - nakedret
+    - nilerr
+    - nlreturn
+    - noctx
+    - nolintlint
+    - prealloc
+    - predeclared
+    - promlinter
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+  settings:
+    cyclop:
+      max-complexity: 10
+      package-average: 0
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    gocognit:
+      min-complexity: 10
+    govet:
+      enable:
+        - shadow
+      enable-all: false
+    nestif:
+      min-complexity: 5
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - IGNORE$
+      - ^IGNORE/
+      - ready-landing$
+      - ^ready-landing/
+      - ^poc/
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - IGNORE$
+      - ^IGNORE/
+      - ready-landing$
+      - ^ready-landing/
+      - ^poc/

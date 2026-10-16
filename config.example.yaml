@@ -1,0 +1,683 @@
+# ─────────────────────────────────────────────────────────────────────
+# LLM provider registry: named provider connections + model references,
+# with optional boot-time failover.
+#
+# Registry shape (one credential/endpoint per provider connection;
+# a model is one <provider>::<model> reference):
+#   llm.providers.<name> — a named provider connection (required, at least one).
+#                          The map key is an operator-chosen INSTANCE name, distinct
+#                          from the provider type, so one type MAY be configured
+#                          more than once (e.g. two opencode gateways).
+#   llm.default          — active model at boot as <provider>::<model> (required)
+#   llm.failover         — ordered <provider>::<model> fallback chain (optional)
+#
+# The '::' separator is split on its FIRST occurrence, so a model-id containing
+# a single ':' (e.g. gemma4:31b) round-trips verbatim. Provider instance names
+# MUST NOT contain '::'. References across default+failover MUST be unique.
+#
+# Per-provider fields:
+#   provider            — ollama | openrouter | opencode | openai-codex (required)
+#   api                 — required wire protocol: ollama→ollama,
+#                         openrouter→chat_completions, opencode→chat_completions |
+#                         anthropic | google | responses, openai-codex→responses.
+#                         OpenCode instances automatically carry the session headers
+#                         the Go subscription gateway (…/zen/go/v1) requires:
+#                         x-opencode-session (a process-wide UUID, one "conversation"
+#                         per daemon run) and a non-generic User-Agent — no proxy
+#                         needed. Plain Zen ignores them.
+#                         - chat_completions: OpenAI Chat Completions (default for opencode)
+#                         - anthropic: Anthropic Messages (supported via opencode)
+#                         - google: Google Gemini native format (generateContent),
+#                           supported via opencode for the Gemini model family
+#                         - responses: OpenAI Responses API (supported via opencode
+#                           for the GPT 5.x / Grok model family). Built through a
+#                           second agent-construction path (Eino's AgenticModel /
+#                           adk.NewTypedChatModelAgent[*schema.AgenticMessage])
+#                           instead of adk.NewChatModelAgent — see the dual-agent-
+#                           construction-path notes in the repo documentation
+#                           "Agent Core" and tasks/arch_eino-agentic-model-survey.md.
+#                           Observable behaviour (tool calling, formatter pipeline,
+#                           session history) is equivalent to every other protocol.
+#   api_key             — inline credential (Bearer), applies to every model on this provider
+#   api_key_file        — path to file containing the credential (read & trimmed at boot).
+#                         Mutually exclusive with api_key. Required for
+#                         openrouter/opencode; forbidden for openai-codex.
+#   base_url            — override the provider's default endpoint
+#                         - ollama default:     http://localhost:11434
+#                         - openrouter default: https://openrouter.ai/api/v1
+#                         - opencode default:   https://opencode.ai/zen/v1
+#                         - openai-codex default: https://chatgpt.com/backend-api
+#                           (experimental ChatGPT backend; OAuth hosts are fixed
+#                           and never follow this override)
+#                           (verified live: chat_completions & anthropic protocols
+#                            append their endpoints to this base — /chat/completions
+#                            and /messages respectively. responses appends /responses
+#                            per the SDK/httptest fixtures; live verification is
+#                            pending, see tasks/phase-llm-opencode-smoke.md)
+#                         - opencode + api: google: the google.golang.org/genai SDK
+#                           appends /v1beta/models/{model}:generateContent itself,
+#                           so base_url must point at the Zen gateway ROOT serving
+#                           that path layout — https://opencode.ai/zen (NOT .../zen/v1,
+#                           which would double the version segment). Auth uses
+#                           Authorization: Bearer, matching the other opencode
+#                           protocols; confirm against the live gateway before relying
+#                           on it (see tasks/phase-llm-opencode-smoke.md).
+#   keep_alive          — OLLAMA-ONLY. Duration the model stays loaded between turns
+#                         (e.g. "30m"). Absent = Ollama default. "0s" = unload after
+#                         every call. Boot error on non-ollama providers. Applies to
+#                         every model referenced through this provider (per-model
+#                         Ollama tuning is not supported — declare a second ollama
+#                         provider instance if you need distinct tuning per model).
+#   options             — OLLAMA-ONLY. Generation tuning block: temperature, top_p,
+#                         top_k, num_predict, num_ctx, seed, repeat_penalty, num_thread.
+#                         Every field optional; omitted fields are not sent (Ollama
+#                         defaults apply). Boot error on non-ollama providers. Applies
+#                         to every model referenced through this provider.
+#
+# Failover (boot + runtime): global registry errors still fail boot, while a
+# candidate-specific construction, credential, connectivity, or readiness
+# failure marks only that candidate unavailable and continues down the chain.
+# At runtime, auth/model/quota failures advance immediately; transient 429,
+# 5xx/overload, EOF, transport, and local attempt-timeout failures receive the
+# configured same-candidate retries before advancing. Restart is allowed only
+# before any tool call or final-answer content becomes observable. ChatGPT
+# usage/quota exhaustion on openai-codex hard-demotes only candidates sharing
+# that named provider instance; paid Platform fallback occurs only when an
+# operator explicitly places such a provider later in this chain.
+# ─────────────────────────────────────────────────────────────────────
+llm:
+  default: "ollama-gemma::gemma4:31b"
+  # Experimental ChatGPT-first example (replace the default above and
+  # uncomment the named providers below):
+  # default: "codex-work::gpt-5-codex"
+  # failover: the ordered runtime-failover chain. Every entry is a
+  # <provider>::<model> reference; on a hard failure of the active model (auth,
+  # 404 model-not-found, quota exhaustion, transport, attempt timeout) the
+  # daemon walks this chain within the same user turn — and recovers back to
+  # the highest-priority healthy model automatically. Prefer chains that
+  # change PROVIDER rather than only model: candidates sharing a provider
+  # instance share its API key and quota, and a quota-exhaustion failure
+  # demotes every candidate on that provider at once.
+  failover:
+    # - "openrouter-gemma::google/gemma-3-27b-it"
+    # - "opencode-free::deepseek-v4-flash-free"
+    # ChatGPT-first ordered example:
+    # - "codex-personal::gpt-5-codex"
+    # - "openrouter-gemma::openai/gpt-5"  # optional paid gateway fallback
+    # - "ollama-gemma::gemma4:31b"        # local fallback
+
+  # failover_attempt_timeout bounds the first chunk of the first model call
+  # in a STREAMING turn. Once any chunk arrives (including an intermediate
+  # tool-call iteration), only the outer 300s turn deadline applies. Set 0s
+  # to disable this liveness budget; a silent candidate will then consume the
+  # whole outer deadline and no fallback will be attempted. Default: 45s.
+  failover_attempt_timeout: 45s
+
+  # Same-candidate retries happen before demotion/failover for transient
+  # failures only (429, 5xx/overload, EOF, transport/timeouts). Permanent
+  # auth/model/quota failures advance immediately. Retry delays double from
+  # the configured base and cap at 30s. Retries are limited to 0..5; 0
+  # restores single-attempt behaviour. Defaults: 2 retries, 2s base.
+  failover_retries: 2
+  failover_retry_backoff: 2s
+
+  # recovery: the two cooldown ladders and probe policy of the runtime
+  # failover orchestrator. All values below are the defaults; omit the whole
+  # block to use them. A demoted candidate cools down for its ladder's
+  # initial_cooldown, multiplied by backoff_factor on each successive
+  # demotion (bounded by max_cooldown), and resets on its next success.
+  # - soft ladder (30s → 5m): transient failures — HTTP 429 rate limiting,
+  #   5xx / provider overload. Advancing to a fallback happens immediately;
+  #   the short cooldown keeps strict-priority recovery back to the default
+  #   quick.
+  # - hard ladder (5m → 1h): hard failures — auth, 404 model-not-found,
+  #   quota exhaustion, transport/DNS/TLS, attempt-budget expiry.
+  # Background recovery probes cooling candidates (in configured order) only
+  # when their cooldown has expired AND agent traffic occurred within
+  # idle_probe_window — an idle daemon never pays for probe round trips.
+  # A user turn arriving while every candidate is cooling gets exactly one
+  # forced attempt of the highest-priority candidate, regardless of cooldown.
+  # Health state is in-memory only and resets on restart.
+  recovery:
+    soft:
+      initial_cooldown: 30s
+      max_cooldown: 5m
+    hard:
+      initial_cooldown: 5m
+      max_cooldown: 1h
+    backoff_factor: 2
+    probe_timeout: 10s
+    idle_probe_window: 15m
+
+  # providers: named provider connections. `api` (the wire protocol) is
+  # REQUIRED on every instance — there are no implicit defaults:
+  #   ollama     → api: ollama
+  #   openrouter → api: chat_completions
+  #   opencode   → api: chat_completions | anthropic | google | responses
+  #   openai-codex → api: responses
+  # `provider` stays a separate field because the same api value selects a
+  # different component per provider type: opencode's chat_completions maps
+  # to the OpenAI Chat Completions component, openrouter's to the OpenRouter
+  # component (with its own base URL and stream-safe adapter).
+  # One endpoint used through multiple wire APIs needs MULTIPLE named
+  # provider instances (same base_url / api_key, different api).
+  providers:
+    ollama-gemma:
+      provider: "ollama"
+      api: "ollama"
+      base_url: "http://localhost:11434"
+      # Optional: the model's context-window size in tokens (tui-usage-
+      # observability). Denominator for the ready chat footer's context-
+      # occupancy percentage and the /context free-space estimate; when
+      # omitted, both values are absent rather than estimated. Optional on
+      # every provider type; must be a positive integer.
+      # ⚠️ Ollama only: keep options.num_ctx EQUAL to context_window — Ollama
+      # silently truncates the prompt to num_ctx, which would make the
+      # reported occupancy plausible-but-wrong (boot WARN on mismatch).
+      # context_window: 8192
+      # ── Ollama-only generation tuning (ignored by openrouter/opencode) ──
+      # keep_alive: "30m"          # keep the model loaded in memory between turns (avoids
+                                   # cold-reload latency after idle). Absent = Ollama default
+                                   # (5m). "0s" = unload after every call.
+      # options:
+      #   num_predict: 256          # cap output length (reduces latency variance)
+      #   num_ctx: 8192             # context window; must fit system prompt + history
+      #   temperature: 0.3          # lower = more deterministic home-automation replies
+      #   # top_p, top_k, seed, repeat_penalty, num_thread are also available
+    # openrouter-gemma:
+    #   provider: "openrouter"
+    #   api: "chat_completions"
+    #   api_key: "sk-or-v1-..."
+    # opencode-free:
+    #   provider: "opencode"
+    #   api: "chat_completions"
+    #   api_key: "oc-..."
+    # opencode-claude:
+    #   provider: "opencode"
+    #   api: "anthropic"
+    #   api_key_file: "/etc/ready/opencode.token"    # read from file at boot
+    # opencode-gemini:
+    #   provider: "opencode"
+    #   api: "google"                              # Google native generateContent format
+    #   api_key: "oc-..."
+    #   base_url: "https://opencode.ai/zen"        # gateway ROOT (SDK adds v1beta/...)
+    #                                              # — NOT .../zen/v1 used elsewhere
+    # opencode-gpt:
+    #   provider: "opencode"
+    #   api: "responses"                            # OpenAI Responses API
+    #   api_key: "oc-..."                          # same Bearer convention as the other opencode protocols
+    #   # base_url defaults to https://opencode.ai/zen/v1, same as chat_completions/anthropic
+    # ChatGPT subscription examples (experimental). Authenticate each named
+    # instance independently; never place a Platform API key here:
+    #   ready login llm:codex-work --config config.yaml
+    #   ready login llm:codex-personal --config config.yaml --device-code
+    # codex-work:
+    #   provider: "openai-codex"
+    #   api: "responses"
+    #   # model IDs remain explicit in default/failover; no account catalog is assumed
+    # codex-personal:
+    #   provider: "openai-codex"
+    #   api: "responses"
+channels:
+  cli:
+    enabled: true
+    # bootstrap: ["home-topology"]   # skills preloaded into every session on this channel
+    # formatter_skill: ""            # post-step formatter skill (always post-step; leave empty to disable)
+                                     # Note: formatter_skill must NOT appear in bootstrap
+  # zmqcli replaces the stdin CLI with a ZMQ-attached client (the `ready
+  # chat` subcommand). Either `channels.cli.enabled` OR `channels.zmqcli.enabled`
+  # may be true at a time, not both — they share the logical channel name "cli".
+  zmqcli:
+    enabled: false
+    bind: tcp://127.0.0.1:7600
+    # Shared secret used to derive HMAC-SHA256 over the per-connection nonce.
+    # Generate with: openssl rand -hex 32
+    auth_token: ""
+    # Alternative to auth_token: read the secret from a file (trimmed of
+    # whitespace). Useful when you don't want the secret in this YAML.
+    # Exactly one of auth_token / auth_token_file must be set when enabled.
+    # auth_token_file: /etc/ready/zmqcli.token
+    # Idle-Connection watchdog (not the per-reply timeout — that's the chat
+    # client's --reply-timeout). Only reaps a Connection whose client crashed
+    # without sending session_end. Closing a Connection never ends the
+    # conversation Session: the next client continues it. Default 15m is fine
+    # for shared/multi-user daemons; raise it (e.g. 168h) if you want a
+    # long-lived interactive `chat` Connection to never be kicked out just for
+    # sitting idle. (Renamed from session_timeout — the old key fails boot.)
+    connection_idle_timeout: 15m
+    # Liveness heartbeat window (zmq-session-liveness). The TUI pings every
+    # third of this (15s by default); when a heartbeating Connection's pings
+    # stop — killed client, closed terminal window, laptop sleep — the
+    # Connection lock is released within this window instead of waiting for
+    # connection_idle_timeout. Connections that never ping (--exec, older
+    # clients) are exempt and remain covered by connection_idle_timeout only.
+    # Default 45s.
+    # liveness_timeout: 45s
+    # bootstrap: ["home-topology"]
+    # formatter_skill: ""
+  serial:
+    enabled: false
+    port: /dev/tty.usbserial
+    baud_rate: 9600
+    # To have the PETSCII formatter rules applied by the LLM during generation,
+    # put the formatter skill in bootstrap instead of formatter_skill:
+    bootstrap: ["home-topology", "petscii-formatter"]
+    # Alternatively, use formatter_skill for a dedicated post-step LLM reformat:
+    # formatter_skill: petscii-formatter   # must NOT be in bootstrap if set
+  telegram:
+    enabled: false
+    token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+    allow_from:
+      - "123456789"
+    bootstrap: ["home-topology"]
+    formatter_skill: telegram-formatter   # post-step LLM reformat (must NOT be in bootstrap)
+    # formatter_post_step: false          # default. Enables inline reinforcement:
+    #   1) SKILL.md is wrapped in <formatter_skill>...</formatter_skill> at prompt
+    #      position 1 (not put in the bootstrap shell).
+    #   2) The current user turn is replaced with a per-turn envelope
+    #      <final_reminder_ID>...<user_input_ID>...<formatting_directive_ID>...
+    #      using a fresh 4-byte random hex ID so untrusted content cannot forge
+    #      a matching closing tag.
+    #   3) The formatter skill is marked Active in the agentskills session so it
+    #      is suppressed from the progressive-disclosure metadata catalog.
+    # Persisted history (sessions/) remains raw — the wrap and envelope
+    # are prompt-shape only.  Set formatter_post_step: true to keep the legacy
+    # "dedicated LLM reformat after Final Answer" behavior.
+    # session_reset: optional override of sessions.reset for this channel —
+    # only the fields set here replace the global ones. Telegram is
+    # message-oriented: the rule is evaluated when the next message arrives
+    # and, on a reset, the chat receives a fixed notice (notify).
+    # session_reset:
+    #   mode: daily+idle
+    #   idle_after: 6h
+  whatsapp:
+    enabled: false
+    session_path: whatsapp/
+    bootstrap: ["home-topology"]
+    formatter_skill: whatsapp-formatter
+
+mcp_servers:
+  # Primary Home Assistant MCP server (default configuration).
+  # All tool names exposed to the LLM are prefixed with the server map key:
+  # "home_assistant__light/turn_on", "home_assistant__climate/set_temperature", etc.
+  # The wire name sent to HA remains unchanged ("light/turn_on").
+  home_assistant:
+    url: http://homeassistant.local:8123/api/mcp
+    transport: streamable_http   # streamable_http (default) or sse
+    headers:
+      Authorization: "Bearer <token>"
+    timeout: 30s                 # per-request timeout (Initialize, ListTools, CallTool)
+    # tool_prefix:               # optional: controls the LLM-facing tool name prefix.
+    #   absent (default) → use server map key ("home_assistant")
+    #   "ha"             → use short alias  ("ha__light/turn_on")
+    #   ""               → no prefix at all ("light/turn_on", backward-compat)
+    # expected_tools:            # optional: warn-only check using wire names (without prefix)
+    #   - light/turn_on
+    #   - light/turn_off
+    reconnect:
+      max_retries: 0             # 0 = infinite
+      initial_backoff: 1s
+      max_backoff: 60s
+      backoff_factor: 2.0
+    health_check:
+      enabled: true
+      interval: 30s
+    # profiles gates this server's own tools per profile name, keyed by wire
+    # name (unprefixed — NOT "home_assistant__light/turn_on"). An owner that
+    # does not declare the active profile at all is fail-closed: it
+    # contributes zero tools under that profile, plus a boot-time WARN. See
+    # "MCP profiles" below for the full ownership model.
+    #
+    # NOTE: the deny list below names the HA MCP read tools superseded by the
+    # digital twin's ha_state_query, and the write tools superseded by
+    # ha_command (see home_assistant: below, and the home-integration /
+    # home-topology skills). The exact wire names depend
+    # on the HA MCP server build in use — verify against your instance's
+    # actual tool catalog (e.g. `ready serve --profile edit` once, and inspect
+    # the "MCP tool" boot log lines) and adjust this list accordingly.
+    profiles:
+      default:
+        deny: ["get_state", "get_states", "get_history", "get_live_context"]
+      edit:
+        allow: ["*"]
+
+  # Example: second MCP server (e.g. a media player service).
+  # Remove or comment out if you only have one MCP server.
+  # media_player:
+  #   url: http://media.local:8000/mcp
+  #   headers:
+  #     Authorization: "Bearer <token2>"
+  #   # tool_prefix: "media"    # default: use "media_player" (the map key)
+  #   reconnect:
+  #     max_retries: 0
+  #     initial_backoff: 1s
+  #     max_backoff: 60s
+  #     backoff_factor: 2.0
+  #   health_check:
+  #     enabled: true
+  #     interval: 30s
+
+  # Example: an OAuth-protected MCP server. `oauth` is opt-in per server —
+  # omit it entirely for servers authenticated via a static `headers`
+  # Authorization value (the two are mutually exclusive: config.Validate
+  # rejects a server declaring both). OAuth is unavailable on
+  # `transport: sse` (the SDK's SSE transport has no OAuthHandler field);
+  # config.Validate rejects that combination too. There is deliberately no
+  # `scopes` field: scopes are determined by the authorization server, not by
+  # configuration.
+  #
+  # Authenticate once out of band with `ready login example_mcp`
+  # (the only place a browser is opened) before starting `ready serve`; a
+  # server with no usable credential at boot is skipped with an actionable
+  # WARN naming the exact command, and a daemon already running recovers a
+  # credential written after boot on its own — see the OAuth section
+  # paragraph under the MCP client section.
+  # example_mcp:
+  #   url: https://example.com/mcp
+  #   transport: streamable_http   # oauth requires this; sse has no OAuthHandler
+  #   timeout: 30s
+  #   oauth:
+  #     grant: auto                # auto (default) | authorization_code | client_credentials
+  #                                 # auto: client_credentials only when client_id + a resolvable
+  #                                 # secret are configured AND the authorization server advertises
+  #                                 # it; authorization_code otherwise.
+  #     # client_id:                # optional pre-registered client_id (authorization_code), or
+  #                                 # REQUIRED for client_credentials. Omit for a server that
+  #                                 # supports Dynamic Client Registration — `ready login`
+  #                                 # registers once and persists the result.
+  #     # client_secret:            # REQUIRED for client_credentials. Mutually exclusive with
+  #                                 # client_secret_file.
+  #     # client_secret_file: /etc/ready/example_mcp.secret
+  #   reconnect:
+  #     max_retries: 0
+  #     initial_backoff: 1s
+  #     max_backoff: 60s
+  #     backoff_factor: 2.0
+  #   health_check:
+  #     enabled: true               # also the recovery detector: a ping consults the token
+  #     interval: 30s                # source, so a `ready login` written while the daemon is up
+  #                                   # is picked up on the next tick with no restart.
+
+# Root OAuth block: credential-storage settings shared by OAuth-enabled MCP
+# servers and openai-codex LLM providers. Records are namespaced; equal MCP
+# and LLM names cannot collide. Browser login is the default; --device-code
+# is available for headless Codex providers.
+# Omit entirely to keep the defaults shown here.
+# oauth:
+#   token_store: file        # the only accepted value today; "keychain" is
+#                             # rejected explicitly rather than silently
+#                             # falling back to disk (an OS-keychain backend
+#                             # is deferred to a future change)
+#   path: oauth/             # default <Install home>/oauth/ (a credential is
+#                             # per-user identity, not deployment data — the
+#                             # one deliberate carve-out of the runtime-home
+#                             # rule). An explicit relative oauth.path
+#                             # resolves against the runtime home, an
+#                             # absolute one as-is; one 0600 JSON record per
+#                             # server, in a 0700 dir.
+#   redirect_port: 7601      # fixed loopback callback port for `ready login`;
+#                             # frozen into the persisted client registration,
+#                             # so keep it stable across logins (adjacent to
+#                             # zmqcli's 7600)
+
+# HA WebSocket digital twin + autonomic alerting.
+# The twin keeps an always-on WebSocket connection to Home Assistant, maintains
+# an in-memory mirror of all entity states and registries, and (in later phases)
+# powers autonomic alerting. Disabled by default; the rest of READY (MCP,
+# channels, skills) works unaffected when disabled.
+#
+# Non-blocking startup: READY waits up to monitoring.sync_timeout for the initial
+# sync; on timeout it continues degraded (the twin self-heals on reconnect and the
+# state-query tool returns "not ready" until then).
+#
+# ⚠️ UPGRADE NOTE: when first enabling the twin (enabled: false → true), start
+# new Sessions (/new) after restarting. Existing conversations may reference MCP
+# get_state calls that should now use ha_state_query; stale history can confuse
+# the LLM until those Sessions end.
+#
+# home_assistant:
+#   enabled: false
+#   websocket:
+#     url: ws://homeassistant.local:8123/api/websocket
+#     # Exactly one of token / token_file must be set.
+#     token: "<long-lived-access-token>"         # never commit real tokens
+#     # token_file: /etc/ready/ha_token           # alternative: token in a file
+#   monitoring:
+#     sync_timeout: 15s       # how long to wait at boot for initial sync
+#     ping_interval: 30s      # WS keep-alive interval
+#     topology_debounce: 500ms # debounce window after registry-update events
+#     initial_backoff: 1s     # first reconnect delay
+#     max_backoff: 60s        # cap on reconnect delay
+#     backoff_factor: 2.0     # exponential multiplier
+#     max_retries: 0          # 0 = retry indefinitely
+#   # stale_threshold_states / hard_stale_threshold / outstanding_pings_threshold
+#   # are global on the Twin (not per-profile): WS physical health is not a
+#   # per-profile concern. Defaults shown below.
+#   stale_threshold_states: 60s      # last_ws_activity older than this -> ha_state_query sets stale: true (data still returned)
+#   hard_stale_threshold: 300s       # last_ws_activity older than this -> ha_state_query refuses to serve data (twin_stale error)
+#   outstanding_pings_threshold: 2   # unacknowledged pings before the WS is force-closed to break a zombie (TCP half-open) connection
+#   # commands configures the twin's WRITE path: the ha_command tool dispatches
+#   # common commands (on/off/toggle/set, cover open/close, climate, media,
+#   # scene/script/button) on the same WebSocket the twin already uses, and
+#   # verifies the effect via HA's own context id.
+#   commands:
+#     # domains: active intent domains. Absent ⇒ every vocabulary domain
+#     # except siren; an explicit list is taken literally (empty list = none).
+#     # lock and alarm_control_panel are NEVER available through the twin
+#     # (PIN codes must never pass through transcripts/logs). A listed domain
+#     # unknown to the vocabulary produces a boot WARN and is ignored.
+#     # domains: ["light", "switch", "climate", "cover", "fan", "media_player", "scene", "script", "button"]
+#     verify_timeout: 5s      # sync-mode verification window (clamped 1s–30s, and bounded by the remaining turn deadline)
+#     max_targets: 20         # cap on entities per command (broader selectors are refused with the match count)
+#   # profiles gates the Twin's own tools (ha_state_query AND ha_command) per
+#   # profile name. If omitted entirely, a built-in default allows BOTH under
+#   # default and edit. An operator who declares this block explicitly without
+#   # the tools they want gets the normal fail-closed WARN instead.
+#   profiles:
+#     default:
+#       allow: ["ha_state_query", "ha_command"]
+#     edit:
+#       allow: ["ha_state_query", "ha_command"]
+
+# MCP profiles select, at boot, which tools are exposed to the agent and which
+# skills are injected into the system prompt. The active profile is resolved
+# with precedence: --profile flag > READY_MCP_PROFILE env > mcp_profile
+# (below) > the built-in "default". Switching profiles requires a daemon
+# restart.
+#
+# Ownership model: allow/deny rules do NOT live here. Each policy owner
+# (an MCP server, the HA digital twin, or READY's own built-in tools) declares
+# its own profiles.<name>.{allow,deny} block, keyed by that owner's wire name
+# (unprefixed — never the LLM-facing "<prefix>__<wire_name>" form):
+#   - mcp_servers.<key>.profiles.<name>   — see the home_assistant MCP server above
+#   - home_assistant.profiles.<name>      — the Twin's own tools (see above)
+#   - builtin_tools.profiles.<name>       — READY's internal tools (below)
+#
+# An owner that does not declare the active profile at all is fail-closed: it
+# contributes zero tools under that profile, plus a boot-time WARN naming the
+# owner and the missing profile. This block below carries the cross-cutting
+# concerns: inject_skills (affects the system prompt as a whole, not any one
+# owner's tool surface) and disclose_denied_tools.
+#
+# disclose_denied_tools (bool, default false): when true, the tool names this
+# profile's per-owner rules block are loaded into the agent's tool-name
+# resolver; a model call naming a blocked tool (exact, prefix-corrected, or
+# bare-wire form, when unambiguous) then receives a structured "policy wall"
+# observation — the tool exists, the active profile disallows it, do not seek
+# alternative routes, report the data as unreachable — instead of a generic
+# unregistered-tool failure that aborts the turn.
+#
+# Trade-off (operator's choice): enabling maps part of the gated surface —
+# the denied tool NAMES — to the model. With the flag false (default),
+# denied tools stay invisible and a hallucinated call fails exactly as it
+# does today. The flag never changes gating itself: which tools run, deny
+# precedence, wire-name matching, and fail-closed semantics are untouched.
+#
+# mcp_profile: default
+#
+# profiles:
+#   default:
+#     inject_skills: []
+#     disclose_denied_tools: false
+#   edit:
+#     inject_skills: ["home-provisioning"]
+#     disclose_denied_tools: true
+
+# builtin_tools gates READY's own internal tools (wait,
+# skills-load/unload, read-skill-asset, list-skill-assets, and future
+# internal packages such as the alert engine) — same shape and fail-closed
+# semantics as any other policy owner. If omitted entirely, a built-in
+# default allows everything under both default and edit (preserving
+# pre-refactor unconditional exposure).
+# builtin_tools:
+#   profiles:
+#     default:
+#       allow: ["*"]
+#     edit:
+#       allow: ["*"]
+
+# A run always uses its own writable runtime skill copy at <runtime home>/
+# skills/ (the runtime home is the directory holding the elected config —
+# see the config resolution chain section below). Relative paths resolve
+# against the runtime home, absolute ones as-is.
+skills:
+  path: skills/             # default: <runtime home>/skills/
+  hot_reload: true
+  # sync: auto               # skill library sync policy (default auto):
+                              #   auto   — apply shipped fixes to untouched files
+                              #   notify — only report pending updates
+                              #   off    — skip the sync entirely
+                              # Any other value fails boot.
+  # library_path:            # the shipped library the runtime copy is synced
+                              # from at boot (one file per file: operator edits
+                              # are never overwritten). Default:
+                              # <Install home>/library/skills/. Absolute paths
+                              # as-is; relative resolved against the runtime
+                              # home. The installer owns the library and
+                              # replaces it on every install; the daemon
+                              # never writes into it.
+
+# ── Conversation Sessions (one append-only JSONL file per Session) ──────────
+# A Conversation address (cli, telegram-<chat_id>) owns one current Session
+# plus ended ones. Each Session is ONE append-only JSONL file:
+#   <path>/<address>/<YYYY-MM-DDTHH-MM-SS>_<uuidv7>.jsonl
+# holding the full transcript (user messages, turn-context lines, tool calls
+# and results, replies) plus the records `turn_usage` (usage per Turn —
+# totals survive a restart), `compaction` and the closing `session_closed`.
+# No index: the current Session is the newest file without a closing record.
+# Tool results (entity states, logbook dumps) live in these files: keep the
+# directory access-controlled (created 0700, files 0600).
+# ⚠️ BREAKING: replaces checkpoints/ and plans/ — delete both once
+# (no migration). The removed keys persistence.{checkpoints_path,max_history,
+# plans_path,plan_ttl} fail boot with a message naming the replacement.
+#
+# Session commands (every channel, never reaching the model, FIFO behind the
+# Turn in flight): /new (start a new Session; "Session already new." when the
+# current one has no Turn) and /compact [instructions] (compact now).
+# ── How READY. finds its config (the resolution chain) ─────────────────────
+# Exactly one config file is elected, in strict order:
+#   1. the explicit --config flag (no fallback — a missing flagged file fails
+#      the run naming that path);
+#   2. ./.ready/config.yaml relative to the working directory;
+#   3. ~/.ready/config.yaml (the Install home) on Linux/macOS,
+#      %USERPROFILE%\.ready\config.yaml on Windows.
+# No settings are merged across sources. The **runtime home** — the directory
+# containing the elected config — is the root of every runtime path:
+# sessions/, skills/, the log segments under logging.file_path (as indicated
+# below), so a deployment-local run keeps its data next to its config and a
+# global-config run lives entirely inside the Install home. `ready serve` and
+# `ready login` both announce the elected config at start.
+# Note: the Install home's oauth/ default above is the exception — it never
+# follows a deployment config (per-user identity stays in the Install home).
+
+# ── Conversation Sessions (one append-only JSONL file per Session) ──────────
+sessions:
+  path: sessions/              # default: <runtime home>/sessions/
+  # reset: rule-based Session resets — never decided by a model, never run by
+  # a timer. mode: never | daily | idle | daily+idle.
+  #   daily: a Session whose last Turn precedes the latest daily_at boundary
+  #          (local HH:MM) is ended; idle: idle_after elapsed since the last
+  #          Turn. Compactions never count as activity.
+  # Message-oriented channels (Telegram) evaluate on the next message and send
+  # "New session started; the previous one was archived." when notify is on.
+  # Connection-oriented channels (ZMQ CLI) evaluate only when a new Connection
+  # begins (ready chat handshake), silently — a live TUI is never reset. The
+  # stdin CLI evaluates once, at its first message after start.
+  # Per-channel override: channels.<name>.session_reset (same fields).
+  reset:
+    mode: daily
+    daily_at: "04:00"
+    # idle_after: 6h   # required by the idle modes
+    notify: true
+  # retention: ended Sessions are deleted at boot and after every Session end
+  # (background): past retention_days calendar days (today included; 0 =
+  # delete at the next pass) by the file name's date, then oldest-first across
+  # addresses while their total exceeds max_total_size (B|KB|MB|GB, base
+  # 1024). A current Session is never deleted; only scheme-matching files are.
+  retention:
+    retention_days: 30
+    max_total_size: 200MB
+
+# ── Context compaction (automatic summary + verbatim tail) ──────────────────
+# After a Turn's reply is delivered (never delaying a reply or a Turn start),
+# when the prompt approaches the smallest context_window declared in the LLM
+# chain minus reserve_tokens — or, when no provider declares context_window,
+# after max_turns Turns since the last compaction — the auxiliary model chain
+# summarises the older Turns and a `compaction` entry is APPENDED (the file is
+# never rewritten). The model then sees the summary (plus the skills loaded
+# with skills-load, pinned verbatim) followed by the verbatim tail. A failed
+# compaction appends nothing, never fails a Turn, and backs off (skips 1, 2,
+# 4, 8 evaluations); meanwhile a Turn over the threshold runs on a projection
+# omitting its oldest Turns. Declare context_window on your providers: it
+# also enables the TUI ctx% and a precise trigger.
+compaction:
+  enabled: true              # automatic compaction; /compact works regardless
+  skill: home-compaction     # Compaction skill: its SKILL.md is the summary format
+                             # (hidden from the agent's catalog; generic fallback + WARN if missing)
+  reserve_tokens: 16384      # room left for the next Turn below the window
+  keep_recent_tokens: 20000  # verbatim tail kept by a token-mode compaction
+  max_turns: 20              # turn-count trigger when no context_window is declared
+  keep_recent_turns: 5       # verbatim tail kept by a turn-count compaction
+  # timeout bounds the summariser call. 180s is sized for LOCAL models: Gemma
+  # 31B on Apple Silicon needs ~30-80s to read ~16k tokens and ~75-150s to
+  # write a ~1.5k-token summary. Hosted models can use a much lower value.
+  timeout: 180s
+
+logging:
+  level: info          # trace | debug | info (default) | warn | error — level of the log file and,
+                       # unless console_level is set, of the console (stderr) log.
+                       # READY_LOG_LEVEL overrides BOTH sinks (no legacy alias is recognised).
+  # console_level: warn  # optional: console-only level (e.g. keep journald quiet while the file keeps debug);
+                         # "off" silences the console for services that read only the log file — fatal
+                         # records and log-file failure/recovery notices still appear on stderr
+  format: console      # console (default, human-readable; colours only when stderr is a terminal) | json
+  # file_path: ""      # optional: JSON log file, written as a rotating series of dated SEGMENTS in the
+                       # directory of file_path (created 0700 if missing), never at the literal path:
+                       #   logs/ready.log → ready-2026-09-30.log, ready-2026-09-30.1.log, ...
+                       # A directory is accepted too: "logs/" (trailing slash, or an existing
+                       # directory) means "logs/ready.log".
+                       # Rotation at local midnight or at max_segment_size (a record is never split);
+                       # segments are never renamed. Follow the newest one:
+                       #   tail -F "$(ls -t logs/ready-*.log | head -1)"
+                       # A <file_path>.lock file (e.g. ready.log.lock) guarantees ONE daemon per log
+                       # directory — a second ready serve on the same file_path fails at startup. Keep
+                       # the directory on a local filesystem (advisory locks are unreliable on NFS/SMB).
+                       # A pre-existing un-dated file at file_path is left untouched (boot WARN).
+  # file_rotation:     # bounds the segment series (ignored without file_path; always active with it)
+  #   max_segment_size: 10MB   # B | KB | MB | GB, base 1024 (bare integer = bytes)
+  #   retention_days: 7        # keep the last N local calendar days, today included (day read from the name)
+  #   max_total_size: 100MB    # total cap over all segments; oldest deleted first (future-dated first).
+  #                            # Must be >= max_segment_size; < 2x warns (almost no history).
+  #                            # Segments dated before 2025 (clock unset at boot) skip the day window
+  #                            # and are removed only by this cap. Only segment-named files are deleted.
+  # zmq_payloads_enabled: false  # default. When true (and level=debug), the
+                                 # zmq-listener / zmq-session scopes emit DEBUG
+                                 # lines containing request/response bodies and
+                                 # the per-connection nonce. The daemon's
+                                 # auth_token is NEVER logged regardless.
+  # thoughts: false              # opt-in: emit ReAct thought/decision/observation records at DEBUG level
+                                 # (requires logging.level=debug or trace). See the ReAct thought-logging docs.
+  # profile_decisions: false     # opt-in: emit one DEBUG log entry per tool at boot (and after each MCP
+                                 # reconnect) naming the owner, wire name, matched pattern, and effect
+                                 # (allow/deny/fail-closed). Independent of the dead-pattern boot WARNs,
+                                 # which are always emitted regardless of this flag.

@@ -1,0 +1,32 @@
+# Release: a tag push is the trigger. `git tag v0.1.0 && git push --tags`
+# publishes the GitHub Release with the platform archives, the example
+# config, the shipped skill library and checksums — nothing else, no manual
+# inputs, no secrets beyond the workflow's own GITHUB_TOKEN.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The changelog sees the full history.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,93 @@
+# goreleaser — release pipeline for ready (github.com/marco-rozz/ready).
+#
+# A release is a tag push: `git tag v0.1.0 && git push --tags` runs the
+# release workflow (.github/workflows/release.yml). Local pre-tag checks:
+# `goreleaser snapshot` (Makefile target `snapshot`).
+#
+# Composition (the extendable manifest knob is archive.files below): one
+# archive per platform with the binary at the archive root, the example
+# config, and the shipped skill library mapped to skills/. The installer
+# places the library at <Install home>/library/skills/ and the daemon copies
+# it into the runtime home at boot, per file.
+version: 2
+
+project_name: ready
+
+builds:
+  # linux: amd64 + arm64 keep the SHIFT+RETURN probe and are dynamically
+  # linked; arm (GOARM 6) carries the noshiftprobe tag and is statically
+  # linked. The tag removes only the physical-SHIFT probe of `ready chat`
+  # (purego's cgo_import_dynamic forces a dynamic ELF otherwise) — arm6
+  # boards are server-only, where statically linked is the requirement. A
+  # purego change breaking this fails the CI cross-build gate, not a release.
+  - id: linux
+    main: ./cmd
+    binary: ready
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64, arm]
+    goarm: ["6"]
+    overrides:
+      - goos: linux
+        goarch: arm
+        tags: noshiftprobe
+    ldflags: &ldflags
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+  - id: darwin
+    main: ./cmd
+    binary: ready
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    ldflags: *ldflags
+  - id: windows
+    main: ./cmd
+    binary: ready
+    env:
+      - CGO_ENABLED=0
+    goos: [windows]
+    goarch: [amd64]
+    ldflags: *ldflags
+
+archives:
+  - id: bundle
+    # unix tar.gz, windows zip.
+    formats: ["tar.gz"]
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+    # Version-free asset names (D16): ready_<os>_<arch>[.<ext>]; the linux
+    # GOARM 6 target is renamed ready_linux_armv6 so the installer's
+    # releases/latest/download/<asset> scheme has a fixed shape.
+    name_template: '{{- if and (eq .Os "linux") (eq .Arch "arm") -}}ready_linux_armv6{{- else -}}ready_{{ .Os }}_{{ .Arch }}{{- end -}}'
+    # The extendable bundle list. Skills land at skills/ inside the archive;
+    # the installer maps that to <Install home>/library/skills/.
+    files:
+      # the binary is included implicitly at the archive root
+      - src: config.example.yaml
+      - src: "resources/skills/**/*"
+        dst: skills
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  # The release target is declared explicitly so the config is self-contained
+  # (the public repo has no local git remote until its first push).
+  github:
+    owner: marco-rozz
+    name: ready
+  # Semver-suffixed tags (v0.2.0-rc1) become pre-releases, which the
+  # releases/latest/download/ URL (and the default installer) never select.
+  prerelease: auto
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - "^tasks:"
+      - "^chore:"

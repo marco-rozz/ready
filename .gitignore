@@ -1,0 +1,56 @@
+.idea
+.vscode
+.DS_Store
+.DS_Store?
+*.log
+*.trace
+*.rest
+.claude
+.pi
+.ignore
+CLAUDE.md
+AGENTS.md
+.env
+IGNORE
+# READY. runtime data (e/gitignore): sessions carry entity states, logs,
+# OAuth credentials and the personal runtime skill copy must never become
+# trackable. The tracked skill library lives in resources/skills/. Runtime
+# paths resolve against the elected config's directory (the runtime home),
+# so an explicit --config at the repo root puts sessions/ and skills/ next
+# to that config — i.e. right back under this .ready/ directory.
+# legacy runtime dir name (the pre-.ready era; operator deletes by hand)
+.home
+.ready
+ready
+ready.exe
+coverage.out
+config.yaml
+config2.yaml
+config3.yaml
+temp_description.md
+ready-landing
+HA_Backup
+/poc/
+/docs/
+/tasks/
+CONTEXT.md
+handoff-*.md
+
+# graphify knowledge graph output (regenerated locally, not product code)
+graphify-out/
+
+# ad-hoc Home Assistant extraction scripts and their offline snapshots
+extract_ha.py
+extract_ha_full.py
+ha_extract_devices.py
+homeassistant-devices.md
+# Python virtualenv
+.venv/
+
+cupola_2v.obj
+semi-sphera.py
+sphera.py
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+scratch/

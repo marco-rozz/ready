@@ -1,0 +1,82 @@
+# CI for ready: lint + race tests + the cross-build gate.
+#
+# The cross-build gate compiles the exact release build matrix (the same
+# GOOS/GOARCH/GOARM/tags/env as .goreleaser.yaml) — descriptive only: no
+# artifacts, no goreleaser release machinery. A matrix entry that fails to
+# compile fails CI before any tag is created.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          args: --issues-exit-code 1
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./... -race
+
+  cross-build:
+    # Compiles the exact release matrix; asserts the arm6 binary is really
+    # statically linked (the noshiftprobe tag must keep suppressing purego's
+    # cgo_import_dynamic). No artifacts are uploaded.
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: compile the release build matrix
+        run: |
+          set -euo pipefail
+          # GOOS GOARCH GOARM TAGS
+          matrix=(
+            "linux amd64 - -"
+            "linux arm64 - -"
+            "linux arm 6 noshiftprobe"
+            "darwin amd64 - -"
+            "darwin arm64 - -"
+            "windows amd64 - -"
+          )
+          for entry in "${matrix[@]}"; do
+            read -r os arch goarm tags <<<"$entry"
+            extra=""
+            if [ "$goarm" != "-" ]; then extra="GOARM=$goarm"; fi
+            tagflags=""
+            if [ "$tags" != "-" ]; then tagflags="-tags $tags"; fi
+            echo "::group::build $os/$arch $extra $tagflags"
+            # shellcheck disable=SC2086
+            env GOOS="$os" GOARCH="$arch" $extra \
+              go build $tagflags -o /tmp/ready-build -trimpath ./cmd
+            echo "::endgroup::"
+          done
+      - name: verify the linux/arm6 binary is statically linked
+        run: |
+          set -euo pipefail
+          GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=0 \
+            go build -tags noshiftprobe -o /tmp/ready-arm6 ./cmd
+          # grep exits non-zero (failing the step) unless `file` reports the
+          # binary as statically linked.
+          file /tmp/ready-arm6 | grep 'statically linked'
