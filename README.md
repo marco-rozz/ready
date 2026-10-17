@@ -1,12 +1,14 @@
 # READY.
 
-READY. is a home-automation assistant you host yourself: you talk to your
+![READY.](READY.png)
+
+`READY.` is a home-automation assistant you host yourself: you talk to your
 Home Assistant in natural language — from a terminal (over ZeroMQ), Telegram,
 WhatsApp, or a Commodore 64 over serial — and it turns the request into
 device commands that are **verified, not just dispatched**.
 
 Most of the value is in the answer to one question: *did it actually work?*
-READY. does not accept a command as done until Home Assistant's event stream
+`READY.` does not accept a command as done until Home Assistant's event stream
 confirms the effect on the target entity. Every command returns a per-entity
 outcome — `applied`, `pending`, `already`, `unchanged`, `unavailable`,
 `error` — and when anything goes wrong part-way, the reply says what may have
