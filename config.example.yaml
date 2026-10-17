@@ -245,6 +245,15 @@ channels:
     # long-lived interactive `chat` Connection to never be kicked out just for
     # sitting idle. (Renamed from session_timeout — the old key fails boot.)
     connection_idle_timeout: 15m
+    # Pending-reply safety net: bounds how long a Connection may sit with one
+    # reply in flight (the agent actively computing it) before a watchdog
+    # gives up and releases the session lock. It exists for a dead client or
+    # crashed dispatcher that never calls Send back. It must stay comfortably
+    # ABOVE the daemon's own agent budget + the post-step formatter budget, or
+    # it kills legitimately long-running requests too early; a value that is
+    # too low is clamped up automatically at boot with a WARN, so this is a
+    # ceiling for "give up sooner" tuning, not a floor. Default 400s.
+    # reply_timeout: 400s
     # Liveness heartbeat window (zmq-session-liveness). The TUI pings every
     # third of this (15s by default); when a heartbeating Connection's pings
     # stop — killed client, closed terminal window, laptop sleep — the
@@ -297,23 +306,16 @@ channels:
     formatter_skill: whatsapp-formatter
 
 mcp_servers:
-  # Primary Home Assistant MCP server (default configuration).
+  # Primary Home Assistant MCP server (current configuration): the private
+  # HA MCP partition at port 9583.
   # All tool names exposed to the LLM are prefixed with the server map key:
   # "home_assistant__light/turn_on", "home_assistant__climate/set_temperature", etc.
   # The wire name sent to HA remains unchanged ("light/turn_on").
   home_assistant:
-    url: http://homeassistant.local:8123/api/mcp
-    transport: streamable_http   # streamable_http (default) or sse
-    headers:
-      Authorization: "Bearer <token>"
-    timeout: 30s                 # per-request timeout (Initialize, ListTools, CallTool)
-    # tool_prefix:               # optional: controls the LLM-facing tool name prefix.
-    #   absent (default) → use server map key ("home_assistant")
-    #   "ha"             → use short alias  ("ha__light/turn_on")
-    #   ""               → no prefix at all ("light/turn_on", backward-compat)
-    # expected_tools:            # optional: warn-only check using wire names (without prefix)
-    #   - light/turn_on
-    #   - light/turn_off
+    url: http://homeassistant.local:9583/private_XXXXXXX
+    #url: http://192.168.100.10:9583/private_XXXXXXX
+    transport: streamable_http
+    timeout: 10s                 # per-request timeout (Initialize, ListTools, CallTool)
     reconnect:
       max_retries: 0             # 0 = infinite
       initial_backoff: 1s
@@ -322,24 +324,39 @@ mcp_servers:
     health_check:
       enabled: true
       interval: 30s
-    # profiles gates this server's own tools per profile name, keyed by wire
-    # name (unprefixed — NOT "home_assistant__light/turn_on"). An owner that
-    # does not declare the active profile at all is fail-closed: it
-    # contributes zero tools under that profile, plus a boot-time WARN. See
-    # "MCP profiles" below for the full ownership model.
-    #
-    # NOTE: the deny list below names the HA MCP read tools superseded by the
-    # digital twin's ha_state_query, and the write tools superseded by
-    # ha_command (see home_assistant: below, and the home-integration /
-    # home-topology skills). The exact wire names depend
-    # on the HA MCP server build in use — verify against your instance's
-    # actual tool catalog (e.g. `ready serve --profile edit` once, and inspect
-    # the "MCP tool" boot log lines) and adjust this list accordingly.
+    # Ownership per-profilo: senza questo blocco l'owner è fail-closed sotto
+    # `default` (0 tool + WARN). Sotto `default` neghiamo i read-tool superati
+    # dal digital twin (ha_state_query è la SSOT); sotto `edit` esponiamo tutto.
+    # ⚠️ Verifica i nomi wire effettivi dei tool nell'MCP HA in uso (ai primi
+    # boot controlla i log "MCP tool" e regola questa deny-list di conseguenza).
     profiles:
       default:
-        deny: ["get_state", "get_states", "get_history", "get_live_context"]
+        deny:
+          - "ha_get_state*"
       edit:
         allow: ["*"]
+
+  # DEPRECATED: the legacy public HA MCP add-on endpoint (/api/mcp). Kept only
+  # as commented reference; prefer the private partition block above.
+  # home_assistant:
+  #   url: http://homeassistant.local:8123/api/mcp
+  #   transport: streamable_http
+  #   headers:
+  #     Authorization: "Bearer <token>"
+  #   timeout: 30s
+  #   reconnect:
+  #     max_retries: 0
+  #     initial_backoff: 1s
+  #     max_backoff: 60s
+  #     backoff_factor: 2.0
+  #   health_check:
+  #     enabled: true
+  #     interval: 30s
+  #   profiles:
+  #     default:
+  #       deny: ["get_state", "get_states", "get_history", "get_live_context"]
+  #     edit:
+  #       allow: ["*"]
 
   # Example: second MCP server (e.g. a media player service).
   # Remove or comment out if you only have one MCP server.

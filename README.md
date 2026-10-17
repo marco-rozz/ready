@@ -1,14 +1,24 @@
 # READY.
 
-An agentic system written in Go for home automation management through
-multi-channel interfaces (CLI over ZeroMQ, Serial/PETSCII for a Commodore 64,
-Telegram, WhatsApp). The daemon acts as an orchestrator between the user and
-Home Assistant: an LLM executes tasks via the **ReAct** pattern (Thought →
-Action → Observation) with native tool calling, integrating with Home
-Assistant through the Model Context Protocol and an always-on WebSocket
-digital twin. Any provider works — Ollama (local), OpenRouter, OpenCode, an
-experimental ChatGPT (Codex subscription) OAuth provider — configured as a
-failover chain.
+READY. is a home-automation assistant you host yourself: you talk to your
+Home Assistant in natural language — from a terminal (over ZeroMQ), Telegram,
+WhatsApp, or a Commodore 64 over serial — and it turns the request into
+device commands that are **verified, not just dispatched**.
+
+Most of the value is in the answer to one question: *did it actually work?*
+READY. does not accept a command as done until Home Assistant's event stream
+confirms the effect on the target entity. Every command returns a per-entity
+outcome — `applied`, `pending`, `already`, `unchanged`, `unavailable`,
+`error` — and when anything goes wrong part-way, the reply says what may have
+run, so a failed request never invites a blind repeat. If the LLM provider
+dies mid-turn, the failover chain (Ollama, OpenRouter, OpenCode, or an
+experimental ChatGPT/Codex-OAuth provider) resumes from the recorded
+transcript without re-executing the actions already completed.
+
+Under the hood it is a Go daemon orchestrating an LLM through the **ReAct**
+pattern (Thought → Action → Observation) with native tool calling, connected
+to Home Assistant via the Model Context Protocol plus an always-on WebSocket
+digital twin that mirrors every entity state and registry in memory.
 
 ## Install
 
@@ -61,8 +71,6 @@ Notes:
 - The SHA256 verification of every download guards **integrity** (corruption,
   truncated downloads), not authenticity: the trust root is the GitHub
   repository and TLS.
-- The old `READY` command name is gone: the binary is lowercase `ready`
-  (Windows `ready.exe`); the READY. brand stays in the UI.
 
 ## How READY. finds its config
 
@@ -118,12 +126,66 @@ skills:
                                          # against the runtime home
 ```
 
+## Configure before first use (required)
+
+The daemon ships no usable default brain — it will not start a useful
+conversation until **you** tell it which LLM provider to talk to. This is
+the one mandatory, hand-made configuration step, and it happens before the
+first `ready serve`:
+
+1. Open the elected config file (see the section below — usually the copy
+   the installer created at `~/.ready/config.yaml`).
+2. Edit the `llm:` block: declare at least one **provider instance**
+   under `llm.providers` (type, wire `api`, `base_url`, credentials) and
+   point `llm.default` at it as `<provider-instance>::<model-id>`, e.g.
+   `"ollama-gemma::gemma4:31b"`. Every key is commented in
+   [config.example.yaml](config.example.yaml), including the failover
+   chain and the experimental ChatGPT/Codex provider
+   (`ready login llm:<name>`).
+3. Restart `ready serve`. Without this, the daemon boots in the
+   `LLM unavailable` state and every request fails until a provider
+   answers.
+
+### The `home_assistant:` block (the digital twin — not the MCP server)
+
+The **root** `home_assistant:` block is *not* the MCP server entry under
+`mcp_servers:` (that one is deprecated — see the commented reference in
+`config.example.yaml`). It is the **digital twin**: an always-on WebSocket
+connection to your Home Assistant that keeps an in-memory mirror of every
+entity state and registry, and serves the agent two dedicated tools:
+
+- `ha_state_query` — reads the mirror (entities, areas) with freshness
+  signals attached (`twin_connected`, `last_ws_activity_ago_seconds`,
+  `stale`); past the hard-stale threshold it refuses to serve rather than
+  showing you an old house.
+- `ha_command` — commands devices on the same live connection and **verifies**
+  the effect against Home Assistant's own state event stream, per entity:
+  `applied`, `pending`, `already`, `unchanged`, `unavailable`, `error`.
+  "Done" means observed, not merely sent.
+
+Under the default profile the twin is the **only** read path: the MCP read
+supersede tools are denied, so the agent cannot answer from a stale mirror
+it never checked. Enable and configure it (WebSocket `url` + long-lived
+`token`, thresholds, command domains in the `home_assistant.commands`
+section of `config.example.yaml`) before relying on anything that changes
+your home. The config is read at boot — enabling it later requires a
+daemon restart.
+
+### Not sure what goes where? Ask READY. itself.
+
+Once the LLM/provider block is working, the shipped skill
+**`ready-guide`** knows the full configuration surface (channels, profiles,
+sessions, compaction, tuning, troubleshooting). Chat with the daemon
+(`ready chat`) and ask, for example: *"help me enable and configure the
+digital twin"* or *"walk me through adding Telegram"*. The assistant loads
+the matching section and walks you through it one YAML block at a time.
+
 ## Environment variables
 
 | Variable | Meaning |
 |---|---|
 | `READY_ADDR` | fallback for `ready chat --address` (default `tcp://127.0.0.1:7600`) |
-| `READY_TOKEN` | fallback for `ready chat --token` (prompted on a TTY when unset) |
+| `READY_TOKEN` | fallback for `ready chat --token` (unset: the token stays empty and the HMAC handshake fails against a configured daemon secret; use `--token-file`) |
 | `READY_MCP_PROFILE` | fallback for `serve --profile` (`default` / `edit` / custom) |
 | `READY_LOG_LEVEL` | forces the log level of both sinks (`serve` only) |
 | `READY_LOGO` | the `ready chat` logo presentation: `auto` (default) / `png` / `glyph` / `off` |
@@ -137,7 +199,7 @@ launcher environment accordingly.
 - **`ready serve [--config <path>] [--mock-mcp]`** — the long-lived daemon.
   `--config` is optional (the resolution chain applies). `--mock-mcp` selects
   the in-process MCP mock for local development.
-- **`ready chat --address <addr> [--token T] [--exec MSG] [--timeout 120s] [--raw]`**
+- **`ready chat --address <addr> [--token T] [--token-file F] [--exec MSG] [--reply-timeout 900s] [--raw]`**
   — the terminal client (Bubble Tea TUI, markdown rendering, usage and model
   status in the status line; `/session` and `/context` are reserved commands).
 - **`ready login [mcp:<server>|llm:<provider>] [--config <path>] [--status] [--forget] [--device-code]`**

@@ -1,12 +1,15 @@
 # READY.
 
-> An agentic home-automation daemon in Go: it orchestrates Home Assistant
-> through an LLM using the ReAct pattern with native tool calling, exposed
-> over a terminal client (ZeroMQ), PETSCII serial for a Commodore 64,
-> Telegram and WhatsApp. Any provider works — Ollama, OpenRouter, OpenCode and
-> an experimental ChatGPT (Codex subscription) OAuth provider — wired as a
-> live failover chain. Home-lab operators on Raspberry Pi, macOS and Windows
-> install it with one command:
+> A self-hosted home-automation assistant for Home Assistant, in Go: it executes
+> natural-language requests as device commands that are verified against the
+> event stream (per-entity outcome: applied / pending / already / unchanged /
+> unavailable / error), not blind tool-call forwarding. Channels: a terminal
+> client over ZeroMQ, PETSCII serial to a Commodore 64, Telegram and WhatsApp.
+> LLM providers — Ollama, OpenRouter, OpenCode and an experimental ChatGPT
+> (Codex subscription) OAuth provider — form a failover chain that resumes a
+> failed turn from the transcript without re-running completed actions.
+> Home-lab operators on Raspberry Pi, macOS and Windows install it with one
+> command:
 > `curl -fsSL https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.sh | bash`
 > (Windows: `irm https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.ps1 | iex`).
 

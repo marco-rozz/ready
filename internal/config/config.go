@@ -460,7 +460,7 @@ type ZMQCLIChannelConfig struct {
 	// without a message from the active client, the daemon releases the
 	// session lock and emits Response{Status:"error", ErrorCode:"session_timeout"}.
 	// Default: 15m.
-	ConnectionIdleTimeout time.Duration `yaml:"session_timeout"`
+	ConnectionIdleTimeout time.Duration `yaml:"connection_idle_timeout"`
 	// ReplyTimeout is a safety net, separate from SessionTimeout: it bounds
 	// how long a session may sit with a reply pending (the agent is actively
 	// computing) before the watchdog gives up on it and releases the lock —
