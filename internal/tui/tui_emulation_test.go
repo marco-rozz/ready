@@ -22,7 +22,7 @@ import (
 	"github.com/marco-rozz/ready/internal/protocol"
 )
 
-// Tasks 4.1–4.3 (tui-scrollback-transcript change: the applicable decision records): validate the
+// These tests validate the
 // Pi Agent layout at the terminal-stream level — the automated counterpart of
 // the manual checklist. A real tea.Program runs the production Model over a
 // real pty (the app attaches to the pty SLAVE, its "terminal"; the harness

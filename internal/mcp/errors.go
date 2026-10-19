@@ -12,7 +12,7 @@ import (
 
 // Sentinel errors for MCP failure categories.
 //
-// These wrap the categories listed in the Phase 2 spec and let the agent
+// These wrap the categories below and let the agent
 // surface user-friendly natural-language responses regardless of the underlying
 // transport library. Errors are wrapped with %w so callers can use errors.Is.
 var (

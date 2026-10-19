@@ -26,7 +26,7 @@ type Manager struct {
 	logger   zerolog.Logger
 
 	// stopOnce makes Stop idempotent (criticalities-remediation LOW
-	// lifecycle / component-lifecycle spec): a second call must be a no-op —
+	// lifecycle): a second call must be a no-op —
 	// close(m.incoming) would otherwise panic on the second Stop.
 	stopOnce sync.Once
 }
@@ -62,8 +62,7 @@ func (m *Manager) Start() error {
 }
 
 // receiveLoop continuously reads from a channel and forwards messages to the incoming queue.
-// criticalities-remediation (LOW lifecycle, component-lifecycle spec): a
-// TRANSIENT receive error (network blip, long-poll hiccup) is logged and the
+// A TRANSIENT receive error (network blip, long-poll hiccup) is logged and the
 // loop continues with a short backoff — a single transient error must not
 // leave a channel permanently deaf. The loop exits only on context
 // cancellation (graceful shutdown).

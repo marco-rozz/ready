@@ -21,7 +21,7 @@
 //     [NewTurnID] so untrusted content cannot forge a closing tag. This
 //     keeps the assembled user-message bytes identical to what is
 //     persisted, which is required for the KV-cache warm-start prefix
-//     to survive across turns (the kv-cache-warm-start).
+//     to survive across turns.
 //     3. The formatter skill is marked Active in the per-session
 //     agentskills session so the progressive-disclosure metadata
 //     catalog does not list it (no duplicate signal to the LLM).

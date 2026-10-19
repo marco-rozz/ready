@@ -13,8 +13,8 @@ import (
 )
 
 // TestIntegration_ProgressThenTerminalReply_ExactlyOnce is the channel-level
-// regression test for llm-outage-delivery task 3.4 (spec scenario "ZMQ
-// terminal reply consumes the pending slot exactly once"): a turn that
+// regression test for terminal delivery (a ZMQ terminal reply
+// consumes the pending slot exactly once): a turn that
 // streamed progress chunks and then failed must deliver exactly one final
 // reply carrying the terminal message — the progress notifications must not
 // consume the pending reply slot, and a second Send must be dropped.

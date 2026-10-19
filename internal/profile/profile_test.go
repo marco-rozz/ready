@@ -226,7 +226,7 @@ func TestGateOwner_FailClosedWhenProfileMissing(t *testing.T) {
 		t.Fatalf("expected zero tools (fail-closed), got %d", len(kept))
 	}
 
-	// Fail-closed owners contribute no disclosure data (mcp-profiles spec).
+	// Fail-closed owners contribute no disclosure data.
 	if len(blocked) != 0 {
 		t.Errorf("expected empty blocked set on fail-closed, got %v", blocked)
 	}

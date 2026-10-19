@@ -7,14 +7,20 @@ import (
 )
 
 func codexConfig() *Config {
-	return &Config{LLM: LLMConfig{
-		Default:  "codex-work::gpt-5-codex",
-		Failover: []string{"codex-personal::gpt-5-codex"},
-		Providers: map[string]LLMProviderConfig{
-			"codex-work":     {Provider: ProviderOpenAICodex, API: APIResponses},
-			"codex-personal": {Provider: ProviderOpenAICodex, API: APIResponses},
+	return &Config{
+		LLM: LLMConfig{
+			Default:  "codex-work::gpt-5-codex",
+			Failover: []string{"codex-personal::gpt-5-codex"},
+			Providers: map[string]LLMProviderConfig{
+				"codex-work":     {Provider: ProviderOpenAICodex, API: APIResponses},
+				"codex-personal": {Provider: ProviderOpenAICodex, API: APIResponses},
+			},
 		},
-	}}
+		// Pin the channels default off: these tests assert on the LLM provider
+		// surface only, and an unconfigured channels block now defaults to
+		// zmqcli enabled (which requires an auth token at validation time).
+		Channels: ChannelsConfig{ZMQCLI: ZMQCLIChannelConfig{Enabled: false}, zmqCLIEnabledSet: true},
+	}
 }
 
 func TestValidateOpenAICodexProviders(t *testing.T) {

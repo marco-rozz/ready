@@ -229,7 +229,7 @@ func (o *Orchestrator) Wait() {
 // candidate's llm.PromptLayout is always the one its messages were built
 // for.
 //
-// ResumeReady (session-transcript-persistence §D10) reports, from the live
+// ResumeReady reports, from the live
 // in-memory session transcript, that no tool-call group is open — every
 // recorded tool call has its recorded result — so a retry or failover can
 // resume from the last complete group without re-executing a tool. nil keeps
@@ -418,7 +418,7 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 
 	// Chain exhaustion (task 3.5): a distinct sentinel wrapping the last
 	// candidate's error so errors.Is matches llm.ErrChainExhausted while
-	// errors.Unwrap walks to the last candidate's error (spec: the underlying
+	// errors.Unwrap walks to the last candidate's error (the underlying
 	// cause stays inspectable).
 	if lastErr == nil {
 		lastErr = errors.New("no eligible LLM candidate") // wrapped into ErrChainExhausted below
@@ -762,7 +762,7 @@ func (o *Orchestrator) nextCandidate(ts *turnState) int {
 }
 
 // countUntried counts the candidates still untried in this turn's walk,
-// including the one about to be attempted (spec: remaining deadline / untried
+// including the one about to be attempted (remaining deadline / untried
 // candidates).
 func (o *Orchestrator) countUntried(ts *turnState) int {
 	count := 0

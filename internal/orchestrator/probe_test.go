@@ -44,7 +44,7 @@ const (
 
 // ── The synthetic no-op tool ───────────────────────────────────────────────
 
-// Task 4.1/4.5: the probe tool's shape and side-effect freedom.
+// The probe tool's shape and side-effect freedom.
 func TestProbeNoopTool(t *testing.T) {
 	tool := &probeNoopTool{}
 
@@ -81,7 +81,7 @@ func probeOrchWithModel(m *probeMockModel) *Orchestrator {
 	return o
 }
 
-// Task 4.1: a tool-capable model completes the synthetic tool-call exchange
+// A tool-capable model completes the synthetic tool-call exchange
 // and passes the probe.
 func TestProbeCandidate_ToolCapableSucceeds(t *testing.T) {
 	o := probeOrchWithModel(&probeMockModel{behavior: 0})
@@ -91,7 +91,7 @@ func TestProbeCandidate_ToolCapableSucceeds(t *testing.T) {
 	}
 }
 
-// Task 4.9 spec scenario: a text-capable but tool-incompatible model fails
+// A text-capable but tool-incompatible model fails
 // the probe — text-only capability is insufficient.
 func TestProbeCandidate_TextOnlyFails(t *testing.T) {
 	o := probeOrchWithModel(&probeMockModel{behavior: 1})
@@ -105,7 +105,7 @@ func TestProbeCandidate_TextOnlyFails(t *testing.T) {
 	}
 }
 
-// Task 4.9: a provider error during the probe fails it.
+// A provider error during the probe fails it.
 func TestProbeCandidate_ProviderErrorFails(t *testing.T) {
 	o := probeOrchWithModel(&probeMockModel{behavior: 2})
 
@@ -124,7 +124,7 @@ func contains(s, sub string) bool {
 	return false
 }
 
-// Task 4.5: the probe is isolated — it carries no user history, no production
+// The probe is isolated — it carries no user history, no production
 // tools, no Home Assistant data, and has no side effects. Verified through a
 // mock model that records everything it is asked.
 func TestProbeIsolation(t *testing.T) {
@@ -175,7 +175,7 @@ func toolNames(tools []*schema.ToolInfo) []string {
 	return names
 }
 
-// Task 4.9: the probe covers the agentic (`responses`) construction path —
+// The probe covers the agentic (`responses`) construction path —
 // the same synthetic exchange over a model.AgenticModel.
 func TestProbeCandidate_AgenticPath(t *testing.T) {
 	mock := &mockAgenticProbeModel{}
@@ -233,7 +233,7 @@ func (m *mockAgenticProbeModel) Stream(ctx context.Context, input []*schema.Agen
 	return schema.StreamReaderFromArray([]*schema.AgenticMessage{msg}), nil
 }
 
-// Task 4.8/4.9: buildProbeRunner selects the right construction path per
+// buildProbeRunner selects the right construction path per
 // protocol kind — chat for ToolCallingChatModel, agentic for AgenticModel —
 // covering every configured wire API's probe shape.
 func TestBuildProbeRunner_ProtocolPaths(t *testing.T) {
@@ -449,7 +449,7 @@ func bootTestOrch(t *testing.T, authFailFirst bool) (*Orchestrator, *atomic.Int3
 	return o, calls0
 }
 
-// Task 4.6 spec scenarios: the default passes readiness and later candidates
+// The default passes readiness and later candidates
 // are left unproven (never probed at boot).
 func TestBoot_LazyUntilFirstReady(t *testing.T) {
 	o, firstChatCalls := bootTestOrch(t, false)
@@ -471,7 +471,7 @@ func TestBoot_LazyUntilFirstReady(t *testing.T) {
 	}
 }
 
-// Task 4.6 spec scenario: the default fails readiness (auth) and the first
+// The default fails readiness (auth) and the first
 // fallback is ready → the daemon starts with the fallback active.
 func TestBoot_DefaultFailsFallbackReady(t *testing.T) {
 	o, firstChatCalls := bootTestOrch(t, true)
@@ -490,7 +490,7 @@ func TestBoot_DefaultFailsFallbackReady(t *testing.T) {
 	}
 }
 
-// Task 3.12-adjacent boot logging sanity: Boot on an all-failing chain does
+// Boot logging sanity: Boot on an all-failing chain does
 // not error (the daemon starts unavailable) — covered fully in
 // TestBoot_NoCandidateReadyStartsUnavailable in orchestrator_test.go.
 func TestBoot_AllFailNoError(t *testing.T) {

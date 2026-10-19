@@ -261,7 +261,7 @@ func NewChannel(
 		return nil, fmt.Errorf("zmqcli: create listener: %w", err)
 	}
 
-	// The nonce TTL is 2 × connection_idle_timeout per the auth spec.
+	// The nonce TTL is 2 × connection_idle_timeout.
 	nonceTTL := 2 * cfg.ConnectionIdleTimeout
 	challenges := zmqtransport.NewChallengeStore(secret, nonceTTL, payloadsEnabled, sessionLogger)
 

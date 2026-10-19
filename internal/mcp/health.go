@@ -191,7 +191,7 @@ func (h *HealthMonitor) Start(ctx context.Context) {
 // Stop signals the monitor to terminate and waits for the goroutine to exit.
 // criticalities-remediation (M5): safe to call before Start — construction-
 // time error paths must be able to clean up without deadlock (the
-// component-lifecycle spec's "Stop before Start is safe" requirement).
+// the "Stop before Start is safe" requirement).
 func (h *HealthMonitor) Stop() {
 	h.stopOnce.Do(func() {
 		close(h.stop)

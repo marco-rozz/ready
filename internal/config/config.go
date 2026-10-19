@@ -37,6 +37,7 @@ const (
 
 // Config is the root configuration structure for the agent.
 type Config struct {
+	ConfigVersion int                        `yaml:"config_version"`
 	LLM           LLMConfig                  `yaml:"llm"`
 	Channels      ChannelsConfig             `yaml:"channels"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
@@ -433,6 +434,58 @@ type ChannelsConfig struct {
 	ZMQCLI   ZMQCLIChannelConfig   `yaml:"zmqcli"`
 	Serial   SerialChannelConfig   `yaml:"serial"`
 	Telegram TelegramChannelConfig `yaml:"telegram"`
+
+	// zmqCLIEnabledSet records whether the operator explicitly wrote
+	// channels.zmqcli.enabled in the YAML (set by UnmarshalYAML). applyDefaults
+	// uses it so the zmq-first default never overrides an explicit
+	// `enabled: false`. Zero for direct (in-memory) constructions.
+	zmqCLIEnabledSet bool
+}
+
+// UnmarshalYAML decodes the channels block and records whether the zmqcli
+// section carried an explicit `enabled` key, so the zmq-first default
+// applied by applyDefaults (zmqcli on when a token is configured, legacy
+// cli off) never overrides an explicit operator choice.
+func (c *ChannelsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawChannelsConfig ChannelsConfig // strips the UnmarshalYAML method
+	var raw rawChannelsConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	*c = ChannelsConfig(raw)
+	c.zmqCLIEnabledSet = mappingKeyPresent(value, "zmqcli", "enabled")
+
+	return nil
+}
+
+// mappingKeyPresent reports whether the mapping node carries a `section` key
+// whose value is a mapping containing a `key` entry (e.g. channels.zmqcli.enabled).
+func mappingKeyPresent(node *yaml.Node, section, key string) bool {
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value != section {
+			continue
+		}
+
+		sub := node.Content[i+1]
+		if sub.Kind != yaml.MappingNode {
+			return false
+		}
+
+		for j := 0; j+1 < len(sub.Content); j += 2 {
+			if sub.Content[j].Value == key {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	return false
 }
 
 // ZMQCLIChannelConfig holds settings for the ZMQ-attached CLI channel. When
@@ -854,9 +907,24 @@ func Load(ctx context.Context, path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	return decodeConfig(ctx, data, path, TargetConfigVersion)
+}
+
+// decodeConfig keeps runtime-only defaults and resolved secrets out of the YAML document.
+func decodeConfig(ctx context.Context, data []byte, path string, target int) (*Config, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("failed to decode config %s: %w", path, err)
+	}
+	_, version, err := parseVersion(data, path)
+	if err != nil {
+		return nil, err
+	}
+	if err = checkVersion(path, version, target); err != nil {
+		return nil, err
+	}
 	var cfg Config
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+		return nil, fmt.Errorf("failed to parse config %s (check field types): %w: %w", path, ErrInvalidConfigDocument, &privateConfigError{message: "YAML field decoding failed", cause: err})
 	}
 
 	cfg.legacyProfileFields = detectLegacyProfileFields(data)
@@ -1131,7 +1199,7 @@ func (c *Config) validateLLM() error {
 	}
 
 	// Provider instance names MUST NOT contain '::' so a reference is
-	// unambiguous (the design doc / spec: Provider identifiers).
+	// unambiguous (provider identifiers).
 	for name := range c.LLM.Providers {
 		if strings.Contains(name, modelRefSeparator) {
 			return fmt.Errorf("llm.providers.%s: provider instance name must not contain '::'", name) // user-facing config error
@@ -1174,7 +1242,7 @@ func (c *Config) validateLLM() error {
 	}
 
 	// validProviderAPIs is the per-provider wire-protocol allow-list (design
-	// D8 / spec: Wire protocol selection): `api` is required on every
+	// Wire protocol selection: `api` is required on every
 	// instance and only the documented values are accepted per provider type.
 	// The same `api` value on different provider types selects different
 	// eino components (opencode chat_completions → eino-ext/openai,
@@ -1529,6 +1597,21 @@ func (c *Config) applyDefaults() {
 
 	if c.Channels.Serial.BaudRate == 0 {
 		c.Channels.Serial.BaudRate = 9600
+	}
+
+	// Channel default (zmq-first): cli and zmqcli are mutually exclusive and
+	// share the logical channel name "cli". When the operator does not set
+	// channels.zmqcli.enabled explicitly, the daemon enables the ZMQ CLI
+	// channel (the `ready chat` interface) and keeps the legacy stdin CLI off
+	// as soon as a shared secret is configured (auth_token or
+	// auth_token_file) — configuring the token is the opt-in signal, so a
+	// minimal config (e.g. for `ready login`, which never touches channels)
+	// still boots without a ZMQ secret. An explicit channels.cli.enabled:
+	// true suppresses the default; an explicit channels.zmqcli.enabled:
+	// false is always honoured.
+	if !c.Channels.zmqCLIEnabledSet && !c.Channels.CLI.Enabled &&
+		(c.Channels.ZMQCLI.AuthToken != "" || c.Channels.ZMQCLI.AuthTokenFile != "") {
+		c.Channels.ZMQCLI.Enabled = true
 	}
 
 	if c.Channels.ZMQCLI.Bind == "" {

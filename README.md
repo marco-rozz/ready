@@ -2,34 +2,37 @@
 
 ![READY.](READY.png)
 
-It is a home-automation assistant you host yourself: you talk to your
-Home Assistant in natural language — from a terminal (over ZeroMQ), Telegram,
-or a Commodore 64 over serial — and it turns the request into
-device commands that are **verified, not just dispatched**.
+READY. is a home-automation assistant you host yourself, built on one rule
+that shapes every feature: **never claim what it hasn't observed.**
 
-Most of the value is in the answer to one question: *did it actually work?*
+You talk to your Home Assistant in natural language — from a terminal (over
+ZeroMQ), Telegram, or a Commodore 64 over serial — and READY. turns the
+request into device commands. Most assistants stop there. READY. never
+mistakes *sent* for *done*: an **always-on WebSocket digital twin** mirrors
+every entity state and registry in memory, and a command counts as done only
+when Home Assistant's own event stream confirms the effect — per entity:
+`applied`, `pending`, `already`, `unchanged`, `unavailable`, `error`.
+*Did it actually work?* is answered by observation, never by assumption.
 
-`READY.` does not accept a command as done until Home Assistant's event stream
-confirms the effect on the target entity.
-Every command returns a per-entity outcome — `applied`, `pending`, `already`,
-`unchanged`, `unavailable`, `error` — and when anything goes wrong part-way,
-the reply says what may have run, so a failed request never invites a blind
-repeat.
-
-If the LLM provider dies mid-turn, the failover chain (Ollama, OpenRouter,
+The same rule holds when things go wrong. If the twin's view of your home
+goes stale, READY. refuses to answer from it rather than show you a house
+that no longer exists. If a turn fails part-way, the reply states what may
+have already run, so a failed request never invites a blind repeat. And if
+the LLM provider dies mid-turn, the failover chain (Ollama, OpenRouter,
 OpenCode, or an experimental ChatGPT/Codex-OAuth provider) resumes from the
 recorded transcript without re-executing the actions already completed.
 
 Under the hood it is a Go daemon orchestrating an LLM through the **ReAct**
 pattern (Thought → Action → Observation) with native tool calling, connected
-to Home Assistant via the Model Context Protocol plus an **always-on WebSocket
-digital twin** that mirrors every entity state and registry in memory.
+to Home Assistant via the Model Context Protocol and the digital twin above.
 
 > **💡 Runs even on a 2014 Raspberry Pi.** The release matrix includes a
 > statically linked `linux/arm/v6` build (`CGO_ENABLED=0`) — an old single-board
 > computer with an **ARMv6** processor is enough to host the READY. daemon
 > (the LLM itself can live on another machine). No glibc loader, no modern
-> hardware required: see the [Install](#install) notes below.
+> hardware required: see the [Install](#install) notes below. First start on
+> such slow storage can sit in complete silence for tens of seconds before
+> the banner — that is normal, not a hang (see `ready-guide` → troubleshooting).
 
 ## Install
 
@@ -66,7 +69,7 @@ data; asks for confirmation unless `--yes`). Pin a version with the `VERSION`
 environment variable:
 
 ```bash
-VERSION=v0.1.2 curl -fsSL https://raw.githubusercontent.com/marco-rozz/ready/v0.1.2/scripts/install.sh | bash
+VERSION=v0.2.0 curl -fsSL https://raw.githubusercontent.com/marco-rozz/ready/v0.2.0/scripts/install.sh | bash
 ```
 
 Notes:
@@ -108,6 +111,13 @@ the runtime home.
 (the daemon logs it at INFO and warns — never fails — when it is readable by
 group or others on unix; `login` prints `using config <path>` as its first
 line), so a login run from the wrong directory is visible immediately.
+
+Every config requires `config_version: 1`, independently of the READY release
+version. Future schema upgrades run automatically in `ready serve`, with
+validation, backup and atomic replacement. `login` never migrates config; an
+older schema produces a same-file `serve` command. See
+[configuration versions and recovery](docs/config-versioning.md) for the
+version rules, backup policy and migration-author checklist.
 
 ### Install home layout
 
@@ -154,9 +164,15 @@ first `ready serve`:
    [config.example.yaml](config.example.yaml), including the failover
    chain and the experimental ChatGPT/Codex provider
    (`ready login llm:<name>`).
-3. Restart `ready serve`. Without this, the daemon boots in the
-   `LLM unavailable` state and every request fails until a provider
-   answers.
+3. Set the shared secret of the `ready chat` channel: `zmqcli` is the
+   default operator interface and turns on as soon as a secret is
+   configured. Generate one with `openssl rand -hex 32`, store it in a file
+   and point `channels.zmqcli.auth_token_file` at it (preferred over the
+   inline `auth_token`). Without a secret, and without another enabled
+   channel such as Telegram, `ready serve` refuses to start.
+4. Start (or restart) `ready serve`. Without a working provider the daemon
+   boots in the `LLM unavailable` state and every request fails until a
+   provider answers.
 
 ### The `home_assistant:` block (the digital twin — not the MCP server)
 
@@ -244,8 +260,13 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
 - `llm.providers` + `llm.default` / `llm.failover` — named provider
   connections referenced as `<provider>::<model>`; the failover chain is
   walked live at runtime with health tracking and cooldown ladders.
-- `channels` — `cli` (stdin) or `zmqcli` (for `ready chat`), `telegram`,
-  `serial`; each may carry a `formatter_skill`.
+- `channels` — `zmqcli` (for `ready chat`) or `cli` (stdin) — mutually
+  exclusive, zmqcli is the default: it turns on automatically as soon as a
+  shared secret (`auth_token`, preferably `auth_token_file`) is configured
+  and no explicit `enabled` key is set; `telegram`, `serial` — each channel
+  may carry a `formatter_skill`. By default zmqcli binds to loopback
+  (`tcp://127.0.0.1:7600`); to reach the daemon from other hosts bind a LAN
+  interface (e.g. `tcp://0.0.0.0:7600`).
 - `mcp_servers` — Home Assistant (or any MCP server), Streamable HTTP by
   default, per-server tool prefixing, reconnect/health knobs, OAuth.
 - `home_assistant` — the always-on digital twin behind the
@@ -261,7 +282,9 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
 
 Credentials (provider keys, ZMQ HMAC token, OAuth secrets) live in
 `config.yaml` (`0600`, created by the installer as a copy of the example
-config) or in files referenced by `*_file` keys.
+config) or in files referenced by `*_file` keys — prefer the `*_file`
+variants where available (e.g. `channels.zmqcli.auth_token_file`), so the
+secret never ends up in a backed-up or copied-around YAML.
 
 ## Development
 

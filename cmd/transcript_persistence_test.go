@@ -26,7 +26,7 @@ import (
 	"github.com/marco-rozz/ready/internal/persistence"
 )
 
-// This file exercises session-transcript-persistence end to end through
+// This file exercises session transcript persistence end to end through
 // processMessage → orchestrator → agent.Agent → Eino's tools node: groups are
 // persisted mid-turn, a failed turn leaves a resumable transcript without the
 // terminal string, a retry resumes from the grown history without
@@ -228,7 +228,7 @@ func cliMsg(text string) channel.Message {
 	return channel.Message{ChannelName: testCLIChannelName, Content: text}
 }
 
-// Spec "Tool iteration persisted as it happens": the completed group is on
+// A tool iteration is persisted as it happens: the completed group is on
 // disk before the next model call begins; the final reply closes the turn.
 func TestTranscript_StreamingToolTurnPersistsGroupsMidTurn(t *testing.T) {
 	buf := &termBuffer{}
@@ -267,8 +267,8 @@ func TestTranscript_StreamingToolTurnPersistsGroupsMidTurn(t *testing.T) {
 	}
 }
 
-// Spec "Terminal message is not transcript" + "Crash mid-turn leaves a
-// resumable transcript": a turn failing after a complete group persists the
+// The terminal message is not transcript, and a crash mid-turn leaves a
+// resumable transcript: a turn failing after a complete group persists the
 // group, never the terminal string, and restores to a valid prompt.
 func TestTranscript_FailedTurnLeavesResumableTranscript(t *testing.T) {
 	buf := &termBuffer{}
@@ -334,7 +334,7 @@ func countTurnContexts(msgs []*schema.Message) int {
 	return n
 }
 
-// Spec "Resume after recorded tool-call groups continues the loop": a
+// Resume after recorded tool-call groups continues the loop: a
 // same-candidate retry after a transient failure assembles from the grown
 // history — exactly one turn-context message, ending at the recorded group —
 // and the tool is not executed again.
@@ -383,7 +383,7 @@ func sameMessage(a, b *schema.Message) bool {
 		reflect.DeepEqual(a.ToolCalls, b.ToolCalls)
 }
 
-// Spec "Tool phase is cache-reusable across turns" (§D9, tail-dynamic): the
+// Tool phase is cache-reusable across turns (tail-dynamic): the
 // message list sent by turn N's final model call — prefix, history, user,
 // turn context, tool-call groups — is a byte-identical prefix of turn N+1's
 // first model call.
@@ -414,7 +414,7 @@ func TestTranscript_CrossTurnCacheContinuity(t *testing.T) {
 		}
 	}
 
-	// Spec "Restart preserves the cache boundary": the restored history
+	// A restart preserves the cache boundary: the restored history
 	// projects to the identical prompt.
 	live := toSchemaMessages(currentHistory(t, env.sessions, transcriptSession).Messages())
 	restored := toSchemaMessages(env.restoredHistory(t).Messages())

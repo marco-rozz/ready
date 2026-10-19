@@ -237,7 +237,7 @@ const (
 // nil when r is well-formed, and an error wrapping ErrMalformedRequest
 // otherwise.
 //
-// Rules enforced here (matching the wire-protocol spec):
+// Rules enforced here (matching the wire protocol):
 //   - ConnectionID must be non-empty for every RequestType, including
 //     session_start (the client mints the UUID before sending the first frame).
 //   - Type must be one of the seven allowed values.

@@ -59,7 +59,7 @@ const envToken = "READY_TOKEN"
 const defaultAddress = "tcp://127.0.0.1:7600"
 
 // envLogo is the env-var selector for the interactive TUI's logo
-// presentation (chat-logo-modes, spec-driven): auto (default, also on unset
+// presentation (chat logo modes): auto (default, also on unset
 // or unknown) | png (degrades to glyph) | glyph | off. Env-var only —
 // `chat` never reads config.yaml.
 const envLogo = "READY_LOGO"
@@ -227,7 +227,6 @@ func runChat(_ context.Context, c *cli.Command, stdout, stderr io.Writer, stdin 
 	stdoutTTY := isTTY(stdout)
 	useTUI := !raw && execMsg == "" && stdinTTY && stdoutTTY
 
-	// criticalities-remediation (LOW secret-handling, cli-session-auth spec):
 	// `--token-file` reads the shared secret from a file. Precedence is
 	// flag `--token` > env `READY_TOKEN` (both already merged into
 	// `token` by the cli flag sources) > file. Avoids the secret sitting in

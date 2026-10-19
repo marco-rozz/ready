@@ -1,3 +1,5 @@
+config_version: 1 # Configuration schema, independent of the READY release version.
+
 # ─────────────────────────────────────────────────────────────────────
 # LLM provider registry: named provider connections + model references,
 # with optional boot-time failover.
@@ -34,8 +36,7 @@
 #                           second agent-construction path (Eino's AgenticModel /
 #                           adk.NewTypedChatModelAgent[*schema.AgenticMessage])
 #                           instead of adk.NewChatModelAgent — see the dual-agent-
-#                           construction-path notes in the repo documentation
-#                           "Agent Core" and tasks/arch_eino-agentic-model-survey.md.
+#                           construction-path notes in the repo documentation.
 #                           Observable behaviour (tool calling, formatter pipeline,
 #                           session history) is equivalent to every other protocol.
 #   api_key             — inline credential (Bearer), applies to every model on this provider
@@ -53,7 +54,7 @@
 #                            append their endpoints to this base — /chat/completions
 #                            and /messages respectively. responses appends /responses
 #                            per the SDK/httptest fixtures; live verification is
-#                            pending, see tasks/phase-llm-opencode-smoke.md)
+#                            pending)
 #                         - opencode + api: google: the google.golang.org/genai SDK
 #                           appends /v1beta/models/{model}:generateContent itself,
 #                           so base_url must point at the Zen gateway ROOT serving
@@ -61,7 +62,7 @@
 #                           which would double the version segment). Auth uses
 #                           Authorization: Bearer, matching the other opencode
 #                           protocols; confirm against the live gateway before relying
-#                           on it (see tasks/phase-llm-opencode-smoke.md).
+#                           on it.
 #   keep_alive          — OLLAMA-ONLY. Duration the model stays loaded between turns
 #                         (e.g. "30m"). Absent = Ollama default. "0s" = unload after
 #                         every call. Boot error on non-ollama providers. Applies to
@@ -219,23 +220,46 @@ llm:
     #   provider: "openai-codex"
     #   api: "responses"
 channels:
+  # Legacy stdin CLI. OFF by default: it and zmqcli are mutually exclusive
+  # (they share the logical channel name "cli") and zmqcli is the primary
+  # operator interface. Enable only for a local, non-network interactive
+  # daemon — then set zmqcli.enabled: false explicitly.
   cli:
-    enabled: true
+    # enabled: false   # default; set true only for a stdin-only daemon
     # bootstrap: ["home-topology"]   # skills preloaded into every session on this channel
     # formatter_skill: ""            # post-step formatter skill (always post-step; leave empty to disable)
                                      # Note: formatter_skill must NOT appear in bootstrap
   # zmqcli replaces the stdin CLI with a ZMQ-attached client (the `ready
   # chat` subcommand). Either `channels.cli.enabled` OR `channels.zmqcli.enabled`
   # may be true at a time, not both — they share the logical channel name "cli".
+  # DEFAULT BEHAVIOUR: as soon as a shared secret is configured below
+  # (auth_token or auth_token_file) and neither channel sets `enabled`
+  # explicitly, zmqcli turns on by default and the stdin cli stays off.
+  # An explicit `enabled: false` always wins; a config with no ZMQ secret
+  # and no enabled key leaves both CLI channels off (`ready serve` then needs
+  # another enabled channel, e.g. telegram, or it refuses to start).
   zmqcli:
-    enabled: false
+    # enabled: true   # default once a secret is configured below; `enabled: false` always wins
+    # Bind endpoint of the ROUTER socket. The default listens on the
+    # loopback interface only — `ready chat` must run on the same machine.
+    # To accept clients from other hosts on your LAN, bind to a reachable
+    # interface instead, e.g. tcp://0.0.0.0:7600 (all interfaces) or the
+    # daemon host's LAN address (tcp://192.168.1.10:7600). Firewall/port
+    # forwarding must allow the chosen port, and the HMAC secret below is
+    # what protects the endpoint — never expose it without one.
     bind: tcp://127.0.0.1:7600
     # Shared secret used to derive HMAC-SHA256 over the per-connection nonce.
-    # Generate with: openssl rand -hex 32
-    auth_token: ""
-    # Alternative to auth_token: read the secret from a file (trimmed of
-    # whitespace). Useful when you don't want the secret in this YAML.
+    # REQUIRED to use zmqcli (set exactly one of the two keys): without a secret
+    # and without an explicit `enabled`, zmqcli stays off. An explicit
+    # `enabled: true` with no secret is rejected at boot. Generate with:
+    # openssl rand -hex 32
+    # PREFERRED for security: comment the auth_token line and use
+    # auth_token_file instead, so the secret never lives in this YAML (which
+    # gets backed up and copied around). The file's trimmed content is the
+    # secret; create it with e.g.
+    #   openssl rand -hex 32 > /etc/ready/zmqcli.token && chmod 400 /etc/ready/zmqcli.token
     # Exactly one of auth_token / auth_token_file must be set when enabled.
+    # auth_token: "<output of openssl rand -hex 32>"
     # auth_token_file: /etc/ready/zmqcli.token
     # Idle-Connection watchdog (not the per-reply timeout — that's the chat
     # client's --reply-timeout). Only reaps a Connection whose client crashed

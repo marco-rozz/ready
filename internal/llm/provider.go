@@ -248,9 +248,8 @@ func llmProbeTimeout(registry *config.LLMConfig) time.Duration {
 //     (eino-ext/components/model/agenticopenai). Consumers build the agent
 //     via adk.NewTypedChatModelAgent[*schema.AgenticMessage].
 //
-// Exactly one field is non-nil. See tasks/arch_eino-agentic-model-survey.md
-// for why the registry returns a tagged union instead of two resolvers (a
-// single failover loop must be able to cover both model kinds).
+// Exactly one field is non-nil. The registry returns a tagged union instead
+// of two resolvers because a single failover loop must cover both model kinds.
 type ResolvedModel struct {
 	Chat    model.ToolCallingChatModel
 	Agentic model.AgenticModel
@@ -275,7 +274,7 @@ func (r ResolvedModel) ContextWindow() int {
 }
 
 // Layout reports the prompt-layout capability of this ResolvedModel's wire
-// protocol (the kv-cache-warm-start, design.md §D1/D2).
+// protocol.
 func (r ResolvedModel) Layout() PromptLayout {
 	return r.layout
 }
@@ -283,7 +282,7 @@ func (r ResolvedModel) Layout() PromptLayout {
 // PromptLayout is the KV-cache-prefix capability of a provider's wire
 // protocol: whether per-turn dynamic content can be appended after the
 // conversation history (LayoutTailDynamic) or must stay at the head
-// (LayoutHeadSafe). See the kv-cache-warm-start change design §D1.
+// (LayoutHeadSafe).
 type PromptLayout int
 
 const (
@@ -298,8 +297,8 @@ const (
 	LayoutHeadSafe
 )
 
-// String renders the layout name used in logs (§D1's `tail-dynamic` /
-// `head-safe` vocabulary).
+// String renders the layout name used in logs (`tail-dynamic` /
+// `head-safe`).
 func (l PromptLayout) String() string {
 	if l == LayoutTailDynamic {
 		return "tail-dynamic"
@@ -309,12 +308,12 @@ func (l PromptLayout) String() string {
 }
 
 // promptLayoutFor derives the prompt-layout capability from a provider's
-// wire protocol (design.md §D1). Ollama and OpenRouter carry positional
+// wire protocol. Ollama and OpenRouter carry positional
 // system messages (confirmed for the Gemma-family chat template in
-// tasks/spike-kv-cache-prompt-layout.md); OpenCode's `chat_completions` and
+// a KV-cache prompt-layout spike); OpenCode's `chat_completions` and
 // `responses` APIs are likewise positional. `anthropic` and `google` hoist
 // system content into a dedicated field and/or reject a trailing
-// non-user/assistant role (design.md C1/C2) — an unrecognised provider or
+// non-user/assistant role — an unrecognised provider or
 // API kind fails safe to LayoutHeadSafe rather than risking an HTTP 400 on
 // every turn.
 func promptLayoutFor(providerCfg *config.LLMProviderConfig) PromptLayout {

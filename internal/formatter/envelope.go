@@ -38,11 +38,11 @@ const (
 )
 
 // TurnContextInput carries the dynamic per-turn content rendered into the
-// turn-context message body by BuildTurnContext (design.md §D4).
+// turn-context message body by BuildTurnContext.
 type TurnContextInput struct {
 	// Timestamp is the pre-formatted current date/time string, already
 	// quantized to the active prompt layout's granularity by the caller
-	// (minute under tail-dynamic, hour under head-safe — design.md §D6).
+	// (minute under tail-dynamic, hour under head-safe).
 	Timestamp string
 	// InlineFormatter is true on inline-reinforcement channels
 	// (formatter_post_step: false and a non-empty formatter_skill), in which
@@ -56,7 +56,7 @@ type TurnContextInput struct {
 // BuildTurnContext renders the entire per-turn dynamic tail — timestamp
 // and (on inline-reinforcement channels) the verification
 // reminder and formatting directive — as a single message body
-// (design.md §D4). All tag pairs use turnID as a suffix so that untrusted
+// All tag pairs use turnID as a suffix so that untrusted
 // user content cannot forge a closing tag; turnID is generated fresh per
 // turn (via NewTurnID) and is unpredictable to the caller.
 //
@@ -64,7 +64,7 @@ type TurnContextInput struct {
 // message: the current user message is passed through verbatim by the
 // caller, byte-identical to what is persisted to history. That is what lets
 // the assembled prefix ahead of this message stay stable across turns (the
-// KV-cache warm-start goal — the kv-cache-warm-start).
+// KV-cache warm-start goal).
 func BuildTurnContext(turnID string, in TurnContextInput) string {
 	var b strings.Builder
 

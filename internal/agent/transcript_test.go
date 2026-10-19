@@ -299,7 +299,7 @@ func slowSink(log *orderLog) func(schema.Message) {
 	}
 }
 
-// Spec "Tool iteration persisted as it happens": the next model call begins
+// A tool iteration is persisted as it happens: the next model call begins
 // only after the consumer recorded the previous group, on both paths.
 func TestTranscriptSink_BarrierOrdersPersistenceBeforeNextCall(t *testing.T) {
 	t.Run("chat", func(t *testing.T) {

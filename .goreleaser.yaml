@@ -25,6 +25,9 @@ builds:
     binary: ready
     env:
       - CGO_ENABLED=0
+    # -trimpath: reproducible builds, no local paths embedded in the binary.
+    flags: &goflags
+      - -trimpath
     goos: [linux]
     goarch: [amd64, arm64, arm]
     goarm: ["6"]
@@ -39,6 +42,7 @@ builds:
     binary: ready
     env:
       - CGO_ENABLED=0
+    flags: *goflags
     goos: [darwin]
     goarch: [amd64, arm64]
     ldflags: *ldflags
@@ -47,6 +51,7 @@ builds:
     binary: ready
     env:
       - CGO_ENABLED=0
+    flags: *goflags
     goos: [windows]
     goarch: [amd64]
     ldflags: *ldflags

@@ -331,7 +331,7 @@ func TestBridgedTool_DisplayNameAndWireName(t *testing.T) {
 
 	bridged := NewBridgedTool(discardLogger(), &callCapture{}, mcpToolStub, serverName, displayName)
 
-	// Task 2.3: Info() returns the display name.
+	// Info() returns the display name.
 	info, err := bridged.Info(ctx)
 	if err != nil {
 		t.Fatalf("Info() error: %v", err)
@@ -342,7 +342,7 @@ func TestBridgedTool_DisplayNameAndWireName(t *testing.T) {
 		t.Errorf("Info().Name = %q, want %q", info.Name, wantDisplay)
 	}
 
-	// Task 2.4: InvokableRun sends the wire name (mcpTool.Name) in the request.
+	// InvokableRun sends the wire name (mcpTool.Name) in the request.
 	invoker := &callCapture{}
 	bridged2 := NewBridgedTool(discardLogger(), invoker, mcpToolStub, serverName, displayName)
 	_, _ = bridged2.InvokableRun(ctx, `{"entity_id":"light.kitchen"}`)

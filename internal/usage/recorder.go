@@ -10,8 +10,8 @@ import (
 )
 
 // extractTokenUsage reads the usage observation from one chat-path message.
-// Providers attach it at different chunk positions (see the spike notes in
-// the change design.md): the recorder keeps the LAST non-nil value per
+// Providers attach it at different chunk positions (spike-verified):
+// the recorder keeps the LAST non-nil value per
 // model call rather than summing across chunks (Anthropic streams emit the
 // input tokens on MessageStart and the full input+output on MessageDelta —
 // summation would double-count the prompt).
@@ -183,8 +183,7 @@ func forwardRecorded[M interface {
 	}
 
 	// Stream completed without forwarding a final nil-usage marker: record
-	// the last observed usage (never summed across chunks — see the spike
-	// notes in the change design.md).
+	// the last observed usage (never summed across chunks).
 	if seen {
 		record(ctx, last)
 	}

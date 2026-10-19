@@ -76,7 +76,7 @@ func getViaClient(t *testing.T, client *http.Client, reqURL string) {
 	defer func() { _ = resp.Body.Close() }()
 }
 
-// TestHeaderScope_CrossHostRedirectDropsHeader is spec scenario 3.1: a
+// TestHeaderScope_CrossHostRedirectDropsHeader checks that a
 // same-host request carries the configured header, but the server's redirect
 // to a different host does not receive it. The "different host" is
 // "localhost" pointed at the origin server's own port via a rewritten
@@ -118,8 +118,7 @@ func TestHeaderScope_CrossHostRedirectDropsHeader(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_SamePortDifferentPortHeaderApplied is spec scenario 3.2 /
-// the design doc: the header must not depend on the port. Nothing needs to listen
+// TestHeaderScope_SamePortDifferentPortHeaderApplied checks that the header does not depend on the port. Nothing needs to listen
 // on the configured port; inScope only inspects the URL.
 func TestHeaderScope_SamePortDifferentPortHeaderApplied(t *testing.T) {
 	var got string
@@ -139,7 +138,7 @@ func TestHeaderScope_SamePortDifferentPortHeaderApplied(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_SubdomainInScope is spec scenario 3.3.
+// TestHeaderScope_SubdomainInScope checks a subdomain stays in scope.
 func TestHeaderScope_SubdomainInScope(t *testing.T) {
 	cfg := &config.MCPServerConfig{URL: "https://example.com", Headers: map[string]string{testAuthHeader: testBearerT}}
 
@@ -149,7 +148,7 @@ func TestHeaderScope_SubdomainInScope(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_SchemeDowngradeDropsHeader is spec scenario 3.4.
+// TestHeaderScope_SchemeDowngradeDropsHeader checks a scheme downgrade drops the header.
 func TestHeaderScope_SchemeDowngradeDropsHeader(t *testing.T) {
 	cfg := &config.MCPServerConfig{URL: "https://example.com", Headers: map[string]string{testAuthHeader: testBearerT}}
 
@@ -159,7 +158,7 @@ func TestHeaderScope_SchemeDowngradeDropsHeader(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_PlaintextServerUnaffected is spec scenario 3.5: an http://
+// TestHeaderScope_PlaintextServerUnaffected checks that an http://
 // configured server behaves exactly as before this change.
 func TestHeaderScope_PlaintextServerUnaffected(t *testing.T) {
 	cfg := &config.MCPServerConfig{URL: "http://homeassistant.local:8123", Headers: map[string]string{testAuthHeader: testBearerT}}
@@ -170,7 +169,7 @@ func TestHeaderScope_PlaintextServerUnaffected(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_ExistingHeaderPreserved is spec scenario 3.6 / the design doc.
+// TestHeaderScope_ExistingHeaderPreserved checks an existing header is preserved.
 func TestHeaderScope_ExistingHeaderPreserved(t *testing.T) {
 	cfg := &config.MCPServerConfig{URL: "http://homeassistant.local:8123", Headers: map[string]string{testAuthHeader: "Bearer configured"}}
 
@@ -180,7 +179,7 @@ func TestHeaderScope_ExistingHeaderPreserved(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_HandshakeRequestsCarryHeaders is spec scenario 3.7: the
+// TestHeaderScope_HandshakeRequestsCarryHeaders checks the
 // existing guarantee that handshake requests carry configured headers must
 // not regress. connectToServer's handshake fails against this plain HTTP
 // server (it is not a real MCP endpoint); only the header on the request the
@@ -202,7 +201,7 @@ func TestHeaderScope_HandshakeRequestsCarryHeaders(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_InjectedHTTPClientIsUsed is spec scenario 3.8: a caller-
+// TestHeaderScope_InjectedHTTPClientIsUsed checks that a caller-
 // supplied ClientConfig.HTTPClient / connectToServer httpClient argument is
 // the instance the transport actually issues requests through.
 func TestHeaderScope_InjectedHTTPClientIsUsed(t *testing.T) {
@@ -227,7 +226,7 @@ func TestHeaderScope_InjectedHTTPClientIsUsed(t *testing.T) {
 	}
 }
 
-// TestHeaderScope_UnparseableURLFailsClosed is spec scenario 3.9 / task 1.6:
+// TestHeaderScope_UnparseableURLFailsClosed checks that
 // an unparseable configured URL must never fail open.
 func TestHeaderScope_UnparseableURLFailsClosed(t *testing.T) {
 	cfg := &config.MCPServerConfig{URL: "http://example.com/\tinvalid", Headers: map[string]string{testAuthHeader: testBearerT}}

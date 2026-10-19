@@ -247,7 +247,7 @@ func TestBuildForReference_OpenAICodexMissingCredentialIsCandidateFailure(t *tes
 	}
 }
 
-// Task 2.4 / 4.1: httptest server asserting chat_completions request shape over opencode.
+// httptest server asserting chat_completions request shape over opencode.
 func TestOpenCode_ChatCompletions_RequestShape(t *testing.T) {
 	var capturedPath string
 	var capturedAuth string
@@ -481,7 +481,7 @@ func TestOpenRouter_StreamSafe_NoPanic(t *testing.T) {
 	}
 }
 
-// Task 2.1 (llm-google-protocol-2): httptest server asserting Google-format
+// httptest server asserting Google-format
 // request shape over opencode — generateContent-style body, Bearer auth, and a
 // canned functionCall response parsed into Eino tool calls.
 func TestOpenCode_Google_RequestShape(t *testing.T) {
@@ -583,7 +583,7 @@ func TestOpenCode_Google_RequestShape(t *testing.T) {
 	}
 }
 
-// Task 4.2: httptest server asserting anthropic request shape over opencode.
+// httptest server asserting anthropic request shape over opencode.
 func TestOpenCode_Anthropic_RequestShape(t *testing.T) {
 	var capturedPath string
 	var capturedAuth string
@@ -672,7 +672,7 @@ func TestOpenCode_Anthropic_RequestShape(t *testing.T) {
 	}
 }
 
-// Task 3.1: httptest fixture asserting the Responses API request shape
+// httptest fixture asserting the Responses API request shape
 // (endpoint path, Bearer auth, tool definitions) and that a canned
 // function_call output surfaces as a FunctionToolCall content block on the
 // returned AgenticMessage — i.e. the tool call reaches the ReAct loop.
@@ -799,8 +799,7 @@ func TestOpenCode_Responses_RequestShape(t *testing.T) {
 	}
 }
 
-// Task 4.4: Config-error test — invalid entry with valid failover still returns config error.
-// Task 4.4 (reworked by llm-failover-orchestrator task 1.5): a missing
+// A missing
 // credential is a PER-CANDIDATE failure — BuildForReference errors only for
 // the affected reference, and a valid candidate on another provider still
 // builds. Fatal global errors (reference shape, undeclared providers) are
@@ -837,7 +836,7 @@ func TestBuildForReference_MissingCredentialIsPerCandidate(t *testing.T) {
 	}
 }
 
-// Task 4.5: Probe-classification tests.
+// Probe-classification tests.
 func TestProbe_Classification_2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1003,7 +1002,7 @@ func TestProbe_NoGenerationCall(t *testing.T) {
 
 // TestResolve_Failover_TransportRefused tests that a transport-refused first
 // entry falls over to the second.
-// Task 4.4 (reworked by llm-failover-orchestrator task 4.6): the catalog
+// The catalog
 // preflight replaces Resolve's boot acceptance. Construction is local — a
 // transport-refused endpoint still builds — while PreflightCatalog reports
 // the not-ready reason for the unreachable reference and nil for the
@@ -1394,7 +1393,7 @@ func TestProbe_CatalogOpenRouterShape(t *testing.T) {
 	}
 }
 
-// Task 4.6 (reworked by llm-failover-orchestrator): a 2xx catalog WITHOUT
+// A 2xx catalog WITHOUT
 // the configured model-id is a preflight rejection for that reference —
 // catalog presence is a preflight, not boot acceptance, and readiness is
 // established by the orchestrator's tool-call probe.

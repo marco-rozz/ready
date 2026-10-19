@@ -47,8 +47,8 @@ func chatToolCall() mockResponse {
 	}
 }
 
-// TestTurnOutcome_FailureBeforeAnyModelOutput covers the spec scenario
-// "Failure before any model output": the first model invocation fails, so no
+// TestTurnOutcome_FailureBeforeAnyModelOutput covers the scenario
+// "failure before any model output": the first model invocation fails, so no
 // tool call completed and no content was delivered. This is the combination
 // that maps to the temporary-unavailability terminal message.
 func TestTurnOutcome_FailureBeforeAnyModelOutput(t *testing.T) {
@@ -83,8 +83,8 @@ func TestTurnOutcome_FailureBeforeAnyModelOutput(t *testing.T) {
 	}
 }
 
-// TestTurnOutcome_FailureAfterCompletedToolCall covers the spec scenario
-// "Failure after a completed tool call is distinguishable": the tool ran and
+// TestTurnOutcome_FailureAfterCompletedToolCall covers the scenario
+// "failure after a completed tool call is distinguishable": the tool ran and
 // produced a result, then the next model invocation failed before any
 // final-answer content. This is the combination that maps to the
 // incomplete-response terminal message.
@@ -295,7 +295,7 @@ func TestAgenticTurnOutcome_FailureBeforeAnyModelOutput(t *testing.T) {
 }
 
 // TestAgenticTurnOutcome_FailureAfterCompletedToolCall covers the agentic
-// construction path for the spec scenario "Failure after a completed tool
+// construction path for the scenario "failure after a completed tool
 // call is distinguishable". Tool results are embedded as FunctionToolResult
 // content blocks within assistant messages rather than emitted as separate
 // Role=Tool events, so ToolCallCompleted is detected via those blocks.

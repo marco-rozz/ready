@@ -37,7 +37,7 @@ func (m *mockAgenticModel) Stream(ctx context.Context, input []*schema.AgenticMe
 	return schema.StreamReaderFromArray([]*schema.AgenticMessage{msg}), nil
 }
 
-// Task 3.3: history round-trip test — a conversation restored from the
+// History round-trip test — a conversation restored from the
 // checkpoint store (internal/persistence.HistoryMessage's flattened
 // {Role, Content} shape, rebuilt as []*schema.Message by the dispatcher's
 // toSchemaMessages, exactly as it would be for any session regardless of
@@ -78,7 +78,7 @@ func TestAgenticAgent_HistoryRoundTrip_AcrossProtocolSwitch(t *testing.T) {
 
 	// Verify every restored turn survived the conversion losslessly (no
 	// schema errors, no dropped turns, no content corruption) — this is the
-	// spec scenario "History continuity across protocols".
+	// History continuity across protocols.
 	if len(mock.lastInput) != len(restoredConversation) {
 		t.Fatalf("expected %d converted messages, got %d", len(restoredConversation), len(mock.lastInput))
 	}
@@ -284,7 +284,7 @@ func reasoningToolCallChunks() []*schema.AgenticMessage {
 	}
 }
 
-// Task 1.2: a completed stream materializes into one complete message.
+// A completed stream materializes into one complete message.
 func TestReadAgenticStreamFull_MaterializesCompleteMessage(t *testing.T) {
 	var lastErr error
 	_, full, hasToolCalls, _ := readAgenticStreamFull(schema.StreamReaderFromArray(reasoningToolCallChunks()), nil, &lastErr, nil)
@@ -316,7 +316,7 @@ func TestReadAgenticStreamFull_MaterializesCompleteMessage(t *testing.T) {
 	}
 }
 
-// Task 1.2: a stream that errors mid-way yields no materialized message.
+// A stream that errors mid-way yields no materialized message.
 func TestReadAgenticStreamFull_FailedStreamYieldsNoMessage(t *testing.T) {
 	sr, sw := schema.Pipe[*schema.AgenticMessage](len(reasoningToolCallChunks()) + 1)
 	for _, c := range reasoningToolCallChunks()[:4] {
@@ -338,7 +338,7 @@ func TestReadAgenticStreamFull_FailedStreamYieldsNoMessage(t *testing.T) {
 	}
 }
 
-// Task 1.2: chunks ConcatAgenticMessages cannot merge (mixed roles) yield no
+// Chunks ConcatAgenticMessages cannot merge (mixed roles) yield no
 // materialized message even though the stream reached EOF.
 func TestReadAgenticStreamFull_UnmergeableStreamYieldsNoMessage(t *testing.T) {
 	chunks := reasoningToolCallChunks()

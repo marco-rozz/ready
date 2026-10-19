@@ -39,8 +39,8 @@ func TestElect_ChainPrecedence(t *testing.T) {
 		withHome(t, home)
 		// Local AND global candidates exist: the flag must win and the
 		// missing-flag failure never applies.
-		writeFile(t, filepath.Join(".ready", "config.yaml"), "channels:")
-		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "channels:")
+		writeFile(t, filepath.Join(".ready", "config.yaml"), "config_version: 1\nchannels:")
+		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "config_version: 1\nchannels:")
 
 		res, err := Elect(context.Background(), "/custom/config.yaml")
 		if err != nil {
@@ -58,8 +58,8 @@ func TestElect_ChainPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		writeFile(t, filepath.Join(wd, ".ready", "config.yaml"), "channels:")
-		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "channels:")
+		writeFile(t, filepath.Join(wd, ".ready", "config.yaml"), "config_version: 1\nchannels:")
+		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "config_version: 1\nchannels:")
 		defer os.Remove(filepath.Join(wd, ".ready", "config.yaml"))
 
 		res, err := Elect(context.Background(), "")
@@ -74,7 +74,7 @@ func TestElect_ChainPrecedence(t *testing.T) {
 	t.Run("global fallback when no local config", func(t *testing.T) {
 		home := t.TempDir()
 		withHome(t, home)
-		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "channels:")
+		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "config_version: 1\nchannels:")
 
 		res, err := Elect(context.Background(), "")
 		if err != nil {
@@ -104,7 +104,7 @@ func TestElect_ChainPrecedence(t *testing.T) {
 	})
 }
 
-// The unresolvable-user-home precision cases (install-home spec).
+// The unresolvable-user-home precision cases.
 func TestElect_HomeFailures(t *testing.T) {
 	t.Run("flag with no home still elects", func(t *testing.T) {
 		os.Unsetenv("HOME")
@@ -140,7 +140,7 @@ func TestElect_HomeFailures(t *testing.T) {
 func TestApplyRuntimeHome_DerivesRuntimePaths(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	writeFile(t, cfgPath, "channels:")
+	writeFile(t, cfgPath, "config_version: 1\nchannels:")
 
 	cfg, err := Load(context.Background(), cfgPath)
 	if err != nil {
@@ -167,6 +167,7 @@ func TestApplyRuntimeHome_RelativePathsResolve(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
 	yaml := `
+config_version: 1
 skills:
   path: custom-skills/
 sessions:
@@ -196,6 +197,7 @@ logging:
 func TestApplyRuntimeHome_OAuthStoreAnchoring(t *testing.T) {
 	newYAML := func(oauthPath string) string {
 		return `
+config_version: 1
 llm:
   default: "codex::gpt-5"
   providers:
@@ -265,6 +267,7 @@ oauth:
 		writeFile(t, filepath.Join(home, ".ready", "nonexistent"), "")
 
 		yaml := `
+config_version: 1
 channels:
   cli:
     enabled: true
@@ -304,7 +307,7 @@ func TestSkillsLibraryPath(t *testing.T) {
 	t.Run("default Install home", func(t *testing.T) {
 		home := t.TempDir()
 		withHome(t, home)
-		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "channels:\n  cli:\n    enabled: true\n")
+		writeFile(t, filepath.Join(home, ".ready", "config.yaml"), "config_version: 1\nchannels:\n  cli:\n    enabled: true\n")
 
 		cfg, err := Load(context.Background(), filepath.Join(home, ".ready", "config.yaml"))
 		if err != nil {
@@ -317,7 +320,7 @@ func TestSkillsLibraryPath(t *testing.T) {
 
 	t.Run("relative override against the runtime home", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFile(t, filepath.Join(dir, "config.yaml"), "skills:\n  library_path: ../resources/skills/\n")
+		writeFile(t, filepath.Join(dir, "config.yaml"), "config_version: 1\nskills:\n  library_path: ../resources/skills/\n")
 
 		cfg, err := Load(context.Background(), filepath.Join(dir, "config.yaml"))
 		if err != nil {
@@ -332,7 +335,7 @@ func TestSkillsLibraryPath(t *testing.T) {
 // skills.sync validation: unset = auto; invalid values fail boot.
 func TestSkillsSyncValidation(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "config.yaml"), "skills:\n  sync: sometimes\n")
+	writeFile(t, filepath.Join(dir, "config.yaml"), "config_version: 1\nskills:\n  sync: sometimes\n")
 
 	cfg, err := Load(context.Background(), filepath.Join(dir, "config.yaml"))
 	if err != nil {
@@ -345,7 +348,7 @@ func TestSkillsSyncValidation(t *testing.T) {
 	}
 
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	writeFileT(t, cfgPath, "channels:\n  cli:\n    enabled: true\n")
+	writeFileT(t, cfgPath, "config_version: 1\nchannels:\n  cli:\n    enabled: true\n")
 
 	if _, err := Load(context.Background(), cfgPath); err != nil {
 		t.Fatalf("an absent skills.sync must fail nothing: %v", err)

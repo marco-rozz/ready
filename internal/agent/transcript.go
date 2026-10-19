@@ -29,7 +29,7 @@ const transcriptSyncTimeout = 5 * time.Second
 // recorded every tool result already present in the model input. Eino's
 // event iterator is an unbounded channel — the ReAct loop runs ahead of the
 // consumer — so without it a completed group could still be unsaved when the
-// next model call begins (spec "Tool iteration persisted as it happens").
+// next model call begins.
 type transcriptSync struct {
 	mu        sync.Mutex
 	baseline  int // tool results in the attempt's initial input (never emitted)
@@ -95,8 +95,7 @@ func waitTranscript(ctx context.Context, inputResults int) {
 }
 
 // WithTranscriptSink returns a context carrying the per-turn transcript sink
-// (the session-transcript-persistence §D5, same pattern as
-// WithLiveness). The agent loop emits, in materialization order, every
+// (same pattern as WithLiveness). The agent loop emits, in materialization order, every
 // assistant message carrying tool calls — only once its stream completed
 // without error — and every tool result. The final answer is NOT emitted:
 // it is the turn outcome's Reply, recorded by the caller.
@@ -137,7 +136,7 @@ type pendingCall struct {
 
 // transcriptEmitter normalizes the in-turn transcript before it reaches the
 // sink: empty tool-call ids receive a deterministic synthesized id and the
-// matching results are remapped to it (§D3). A nil emitter is a no-op.
+// matching results are remapped to it. A nil emitter is a no-op.
 type transcriptEmitter struct {
 	turnID  string
 	emit    func(schema.Message)
@@ -204,7 +203,7 @@ func priorIterations(input []*schema.Message) int {
 }
 
 // syntheticCallID is the protocol-portable id of a tool call the provider
-// materialized without one (§D3): call_<turnID>_<iter>_<idx>.
+// materialized without one: call_<turnID>_<iter>_<idx>.
 func syntheticCallID(turnID string, iter, idx int) string {
 	if turnID == "" {
 		turnID = "0"

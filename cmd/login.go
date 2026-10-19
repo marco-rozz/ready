@@ -180,6 +180,12 @@ func dispatchLoginMode(
 }
 
 func runLoginWithIO(ctx context.Context, c *cli.Command, stdin io.Reader, stdout, stderr io.Writer) error {
+	return runLoginWithConfig(ctx, c, stdin, stdout, stderr, electAndLoadConfig)
+}
+
+// runLoginWithConfig permits testing version failures on every mode before any
+// target lookup or credential/network side effect, without a mutable global.
+func runLoginWithConfig(ctx context.Context, c *cli.Command, stdin io.Reader, stdout, stderr io.Writer, load func(context.Context, string, io.Writer) (*config.Config, error)) error {
 	status := c.Bool("status")
 	forget := c.Bool("forget")
 	deviceCode := c.Bool("device-code")
@@ -191,7 +197,7 @@ func runLoginWithIO(ctx context.Context, c *cli.Command, stdin io.Reader, stdout
 		return cli.Exit("", ExitErr)
 	}
 
-	cfg, err := electAndLoadConfig(ctx, c.String("config"), stdout)
+	cfg, err := load(ctx, c.String("config"), stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 

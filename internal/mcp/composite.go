@@ -72,8 +72,7 @@ func (cr *CompositeRuntime) Tools() []tool.BaseTool {
 func (cr *CompositeRuntime) Close() error {
 	var errs []error
 
-	// criticalities-remediation (LOW lifecycle, component-lifecycle spec):
-	// monitors are stopped BEFORE their runtimes — a monitor still running
+	// Monitors are stopped BEFORE their runtimes — a monitor still running
 	// while its runtime closes would ping a closed connection.
 	for _, e := range cr.entries {
 		if e.Monitor != nil {

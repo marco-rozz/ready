@@ -10,7 +10,7 @@ import (
 
 const testTimestampMinute = "Monday, 02 January 2006, 15:04 MST"
 
-// Task 3.1 — turn context carries the timestamp and, when InlineFormatter is
+// Turn context carries the timestamp and, when InlineFormatter is
 // true, the reminder and directive blocks, in turn_context → final_reminder
 // → formatting_directive order, all suffixed with the given ID.
 func TestBuildTurnContext_Structure(t *testing.T) {
@@ -53,7 +53,7 @@ func TestBuildTurnContext_Structure(t *testing.T) {
 	}
 }
 
-// Task 3.10 — non-inline channels (post-step, or no formatter skill) still
+// Non-inline channels (post-step, or no formatter skill) still
 // carry the timestamp but omit the reminder/directive.
 func TestBuildTurnContext_NonInlineOmitsReinforcement(t *testing.T) {
 	const id = "deadbeef"
@@ -84,7 +84,7 @@ func TestBuildTurnContext_CarriesNoPlanContent(t *testing.T) {
 	}
 }
 
-// Task 3.9 — forged-tag inertness: a user-supplied string containing a
+// Forged-tag inertness: a user-supplied string containing a
 // forged closing tag, if ever passed through BuildTurnContext's inputs
 // (it should not be — the user message stays in its own history message),
 // would not match the real turn's ID. This test locks the ID-matching
@@ -107,7 +107,7 @@ func TestBuildTurnContext_ForgedIDDoesNotMatch(t *testing.T) {
 	}
 }
 
-// Task 1.5 (retained) — uniqueness of NewTurnID over 1000 calls.
+// Uniqueness of NewTurnID over 1000 calls.
 func TestNewTurnID_UniqueAndFormat(t *testing.T) {
 	const n = 1000
 	seen := make(map[string]struct{}, n)

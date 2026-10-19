@@ -10,7 +10,7 @@ import (
 // TestCurrentTimeStamp_TailDynamicMinuteGranularity verifies that two calls
 // within the same minute produce an identical rendered timestamp under
 // LayoutTailDynamic, so the prefix is stable for as long as the wall-clock
-// minute does not roll over (the kv-cache-warm-start change, phase 0).
+// minute does not roll over.
 func TestCurrentTimeStamp_TailDynamicMinuteGranularity(t *testing.T) {
 	got1 := currentTimeStamp(llm.LayoutTailDynamic)
 	got2 := currentTimeStamp(llm.LayoutTailDynamic)
@@ -28,7 +28,7 @@ func TestCurrentTimeStamp_TailDynamicMinuteGranularity(t *testing.T) {
 
 // TestCurrentTimeStamp_HeadSafeHourGranularity verifies LayoutHeadSafe
 // quantizes to the hour: the rendered string is identical regardless of the
-// actual minute (§D6's "stable within the hour" scenario).
+// actual minute (stable within the hour).
 func TestCurrentTimeStamp_HeadSafeHourGranularity(t *testing.T) {
 	got := currentTimeStamp(llm.LayoutHeadSafe)
 

@@ -10,9 +10,9 @@ import (
 // testLocalProv is the shared provider-instance name in this file's fixtures.
 const testLocalProv = "local"
 
-// Task 2.6: layout mapping per api kind; unknown protocol degrades to
-// LayoutHeadSafe rather than risking a trailing-system-message 400
-// (design.md §D1).
+// TestPromptLayoutFor checks the layout mapping per api kind; an unknown
+// protocol degrades to LayoutHeadSafe rather than risking a
+// trailing-system-message 400.
 func TestPromptLayoutFor(t *testing.T) {
 	tests := []struct {
 		name string
@@ -39,7 +39,7 @@ func TestPromptLayoutFor(t *testing.T) {
 	}
 }
 
-// TestPromptLayout_String verifies the log-facing vocabulary from §D1.
+// TestPromptLayout_String verifies the log-facing vocabulary.
 func TestPromptLayout_String(t *testing.T) {
 	if LayoutTailDynamic.String() != "tail-dynamic" {
 		t.Errorf("LayoutTailDynamic.String() = %q, want %q", LayoutTailDynamic.String(), "tail-dynamic")

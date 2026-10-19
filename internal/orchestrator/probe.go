@@ -44,7 +44,7 @@ const probeSystemPrompt = "You are a connectivity probe. Follow the user's instr
 
 // probeUserMessage instructs the model to call the no-op tool. A model that
 // honours the tool-calling contract calls it; a text-only model answers in
-// prose instead, which fails the probe by design (spec: Text-only capability
+// prose instead, which fails the probe by design (text-only capability
 // is insufficient).
 const probeUserMessage = "Call the ready_probe_noop tool with value 1, then reply with the word done."
 

@@ -157,7 +157,7 @@ type ServeOptions struct {
 //     a single human stderr line and pick the exit code;
 //   - signal handling is rooted in the supplied ctx via NotifyContext, so
 //     tests and the dispatcher can cancel the daemon deterministically.
-func Serve(ctx context.Context, opts ServeOptions) error {
+func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	// Config resolution chain (install-home): the explicit --config wins with
 	// no fallback, else ./.ready/config.yaml, else ~/.ready/config.yaml.
 	resolution, err := config.Elect(ctx, opts.ConfigPath)
@@ -165,19 +165,16 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		return fmt.Errorf("failed to elect config: %w", err)
 	}
 
-	cfg, err := config.Load(ctx, resolution.Path)
+	cfg, migrationReport, err := prepareServeConfig(ctx, resolution.Path, opts, nil)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	defer func() {
+		if serveErr != nil && migrationReport.Committed {
+			serveErr = fmt.Errorf("%w%s", serveErr, migrationReport.CommitContext())
+		}
+	}()
 	cfg.Origin = resolution.Origin
-
-	if err = cfg.Validate(); err != nil {
-		return fmt.Errorf("invalid config: %w", err)
-	}
-
-	if !cfg.HasEnabledChannels() {
-		return fmt.Errorf("no channels enabled in configuration") // user-facing CLI message, not a sentinel
-	}
 
 	activeProfileName, activeProfile, err := cfg.ResolveProfile(opts.Profile, os.Getenv("READY_MCP_PROFILE"))
 	if err != nil {
@@ -192,8 +189,9 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	rootLogger, logCloser := logRes.Logger, logRes.Closer
 
 	logger := rootLogger.With().Str("component", "main").Logger()
+	logConfigMigration(logger, migrationReport)
 
-	// Elected config visibility (install-home spec): the chain can pick the
+	// Elected config visibility (install-home): the chain can pick the
 	// cwd's ./.ready/config.yaml without the operator noticing — the boot
 	// always names the file and how it was elected, and warns when a local
 	// file is readable by group or others (never fatal, unix only).
@@ -214,8 +212,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	// Warn when thoughts is enabled but the effective log level is too high.
 	warnThoughtsLevelMismatch(rootLogger, cfg, logRes)
 
-	// criticalities-remediation (LOW secret-handling, cli-session-auth spec): secret
-	// files read through *_file configuration keys are permission-checked at
+	// Secret files read through *_file configuration keys are permission-checked at
 	// boot — a file readable by group or others WARNs naming the path.
 	warnSecretFilePermissions(cfg, rootLogger)
 
@@ -703,8 +700,7 @@ func buildLLMCandidates(
 		} else {
 			// Defensive layer: rewrite hallucinated tool-call names before they
 			// hit Eino's toolsNode. See internal/agent/toolnames for the
-			// resolution rules. Not wired for the agentic (`responses`) path —
-			// see tasks/arch_eino-agentic-model-survey.md.
+			// resolution rules. Not wired for the agentic (`responses`) path.
 			// The usage recorder sits below the normaliser so both the ReAct
 			// runner and the raw aux model attribute through the same seam.
 			recorded := usage.NewRecordedChatModel(resolved.Chat)
@@ -1484,8 +1480,7 @@ func (d *dispatcher) enqueue(msg channel.Message) {
 	}
 	d.mu.Unlock()
 
-	// criticalities-remediation (M2, message-delivery spec): the enqueue is
-	// NON-BLOCKING — one saturated session's inbox must not block enqueue,
+	// The enqueue is NON-BLOCKING — one saturated session's inbox must not block enqueue,
 	// which would block m.incoming and wedge the intake of every other
 	// channel (head-of-line blocking). The message is dropped with a
 	// structured WARN naming the session; the drop counter keeps the
@@ -1595,7 +1590,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	runCtx, runCancel := context.WithTimeout(msgCtx, agentRunTimeout)
 	defer runCancel()
 
-	// session-transcript-persistence §D6: the turn context (turnID,
+	// The turn context (turnID,
 	// timestamp, reminder/directive) is rendered ONCE per turn and recorded
 	// right after the user message, so every attempt of the turn — and every
 	// later turn's prompt — carries the same bytes.
@@ -1627,7 +1622,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	lead := rt.leadMessage(runCtx, history, extraSkills)
 	prefix = withLead(prefix, lead)
 
-	// Per-attempt assembly (the design doc, session-transcript-persistence §D7):
+	// Per-attempt assembly:
 	// the closure re-reads the LIVE history each attempt, so a same-candidate
 	// retry or a failover continues the ReAct loop from the last complete
 	// tool-call group recorded by the failed attempt — no tool re-executes.
@@ -1640,11 +1635,11 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		return assembleHeadSafe(prefix, view, headTurnContext)
 	}
 
-	// Transcript sink (§D5): every materialized assistant tool-call message
+	// Transcript sink: every materialized assistant tool-call message
 	// and tool result enters the history as it happens; each completed
 	// tool-call group is delta-appended so a crash mid-turn leaves a
 	// resumable transcript. resumeReady feeds the orchestrator's restart gate
-	// from the in-memory history (§D10).
+	// from the in-memory history.
 	runCtx = agent.WithTranscriptSink(runCtx, turnID, transcriptRecorder(ctx, history, logger))
 	resumeReady := func() bool { return !history.HasOpenToolCallGroup() }
 
@@ -1793,7 +1788,7 @@ func deliverTurnResult(d deliverArgs) {
 	// where a path leaked from (tool result, reasoning, or prompt).
 	response = d.sanitizer.Redact(response)
 
-	// session-transcript-persistence §D4: the final reply closes a successful
+	// The final reply closes a successful
 	// turn's transcript. A failed turn records no assistant line — the
 	// terminal product string is a delivery artifact, not model output — and
 	// its transcript is closed at the last complete tool-call group so the
@@ -1879,7 +1874,7 @@ func sendFinalReply(ctx context.Context, mgr *channel.Manager, msg channel.Messa
 }
 
 // assembleTailDynamic concatenates the stable prefix and the history
-// projection (design.md §D3, session-transcript-persistence §D6): the
+// projection: the
 // current turn's recorded turn-context line already sits at its
 // chronological position — right after the user message, followed by any
 // in-turn tool-call groups — so nothing is appended. The prefix is copied so
@@ -1892,7 +1887,7 @@ func assembleTailDynamic(prefix []*schema.Message, history []persistence.History
 }
 
 // assembleHeadSafe folds the current turn's frozen turn context into a
-// leading system message (design.md §D5) and omits that turn's recorded
+// leading system message and omits that turn's recorded
 // turn-context line from the history projection so it is never duplicated;
 // previous turns' turn-context lines stay as user messages at their
 // positions.
@@ -1927,7 +1922,7 @@ func withoutCurrentTurnContext(history []persistence.HistoryMessage) []persisten
 // freezeTurnContextInput captures the per-turn dynamic values once, at turn
 // start: the tail-dynamic input (minute timestamp) is the one recorded in the
 // transcript; the head-safe input differs only by its hour-quantized
-// timestamp of the same instant (design.md §D6).
+// timestamp of the same instant.
 func freezeTurnContextInput(fmtCfg channelFormatterCfg, at time.Time) (tail, head formatter.TurnContextInput) {
 	tail = formatter.TurnContextInput{
 		Timestamp:       formatTimeStamp(at, llm.LayoutTailDynamic),
@@ -1943,7 +1938,7 @@ func freezeTurnContextInput(fmtCfg channelFormatterCfg, at time.Time) (tail, hea
 // transcriptRecorder returns the transcript sink bound to history: each
 // emission is added as it materializes, and each completed tool-call group
 // is delta-appended to the session JSONL before the next model call
-// (session-transcript-persistence §D5). A failed append is logged — the
+// A failed append is logged — the
 // in-memory history, which the restart gate reads, stays authoritative.
 func transcriptRecorder(ctx context.Context, history *persistence.ConversationHistory, logger zerolog.Logger) func(schema.Message) {
 	return func(m schema.Message) {
@@ -1977,7 +1972,7 @@ func transcriptRecorder(ctx context.Context, history *persistence.ConversationHi
 }
 
 // currentTimeStamp renders the current date/time, quantized to the active
-// layout's granularity (design.md §D6): minute under LayoutTailDynamic,
+// layout's granularity: minute under LayoutTailDynamic,
 // hour under LayoutHeadSafe. "00" is not a Go reference-time token, so under
 // LayoutHeadSafe it is emitted as a literal, making the rendered string
 // identical for the whole wall-clock hour rather than merely truncating the
@@ -2579,7 +2574,7 @@ func applyFormatterPostStep(
 // verification reminder and formatting directive live in the separate
 // per-turn turn-context message built by buildTurnContextInput +
 // formatter.BuildTurnContext, so the same conversation slot holds identical
-// bytes across turns (design.md §C3/§D4).
+// bytes across turns.
 //
 // Under formatter_post_step: true or empty formatter_skill this function
 // returns conversation unchanged, guaranteeing the post-step path is

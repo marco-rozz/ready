@@ -519,7 +519,7 @@ func (m *Manager) Close() error {
 // startWatcher initializes the filesystem watcher for hot-reload.
 // criticalities-remediation (LOW lifecycle): on its own error path the
 // watcher is closed — an error return must not leak the created watcher
-// (component-lifecycle spec: "watcher error path cleans up").
+// (the watcher error path cleans up).
 func (m *Manager) startWatcher(ctx context.Context) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {

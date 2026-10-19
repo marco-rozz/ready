@@ -15,9 +15,8 @@ import (
 // builds every turn) into the []*schema.AgenticMessage shape required by the
 // agentic (Responses API) construction path.
 //
-// The session transcript carries the in-turn ReAct exchange
-// (the session-transcript-persistence): an assistant message's
-// tool calls become FunctionToolCall blocks and a tool result becomes a
+// The session transcript carries the in-turn ReAct exchange:
+// an assistant message's tool calls become FunctionToolCall blocks and a tool result becomes a
 // user-role FunctionToolResult block with the same call id — the shape
 // Eino's own agentic tools node produces — so a transcript written under any
 // protocol replays here.

@@ -18,7 +18,7 @@ func staticAssemble(llm.PromptLayout) []*schema.Message {
 	return []*schema.Message{schema.UserMessage("hi")}
 }
 
-// session-transcript-persistence §D10: with recorded, complete tool-call
+// With recorded, complete tool-call
 // groups the turn is resume-ready — an advanceable failure moves on to the
 // next candidate, which re-assembles from the live history. Tool activity of
 // the failed attempt stays visible on the final outcome.
@@ -186,7 +186,7 @@ func strictToolPairing(input []*schema.Message) error {
 	return nil
 }
 
-// Spec "Resume across protocols": an Ollama candidate records a tool-call
+// Resume across protocols: an Ollama candidate records a tool-call
 // group with provider-empty ids and then dies; the chat_completions fallback
 // receives the recorded group with matching non-empty ids, is not rejected
 // for request shape, and continues without re-executing the tool.

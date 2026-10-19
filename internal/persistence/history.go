@@ -32,7 +32,7 @@ type MessageKind string
 const (
 	// KindTurnContext marks the per-turn turn-context message (user role),
 	// recorded immediately after the turn's user message
-	// (the session-transcript-persistence §D6). It is NOT a turn
+	// It is NOT a turn
 	// boundary.
 	KindTurnContext MessageKind = "turn_context"
 	// KindCompaction is a Compaction record (session-lifecycle D3): summary,

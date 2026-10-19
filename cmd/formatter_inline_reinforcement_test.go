@@ -88,7 +88,7 @@ func TestApplyFormatterInlineReinforcement_PostStepIsUntouched(t *testing.T) {
 	}
 }
 
-// Task 3.2 — inline mode wraps position-1 with the formatter skill, but never
+// Inline mode wraps position-1 with the formatter skill, but never
 // rewrites the user message (the envelope is now a separate turn-context
 // message built elsewhere).
 func TestApplyFormatterInlineReinforcement_InlineWrapsOnlyNoEnvelope(t *testing.T) {
@@ -156,7 +156,7 @@ func openTurn(h *persistence.ConversationHistory, user, turnID string, in format
 	})
 }
 
-// Task 3.4/D3 — under LayoutTailDynamic the recorded turn-context line is the
+// Under LayoutTailDynamic the recorded turn-context line is the
 // last element on the first attempt and uses Role: user; nothing is appended.
 func TestAssembleTailDynamic_TurnContextIsLastUserMessage(t *testing.T) {
 	prefix := []*schema.Message{schema.SystemMessage("static")}
@@ -180,7 +180,7 @@ func TestAssembleTailDynamic_TurnContextIsLastUserMessage(t *testing.T) {
 	}
 }
 
-// Spec "Resumed attempt reuses the recorded turn context": a retry assembles
+// A resumed attempt reuses the recorded turn context: a retry assembles
 // exactly one turn-context message for the turn, right after the user
 // message and followed by the recorded tool-call groups.
 func TestAssembleTailDynamic_ResumedAttemptReusesTurnContext(t *testing.T) {
@@ -212,8 +212,8 @@ func TestAssembleTailDynamic_ResumedAttemptReusesTurnContext(t *testing.T) {
 	}
 }
 
-// Task 3.4/D5 + spec "Head-safe folds the current turn context and keeps past
-// ones": the current turn context is folded into a leading system message and
+// Head-safe folds the current turn context and keeps past
+// ones: the current turn context is folded into a leading system message and
 // not repeated in history; past turn-context lines stay as user messages.
 func TestAssembleHeadSafe_TurnContextIsLeadingSystemMessage(t *testing.T) {
 	prefix := []*schema.Message{schema.SystemMessage("static")}
@@ -252,7 +252,7 @@ func TestAssembleHeadSafe_TurnContextIsLeadingSystemMessage(t *testing.T) {
 	}
 }
 
-// Task 3.7 — directive recency under LayoutTailDynamic: the formatting
+// Directive recency under LayoutTailDynamic: the formatting
 // directive stays the final block of the turn context.
 func TestBuildTurnContextInput_DirectiveRecency(t *testing.T) {
 	in := tailTurnContextInput(channelFormatterCfg{skillName: "s", postStep: false})
@@ -263,7 +263,7 @@ func TestBuildTurnContextInput_DirectiveRecency(t *testing.T) {
 	}
 }
 
-// Task 3.10 — post-step channels (or empty formatter_skill) get no
+// Post-step channels (or empty formatter_skill) get no
 // reinforcement blocks, but the turn context still carries the timestamp.
 func TestBuildTurnContextInput_PostStepOmitsReinforcement(t *testing.T) {
 	fmtCfg := channelFormatterCfg{skillName: "petscii-formatter", postStep: true}
@@ -282,7 +282,7 @@ func TestBuildTurnContextInput_PostStepOmitsReinforcement(t *testing.T) {
 	}
 }
 
-// Task 3.8 — history identity: the user message bytes in the assembled
+// History identity: the user message bytes in the assembled
 // conversation equal the bytes persisted for that turn (the turn-context
 // message is a separate element, never folded into the user message).
 func TestHistoryIdentity_AssembledUserBytesEqualPersistedBytes(t *testing.T) {
@@ -337,7 +337,7 @@ func TestHistoryIdentity_AssembledUserBytesEqualPersistedBytes(t *testing.T) {
 	}
 }
 
-// Task 6.1/6.2 + session-transcript-persistence §D9 — under
+// Cache-reusable prefix across turns — under
 // LayoutTailDynamic, turn N's whole assembled conversation (its recorded
 // turn-context message included) is a byte-identical prefix of turn N+1's:
 // the cross-turn cache boundary is the end of turn N, not its user message.

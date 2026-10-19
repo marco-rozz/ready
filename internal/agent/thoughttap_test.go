@@ -661,7 +661,7 @@ func TestTurnTapAgentic_DisabledDoesNoWork(t *testing.T) {
 	}
 }
 
-// Task 2.4: best-effort rendering of structured and multimodal values.
+// Best-effort rendering of structured and multimodal values.
 func TestTurnTapAgentic_ValueRendering(t *testing.T) {
 	var buf bytes.Buffer
 	tt := newEnabledTurnTap(&buf, "cli")
@@ -703,7 +703,7 @@ func TestTurnTapAgentic_ValueRendering(t *testing.T) {
 	}
 }
 
-// Task 2.5: provider-specific, encrypted, and metadata fields never reach
+// Provider-specific, encrypted, and metadata fields never reach
 // ReAct records, and neither does a final answer.
 func TestTurnTapAgentic_PrivacyBoundary(t *testing.T) {
 	var buf bytes.Buffer

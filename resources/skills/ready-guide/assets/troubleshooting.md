@@ -5,6 +5,16 @@ user-visible text to look for, and the actionable next step.
 
 ## Config fails to load
 
+- Missing/invalid `config_version` — the first supported schema is the integer
+  `1`; check the layout against the shipped example before marking an old
+  development file. There is no historical import or automatic version guess.
+- `config_version … binary target …` — if older, `login` prints the exact
+  `ready serve --config …` command to migrate and start the daemon; if newer,
+  upgrade the binary. Do not lower the marker by hand.
+- `configuration changed during migration` — stop concurrent editors and retry;
+  the observed external edit was preserved. A migration requires an unlinked
+  regular file and directory permissions for backup, temporary file and lock.
+
 - `failed to read config file` / `failed to parse config file` — the YAML
   itself: check indentation/syntax; remember the unparser is non-strict, so
   a wrongly-spelled NEW key never errors, it is silently ignored. When a
@@ -17,7 +27,11 @@ user-visible text to look for, and the actionable next step.
   they are the same logical channel.
 - `channels.zmqcli.auth_token … required` — set a secret of at least 32
   chars on both daemon and client.
-- `no channels enabled in configuration` — enable something.
+- `no channels enabled in configuration` — enable something. With the
+  zmq-first default, setting `channels.zmqcli.auth_token_file` (or
+  `auth_token`) is enough to enable `zmqcli`; an explicit
+  `channels.zmqcli.enabled: false` or `channels.cli.enabled: true` disables
+  that default.
 
 ## Boot warnings that do NOT block
 
@@ -110,3 +124,12 @@ you decide what to fix:
   than 16 messages while its worker was busy; slow down that flood source.
 - `PANIC in session worker` + recovery — the turn died, the address keeps
   serving; capture the stack and report.
+
+## First start on slow storage
+
+- Tens of seconds of complete silence before the banner after installing on
+  a Raspberry Pi 1-class board (slow SD card) — the statically linked binary
+  is read entirely from a cold page cache before anything can execute or
+  print. This is normal, not a hang: the banner appears within milliseconds
+  once the ELF finishes loading. Subsequent starts are faster while the
+  page cache is warm; a reboot puts the full read cost back.

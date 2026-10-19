@@ -75,7 +75,7 @@ func NewAgentic(ctx context.Context, cfg AgenticConfig, tap *Tap) (*AgenticAgent
 		toolsConfig.Tools = cfg.Tools
 	}
 
-	// Transcript persistence barrier (session-transcript-persistence).
+	// Transcript persistence barrier.
 	cfg.Model = withAgenticTranscriptBarrier(cfg.Model)
 
 	chatModelAgent, err := adk.NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &adk.TypedChatModelAgentConfig[*schema.AgenticMessage]{
@@ -171,7 +171,7 @@ func (a *AgenticAgent) RunMessagesStreaming(ctx context.Context, sessionKey stri
 
 	iter := r.Run(ctx, agenticMessages)
 
-	// Transcript sink (session-transcript-persistence): nil when unarmed.
+	// Transcript sink: nil when unarmed.
 	rec := newTranscriptEmitter(ctx, messages)
 
 	// Per-invocation thought tap; no-op when tap is nil or disabled.

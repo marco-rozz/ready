@@ -58,7 +58,7 @@ func sessionIsActive(t *testing.T, req zmq4.Socket, sessionID string) bool {
 }
 
 // ----------------------------------------------------------------------------
-// Task 1.3: session_end releases the lock regardless of identity
+// session_end releases the lock regardless of identity
 // ----------------------------------------------------------------------------
 
 // TestSessionEnd_FromDifferentIdentityReleases verifies the zmq-session-
@@ -144,7 +144,7 @@ func TestSessionEnd_ForeignSessionIDDoesNotRelease(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 2.3 + 3.4: ping handler and liveness watchdog
+// Ping handler and liveness watchdog
 // ----------------------------------------------------------------------------
 
 // TestPing_UpdatesHeartbeatAndReplies verifies the ping handler: ok reply for
@@ -306,7 +306,7 @@ func TestLiveness_NeverPinged_Exempt(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 4.3: handshake carries liveness_timeout
+// Handshake carries liveness_timeout
 // ----------------------------------------------------------------------------
 
 // TestHandshake_CarriesLivenessTimeout verifies the authenticated handshake

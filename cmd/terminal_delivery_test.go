@@ -428,8 +428,7 @@ func TestProcessMessage_TerminalDelivery_CLI_SuccessUnchanged(t *testing.T) {
 }
 
 // TestProcessMessage_TerminalDelivery_Telegram_NoStreamMessage fixes the
-// Telegram defect (task 3.2, spec scenario "Telegram failure before first
-// chunk is not silent"): when no stream message exists, the channel creates
+// Telegram defect (a failure before the first chunk must not be silent): when no stream message exists, the channel creates
 // exactly one new message carrying the temporary-unavailability text.
 func TestProcessMessage_TerminalDelivery_Telegram_NoStreamMessage(t *testing.T) {
 	tg := &termTGChannel{}
@@ -461,7 +460,7 @@ func TestProcessMessage_TerminalDelivery_Telegram_NoStreamMessage(t *testing.T) 
 }
 
 // TestProcessMessage_TerminalDelivery_Telegram_PartialAppend covers task
-// 3.3 (spec scenario "Partial response is retained and marked"): the
+// A partial response is retained and marked: the
 // incomplete-response message is appended after the partial output via a
 // final edit, without replacing the partial content.
 func TestProcessMessage_TerminalDelivery_Telegram_PartialAppend(t *testing.T) {
@@ -504,8 +503,8 @@ func TestProcessMessage_TerminalDelivery_Telegram_PartialAppend(t *testing.T) {
 }
 
 // TestProcessMessage_TerminalDelivery_ZMQ_ExactlyOnce covers task 3.4
-// (spec scenario "ZMQ terminal reply consumes the pending slot exactly
-// once"): progress chunks ride SendNotification, and the failed turn's
+// (a ZMQ terminal reply consumes the pending slot exactly
+// once): progress chunks ride SendNotification, and the failed turn's
 // terminal message is delivered through exactly one final reply.
 func TestProcessMessage_TerminalDelivery_ZMQ_ExactlyOnce(t *testing.T) {
 	z := &termZMQChannel{}
@@ -534,7 +533,7 @@ func TestProcessMessage_TerminalDelivery_ZMQ_ExactlyOnce(t *testing.T) {
 }
 
 // TestProcessMessage_TerminalBypassesPostStepFormatter covers task 2.4
-// (spec scenario "Post-step formatter is bypassed for terminal messages"):
+// (the post-step formatter is bypassed for terminal messages):
 // on a formatter_post_step: true channel, a failed turn makes NO formatter
 // LLM call and the fixed message text is delivered unchanged.
 func TestProcessMessage_TerminalBypassesPostStepFormatter(t *testing.T) {
@@ -563,8 +562,7 @@ func TestProcessMessage_TerminalBypassesPostStepFormatter(t *testing.T) {
 }
 
 // TestProcessMessage_TerminalSurvivesAgentRunDeadline covers task 2.5
-// (spec scenario "Terminal message survives an agent-run timeout", design
-// A4): when the turn fails BECAUSE the agent-run deadline expired, the
+// (the terminal message survives an agent-run timeout): when the turn fails BECAUSE the agent-run deadline expired, the
 // terminal message is still delivered on a live (message-scoped) context.
 func TestProcessMessage_TerminalSurvivesAgentRunDeadline(t *testing.T) {
 	origTimeout := agentRunTimeout
@@ -599,7 +597,7 @@ func TestProcessMessage_TerminalSurvivesAgentRunDeadline(t *testing.T) {
 }
 
 // TestProcessMessage_FormatterFailureReturnsUnformatted covers task 4.1
-// (spec scenario "Formatter outage preserves main response"): when the main
+// (a formatter outage preserves the main response): when the main
 // agent succeeds but the post-step formatter call fails, the user receives
 // the unformatted main response and the turn is not a failure.
 func TestProcessMessage_FormatterFailureReturnsUnformatted(t *testing.T) {

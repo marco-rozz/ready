@@ -36,6 +36,19 @@ jobs:
           go-version-file: go.mod
       - run: go test ./... -race
 
+  config-migrations:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: verify config file transactions on the host filesystem
+        run: go test ./internal/config -run 'TestConfigVersion|TestMigration' -count=1
+
   cross-build:
     # Compiles the exact release matrix; asserts the arm6 binary is really
     # statically linked (the noshiftprobe tag must keep suppressing purego's
@@ -72,11 +85,25 @@ jobs:
               go build $tagflags -o /tmp/ready-build -trimpath ./cmd
             echo "::endgroup::"
           done
-      - name: verify the linux/arm6 binary is statically linked
+      - name: verify the linux/arm6 binary is statically linked and within the size budget
         run: |
           set -euo pipefail
+          # Same flags as the goreleaser armv6 build (-s -w strip, trimpath) so
+          # the size measured here is the released artifact's size.
           GOOS=linux GOARCH=arm GOARM=6 CGO_ENABLED=0 \
-            go build -tags noshiftprobe -o /tmp/ready-arm6 ./cmd
+            go build -tags noshiftprobe -trimpath -ldflags "-s -w" -o /tmp/ready-arm6 ./cmd
           # grep exits non-zero (failing the step) unless `file` reports the
           # binary as statically linked.
           file /tmp/ready-arm6 | grep 'statically linked'
+          # Size budget: keep the cold-start read cost of Raspberry Pi 1-class
+          # storage bounded (slim baseline: 54.4 MB, ~3% headroom) and catch
+          # accidental dependency re-fattening before a tag is cut. On breach,
+          # audit what got linked with:
+          #   go tool nm -size /tmp/ready-arm6 | sort -k2 -n -r | head -40
+          max_bytes=$((56 * 1024 * 1024))
+          size=$(stat -c %s /tmp/ready-arm6)
+          echo "armv6 stripped artifact: ${size} bytes (budget ${max_bytes})"
+          if [ "$size" -gt "$max_bytes" ]; then
+            echo "::error::armv6 stripped artifact ${size} bytes exceeds the 56 MB size budget. Audit linked dependencies with: go tool nm -size <binary> | sort -k2 -n -r | head -40" >&2
+            exit 1
+          fi

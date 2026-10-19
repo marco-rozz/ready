@@ -25,7 +25,7 @@ type TargetSpec struct {
 	EntityIDs []string
 }
 
-// resolveTargets resolves spec against the twin's registries (D6, in order):
+// resolveTargets resolves spec against the twin's registries, in order:
 // explicit-id validation, disabled-entity exclusion, group/member de-dup,
 // unavailable reporting, max_targets cap, zero-match refusal. The returned
 // slice is ordered by entity_id for determinism.

@@ -16,8 +16,7 @@ import (
 // These tests provoke each classifyError sentinel through the official SDK
 // (P6): a pattern that only matches a fabricated string can silently stop
 // matching a real SDK error message without failing a test or breaking the
-// build. Task 7.1 requires each of classifyError's categories to be pinned
-// this way.
+// build. Each of classifyError's categories is pinned this way.
 
 // TestClassifyError_ToolNotFound_ThroughSDK calls a tool the mock server does
 // not expose over a real in-process session, so the "unknown tool" message

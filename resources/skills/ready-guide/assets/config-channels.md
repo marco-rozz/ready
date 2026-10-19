@@ -21,12 +21,23 @@ Mutually exclusive — enabling both fails boot. They share the logical
 channel name `cli`, so no other config changes when switching.
 
 - `cli`: the plain stdin/stdout conversation, used mainly for development.
-- `zmqcli`: the daemon side of the `ready chat` client (see
+  Off by default.
+- `zmqcli`: the primary operator interface. **zmq-first default**: when
+  `channels.zmqcli.enabled` is not written and `channels.cli.enabled` is not
+  true, it turns on as soon as `auth_token` or `auth_token_file` is set. An
+  explicit `enabled` key always wins (`enabled: false` keeps it off; an
+  explicit `cli.enabled: true` suppresses the default). With no secret and no
+  explicit key it stays off, and `ready serve` then needs another enabled
+  channel to start. `config.example.yaml` leaves these keys commented for that
+  reason. This is the daemon side of the `ready chat` client (see
   `using-ready.md`). Keys:
-  - `bind` — ROUTER endpoint; default `tcp://127.0.0.1:7600`.
+  - `bind` — ROUTER endpoint; default `tcp://127.0.0.1:7600` (loopback only).
+    For `ready chat` on other hosts bind a reachable interface, e.g.
+    `tcp://0.0.0.0:7600`; the HMAC secret is what protects it.
   - `auth_token` / `auth_token_file` — exactly one required when enabled;
-    minimum secret length 32 chars (the error suggests
-    `openssl rand -hex 16`); `_file` content is trimmed.
+    minimum secret length 32 chars (generate with `openssl rand -hex 32`;
+    `-hex 16` is the shortest that passes); prefer `auth_token_file` so the
+    secret stays out of the YAML; `_file` content is trimmed.
   - `connection_idle_timeout` — idle-Connection watchdog (default 15m).
     History note: an older `session_timeout` spelling was a renamed key and
     now fails boot naming the new one.

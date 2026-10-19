@@ -13,7 +13,7 @@ const dayLayout = "2006-01-02"
 // segmentScheme derives segment names from logging.file_path and is the only
 // place that builds or recognises them: rotation and retention both go
 // through parse, so "retention deletes only segment files" holds by
-// construction (log-file-rotation spec).
+// construction.
 type segmentScheme struct {
 	dir  string
 	base string

@@ -72,7 +72,6 @@ func New(ctx context.Context, cfg Config, tap *Tap) (*Agent, error) {
 	}
 
 	// Protocol-portable tool-call ids before Eino's tools node sees a call
-	// (session-transcript-persistence §D3).
 	cfg.ChatModel = withToolCallIDs(cfg.ChatModel)
 
 	chatModelAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
@@ -205,7 +204,7 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 	// Start a per-turn thought tap; no-op when tap is nil or disabled.
 	tt := a.tap.StartTurn(sessionKey)
 
-	// Transcript sink (session-transcript-persistence): nil when the caller
+	// Transcript sink: nil when the caller
 	// armed none (probes, aux consumers, tests).
 	rec := newTranscriptEmitter(ctx, messages)
 

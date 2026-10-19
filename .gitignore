@@ -31,7 +31,8 @@ temp_description.md
 ready-landing
 HA_Backup
 /poc/
-/docs/
+/docs/*
+!/docs/config-versioning.md
 /tasks/
 CONTEXT.md
 handoff-*.md
@@ -54,3 +55,7 @@ sphera.py
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 scratch/
+
+# goreleaser build output — must be invisible to Go's VCS stamping, otherwise
+# every release build stamps vcs.modified=true (+dirty on the module version).
+/dist/

@@ -54,8 +54,7 @@ type TurnOutcome struct {
 // `responses` protocol) implement Runner, so cmd/serve.go's agentRegistry
 // holds one interface value regardless of which protocol resolved at boot —
 // the formatter pipeline, checkpoint history, and dispatcher code are
-// unaware which construction path is active. See
-// tasks/arch_eino-agentic-model-survey.md.
+// unaware which construction path is active.
 type Runner interface {
 	RunMessagesStreaming(ctx context.Context, sessionKey string, messages []*schema.Message, onChunk func(string)) (TurnOutcome, error)
 }

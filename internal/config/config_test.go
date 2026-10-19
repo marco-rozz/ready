@@ -26,6 +26,7 @@ const (
 
 func TestLoad_ValidConfig(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -104,6 +105,7 @@ compaction:
 
 func TestLoad_CLIOnlyConfig(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -153,6 +155,84 @@ channels:
 		cfg.Compaction.Timeout != 180*time.Second {
 		t.Errorf("unexpected compaction defaults: %+v", cfg.Compaction)
 	}
+}
+
+// zmq-first channel default: when the operator does not set
+// channels.zmqcli.enabled explicitly, the daemon enables the ZMQ CLI
+// channel and keeps the legacy stdin CLI off as soon as a shared secret is
+// configured (auth_token or auth_token_file). An explicit enabled key on
+// either channel always wins, and a config with no ZMQ token at all boots
+// headless (both channels off) instead of failing validation.
+func TestLoad_ZMQFirstDefault(t *testing.T) {
+	base := `
+config_version: 1
+llm:
+  default: "p::test"
+  providers:
+    p:
+      provider: "ollama"
+      api: ollama
+channels:
+  zmqcli:
+    bind: tcp://127.0.0.1:7600
+`
+	zmqAuthBlock := "    auth_token: token-0123456789abcdef\n"
+
+	t.Run("token configured without enabled key", func(t *testing.T) {
+		cfg, err := Load(context.Background(), writeTempFile(t, base+zmqAuthBlock))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.Channels.ZMQCLI.Enabled {
+			t.Error("expected zmqcli enabled by default when a token is configured")
+		}
+		if cfg.Channels.CLI.Enabled {
+			t.Error("expected legacy cli disabled by default")
+		}
+	})
+
+	t.Run("no token and no enabled key boots headless", func(t *testing.T) {
+		cfg, err := Load(context.Background(), writeTempFile(t, base))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Channels.ZMQCLI.Enabled || cfg.Channels.CLI.Enabled {
+			t.Errorf("expected both channels off, got zmqcli=%v cli=%v", cfg.Channels.ZMQCLI.Enabled, cfg.Channels.CLI.Enabled)
+		}
+	})
+
+	t.Run("explicit zmqcli disabled stays off", func(t *testing.T) {
+		cfg, err := Load(context.Background(), writeTempFile(t, base+zmqAuthBlock+"    enabled: false\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Channels.ZMQCLI.Enabled || cfg.Channels.CLI.Enabled {
+			t.Errorf("expected both channels off, got zmqcli=%v cli=%v", cfg.Channels.ZMQCLI.Enabled, cfg.Channels.CLI.Enabled)
+		}
+	})
+
+	t.Run("explicit cli enabled suppresses the default", func(t *testing.T) {
+		cfg, err := Load(context.Background(), writeTempFile(t, base+zmqAuthBlock+"  cli:\n    enabled: true\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.Channels.CLI.Enabled {
+			t.Error("expected cli enabled")
+		}
+		if cfg.Channels.ZMQCLI.Enabled {
+			t.Error("expected zmqcli disabled when cli is explicitly enabled")
+		}
+	})
+
+	t.Run("both explicitly enabled still fails validation", func(t *testing.T) {
+		cfg, err := Load(context.Background(), writeTempFile(t, base+zmqAuthBlock+"    enabled: true\n  cli:\n    enabled: true\n"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Error("expected validation error for both channels enabled")
+		}
+	})
 }
 
 func TestLoad_MissingFile(t *testing.T) {
@@ -309,6 +389,7 @@ func TestValidate_MissingAPIKeyForKeyedProvider(t *testing.T) {
 
 func TestValidate_LegacyLLMShapeRejected(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   provider: "ollama"
   api: ollama
@@ -339,6 +420,7 @@ channels:
 
 func TestValidate_LegacyModelsShapeRejected(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "ollama-gemma"
   models:
@@ -372,6 +454,7 @@ channels:
 
 func TestValidate_MissingAPIIsRejected(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "zen::deepseek-v4-flash-free"
   providers:
@@ -469,6 +552,7 @@ func TestValidate_ProviderAPITable(t *testing.T) {
 func TestValidate_RecoveryDefaultsAndValidation(t *testing.T) {
 	t.Run("defaults apply when omitted", func(t *testing.T) {
 		content := `
+config_version: 1
 llm:
   default: "zen::deepseek-v4-flash-free"
   providers:
@@ -575,7 +659,7 @@ channels:
 			if tc.name == "negative attempt timeout" {
 				attempt = "  failover_attempt_timeout: -45s\n"
 			}
-			content := "\nllm:\n  default: \"zen::deepseek-v4-flash-free\"\n" + attempt + tc.recovery +
+			content := "config_version: 1\nllm:\n  default: \"zen::deepseek-v4-flash-free\"\n" + attempt + tc.recovery +
 				"  providers:\n    zen:\n      provider: \"opencode\"\n      api: chat_completions\n      api_key: \"test-key\"\nchannels:\n  cli:\n    enabled: true\n"
 			path := writeTempFile(t, content)
 			cfg, err := Load(context.Background(), path)
@@ -595,6 +679,7 @@ channels:
 
 	t.Run("explicit zero disables attempt budget and retries", func(t *testing.T) {
 		content := `
+config_version: 1
 llm:
   default: "zen::model"
   failover_attempt_timeout: 0s
@@ -685,6 +770,7 @@ func TestValidate_ValidConfig(t *testing.T) {
 
 func TestLoad_NewOwnerProfileShape(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -737,6 +823,7 @@ builtin_tools:
 
 func TestLoad_DiscloseDeniedToolsFlag(t *testing.T) {
 	base := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -811,6 +898,7 @@ profiles:
 
 func TestValidate_RejectsPreRefactorProfileShape(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -889,6 +977,7 @@ func TestHasEnabledChannels(t *testing.T) {
 // absent → false; explicit true → true; explicit false → false.
 func TestLoggingThoughts_Absent(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "p::test"
   providers:
@@ -913,6 +1002,7 @@ logging:
 
 func TestLoggingThoughts_ExplicitTrue(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "p::test"
   providers:
@@ -938,6 +1028,7 @@ logging:
 
 func TestLoggingThoughts_ExplicitFalse(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "p::test"
   providers:
@@ -963,6 +1054,7 @@ logging:
 
 func TestLoggingThoughts_NonBooleanError(t *testing.T) {
 	content := `
+config_version: 1
 llm:
   default: "p::test"
   providers:
@@ -1120,7 +1212,7 @@ func TestValidate_OllamaKeepAliveAndOptionsOK(t *testing.T) {
 }
 
 // TestValidate_SingleProviderRegistry covers the single-provider scenario from
-// the spec: one llm.providers entry and a default referencing a model on it.
+// the contract: one llm.providers entry and a default referencing a model on it.
 func TestValidate_SingleProviderRegistry(t *testing.T) {
 	cfg := &Config{
 		LLM: LLMConfig{
@@ -1390,6 +1482,7 @@ func TestValidate_RemovedKeysRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			content := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -1418,6 +1511,7 @@ func loadSessionsYAML(t *testing.T, block string) (*Config, error) {
 	t.Helper()
 
 	content := `
+config_version: 1
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:

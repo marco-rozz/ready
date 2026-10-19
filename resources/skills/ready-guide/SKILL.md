@@ -44,8 +44,9 @@ When asked to help configure READY., do not dump YAML. Walk the user through
 the configuration, one block at a time, in this order:
 
 1. **Decide how ready is run first**: with a terminal client (`zmqcli`) or
-   the stdin CLI (`cli`)? Exactly one of the two may be enabled. Telegram
-   comes later.
+   the stdin CLI (`cli`)? Exactly one of the two may be enabled; `zmqcli`
+   is the default and turns on by itself once a shared secret is set (the
+   stdin `cli` is off unless enabled explicitly). Telegram comes later.
 2. **Then the LLM**: at least one provider (`llm.default`), then whether a
    failover chain makes sense. Ask about budget/privacy (local Ollama vs
    cloud) before proposing models.
@@ -63,7 +64,8 @@ Interview rules:
   `*_token` config key has a `_file` twin. Prefer the file form.
 - After each agreed block, compose the new YAML section in the style of
   `config.example.yaml` (comments and all), then move to the next block.
-- At the end, assemble the complete file, remind the user which config path
+- At the end, assemble the complete file with top-level `config_version: 1`,
+  remind the user which config path
   the daemon will elect (explicit `--config` > `./.ready/config.yaml` >
   `~/.ready/config.yaml`), and remind that config is read **at boot only**:
   changes need a `ready serve` restart.

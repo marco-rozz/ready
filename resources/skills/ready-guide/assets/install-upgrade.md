@@ -31,7 +31,7 @@ Installer options (same meanings on both platforms):
 - `--purge` (with `--uninstall`) — also deletes the install home, asking for
   confirmation (`--yes` skips it when there is no TTY).
 
-Pin a version: `VERSION=v0.1.2 curl … | bash -s --` (must start with `v`).
+Pin a version: `VERSION=v0.2.0 curl … | bash -s --` (must start with `v`).
 
 Platform notes an installer will enforce:
 
@@ -75,6 +75,30 @@ follows the runtime home like everything else.
 `ready serve` logs the elected config at INFO (and warns when it is
 group/other-readable on unix); `ready login` prints `using config <path>`,
 so a login run from the wrong directory is visible immediately.
+
+## Config schema version
+
+Every complete configuration requires top-level `config_version: 1`, independent
+of the READY release version. The initial version has no historical migrations:
+an unversioned file must be checked against the current example and marked
+manually. Adding the marker does not convert an obsolete layout.
+
+Future schema migrations run automatically only in `ready serve`, before runtime
+startup: all steps are applied in memory and validated before a protected backup
+and atomic replacement. Comments and untouched YAML values survive; whitespace
+may normalize. Current-version files are never rewritten. All `login` modes
+remain read-only for config and print a safely quoted same-config `serve` command
+when migration is needed; that command also starts the daemon. A newer schema
+requires a compatible newer binary; never lower the marker to force a downgrade.
+
+Backups are siblings named `<config-name>.bak.<UTC timestamp>.<unique suffix>`;
+the newest three recognized backups for that config are retained after success.
+The sibling `<config-name>.migration.lock` persists but only holds an OS lock
+during migration. Required upgrades need directory write access and a regular
+file with one hard link (no symlink leaf). Stop READY while editing or restoring
+a selected backup, and restore a binary compatible with that schema as needed.
+Backup-pruning failures warn without undoing a committed migration. A later boot
+failure reports the committed state and backup path rather than reverting it.
 
 ## Install home layout
 

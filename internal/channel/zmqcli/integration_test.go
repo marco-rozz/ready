@@ -166,7 +166,7 @@ func sendSessionEndMsg(t *testing.T, req zmq4.Socket, sessionID string) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.2: Happy path
+// Happy path
 // ----------------------------------------------------------------------------
 
 // TestIntegration_HappyPath verifies the full flow:
@@ -209,7 +209,7 @@ func TestIntegration_HappyPath(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.3: Busy rejection
+// Busy rejection
 // ----------------------------------------------------------------------------
 
 // TestIntegration_BusyRejection verifies that a second concurrent client
@@ -286,7 +286,7 @@ func TestIntegration_BusyRejection(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.4: Auth fail + no-token-in-logs
+// Auth fail + no-token-in-logs
 // ----------------------------------------------------------------------------
 
 // TestIntegration_AuthFail verifies that connecting with the wrong secret
@@ -349,7 +349,7 @@ func TestIntegration_AuthFail(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.5: Shutdown
+// Shutdown
 // ----------------------------------------------------------------------------
 
 // TestIntegration_Shutdown verifies that cancelling the daemon's root context
@@ -411,7 +411,7 @@ func TestIntegration_Shutdown(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.7: Session timeout watchdog
+// Session timeout watchdog
 // ----------------------------------------------------------------------------
 
 // TestIntegration_SessionTimeout verifies the idle-timeout watchdog:
@@ -466,7 +466,7 @@ func TestIntegration_SessionTimeout(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.8: No runtime-home writes for chat
+// No runtime-home writes for chat
 // ----------------------------------------------------------------------------
 
 // TestIntegration_NoHomeWrites verifies that the zmqcli channel itself never
@@ -494,7 +494,7 @@ func TestIntegration_NoHomeWrites(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Task 7.9: No token in logs (full session)
+// No token in logs (full session)
 // ----------------------------------------------------------------------------
 
 // TestIntegration_NoTokenInLogs runs a complete authenticated session and

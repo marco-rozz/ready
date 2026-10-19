@@ -313,7 +313,7 @@ func assembleRecorder(seen *[]llm.PromptLayout, msgs *[][]*schema.Message) func(
 
 // ── Ordered selection, exhaustion, promotion ──────────────────────────────
 
-// Task 3.2/3.14: candidates are attempted in declared order, at most once
+// Candidates are attempted in declared order, at most once
 // each; an exhausted chain returns ErrChainExhausted wrapping the last
 // candidate's error.
 func TestRunTurn_ChainExhaustedInOneTurn(t *testing.T) {
@@ -353,7 +353,7 @@ func TestRunTurn_ChainExhaustedInOneTurn(t *testing.T) {
 	}
 }
 
-// Task 3.2 spec scenario: chain is exhausted in one turn and the second
+// Chain is exhausted in one turn and the second
 // fallback's response is returned.
 func TestRunTurn_SecondFallbackServesInSameTurn(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: unauthorized")}}}
@@ -385,7 +385,7 @@ func TestRunTurn_SecondFallbackServesInSameTurn(t *testing.T) {
 	}
 }
 
-// Task 3.6 spec scenario: candidate is promoted only after success — a
+// Candidate is promoted only after success — a
 // fallback whose own first call fails never becomes active.
 func TestRunTurn_PromotionOnlyAfterSuccess(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 404: model not found")}}}
@@ -424,7 +424,7 @@ func TestRunTurn_PromotionOnlyAfterSuccess(t *testing.T) {
 	}
 }
 
-// Task 4.8: a mixed chat/`responses` chain is not filtered by protocol —
+// A mixed chat/`responses` chain is not filtered by protocol —
 // selection is at the agent.Runner boundary, so protocol kinds are invisible.
 func TestRunTurn_MixedProtocolChainNotFiltered(t *testing.T) {
 	rChat := &fakeRunner{steps: []runnerStep{{err: errors.New("error 404: model not found")}}}
@@ -449,7 +449,7 @@ func TestRunTurn_MixedProtocolChainNotFiltered(t *testing.T) {
 	}
 }
 
-// Task 3.2 retry gate: a failure after a completed tool call ends the turn —
+// Retry gate: a failure after a completed tool call ends the turn —
 // the retry would restart a ReAct loop whose tool already ran.
 func TestRunTurn_NoRetryAfterCompletedToolCall(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{outcome: agent.TurnOutcome{ToolCallCompleted: true}, err: errors.New("error 401: unauthorized")}}}
@@ -803,7 +803,7 @@ func TestRunTurn_OuterDeadlineDoesNotDemoteOrAdvance(t *testing.T) {
 	}
 }
 
-// Task 3.2 retry gate: a stream failure after content was delivered ends the
+// Retry gate: a stream failure after content was delivered ends the
 // turn — a retry would duplicate already-streamed content.
 func TestRunTurn_NoRetryAfterDeliveredContent(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{outcome: agent.TurnOutcome{ContentDelivered: true}, err: errors.New("error 500: boom")}}}
@@ -825,7 +825,7 @@ func TestRunTurn_NoRetryAfterDeliveredContent(t *testing.T) {
 	}
 }
 
-// Task 2.6/D3: a request-shape 400 neither advances nor demotes.
+// A request-shape 400 neither advances nor demotes.
 func TestRunTurn_RequestShape400NoAdvanceNoDemote(t *testing.T) {
 	var buf syncBuffer
 	logger := zerolog.New(&buf)
@@ -885,7 +885,7 @@ func (b *syncBuffer) String() string {
 
 // ── Attempt budgets ────────────────────────────────────────────
 
-// Task 3.3: a silent streaming candidate is cut off at the TTFT budget,
+// A silent streaming candidate is cut off at the TTFT budget,
 // demoted on the hard ladder, and the fallback is attempted in the same turn.
 func TestRunTurn_TTFTBudgetSilentCandidate(t *testing.T) {
 	clk := newFakeClock()
@@ -916,7 +916,7 @@ func TestRunTurn_TTFTBudgetSilentCandidate(t *testing.T) {
 	}
 }
 
-// Task 3.3 spec scenario: a slow but working candidate is not demoted — once
+// A slow but working candidate is not demoted — once
 // the first chunk arrives, only the outer deadline applies.
 func TestRunTurn_SlowButWorkingNotDemoted(t *testing.T) {
 	r1 := &fakeRunner{steps: []runnerStep{{outcome: okOutcome("nope")}}}
@@ -1065,7 +1065,7 @@ func (d *delayedRunner) RunMessagesStreaming(ctx context.Context, _ string, _ []
 	return agent.TurnOutcome{Reply: d.reply, ContentDelivered: true}, nil
 }
 
-// Task 3.4: a non-streaming attempt receives a proportional share of the
+// A non-streaming attempt receives a proportional share of the
 // remaining outer deadline — one third with three untried candidates.
 func TestRunTurn_NonStreamingProportionalShare(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: unauthorized")}}}
@@ -1106,7 +1106,7 @@ func TestRunTurn_NonStreamingProportionalShare(t *testing.T) {
 	}
 }
 
-// Task 3.3/3.4: an attempt-budget expiry on the non-streaming path is
+// An attempt-budget expiry on the non-streaming path is
 // classified hard and the fallback is attempted.
 func TestRunTurn_NonStreamingBudgetExpiryAdvances(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{block: true}}}
@@ -1138,7 +1138,7 @@ func TestRunTurn_NonStreamingBudgetExpiryAdvances(t *testing.T) {
 
 // ── Cooldown ladders ───────────────────────────────────────────────────────
 
-// Task 3.7: soft and hard ladders with the shared backoff factor, bounded by
+// Soft and hard ladders with the shared backoff factor, bounded by
 // their max, reset on success.
 func TestLadders_BackoffAndReset(t *testing.T) {
 	clk := newFakeClock()
@@ -1194,7 +1194,7 @@ func TestLadders_BackoffAndReset(t *testing.T) {
 	}
 }
 
-// Task 3.8/D5: quota exhaustion demotes every candidate sharing the provider
+// Quota exhaustion demotes every candidate sharing the provider
 // instance, on the hard ladder.
 func TestDemote_ProviderScopedQuota(t *testing.T) {
 	clk := newFakeClock()
@@ -1238,7 +1238,7 @@ func allCooling(o *Orchestrator, n int) {
 	}
 }
 
-// Task 3.10: an idle daemon never probes.
+// An idle daemon never probes.
 func TestRecovery_IdleDaemonDoesNotProbe(t *testing.T) {
 	clk := newFakeClock()
 	mock := &probeMockModel{}
@@ -1258,7 +1258,7 @@ func TestRecovery_IdleDaemonDoesNotProbe(t *testing.T) {
 	}
 }
 
-// Task 3.9/3.10: with recent traffic, the worker probes the expired
+// With recent traffic, the worker probes the expired
 // candidate and promotes it.
 func TestRecovery_ProbesExpiredAndPromotes(t *testing.T) {
 	clk := newFakeClock()
@@ -1287,7 +1287,7 @@ func TestRecovery_ProbesExpiredAndPromotes(t *testing.T) {
 	}
 }
 
-// Task 4.4: unproven fallbacks are never background-probed.
+// Unproven fallbacks are never background-probed.
 func TestRecovery_UnprovenNeverProbed(t *testing.T) {
 	clk := newFakeClock()
 	mock0 := &probeMockModel{}
@@ -1319,7 +1319,7 @@ func TestRecovery_UnprovenNeverProbed(t *testing.T) {
 	}
 }
 
-// Task 3.10: a user turn while every candidate is cooling forces one attempt
+// A user turn while every candidate is cooling forces one attempt
 // of the highest-priority candidate, through its cooldown.
 func TestRunTurn_ForcedAttemptThroughCooldown(t *testing.T) {
 	clk := newFakeClock()
@@ -1342,7 +1342,7 @@ func TestRunTurn_ForcedAttemptThroughCooldown(t *testing.T) {
 
 	// The forced attempt hit the highest-priority candidate despite cooldown,
 	// at most once this turn; the second candidate stays within cooldown and
-	// is NOT force-attempted (spec: at most one forced attempt per turn).
+	// is NOT force-attempted (at most one forced attempt per turn).
 	if r0.callCount() != 1 {
 		t.Errorf("highest-priority candidate forced %d times, want 1", r0.callCount())
 	}
@@ -1351,7 +1351,7 @@ func TestRunTurn_ForcedAttemptThroughCooldown(t *testing.T) {
 	}
 }
 
-// Task 3.10: the forced attempt happens at most once per candidate per turn.
+// The forced attempt happens at most once per candidate per turn.
 func TestRunTurn_ForcedAttemptAtMostOncePerTurn(t *testing.T) {
 	clk := newFakeClock()
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: broken")}}}
@@ -1371,7 +1371,7 @@ func TestRunTurn_ForcedAttemptAtMostOncePerTurn(t *testing.T) {
 	}
 }
 
-// Task 3.9 spec scenario: a recovered higher-priority fallback replaces a
+// A recovered higher-priority fallback replaces a
 // lower-priority active reference.
 func TestRecovery_HigherPriorityFallbackPromoted(t *testing.T) {
 	clk := newFakeClock()
@@ -1426,7 +1426,7 @@ func TestRecovery_HigherPriorityFallbackPromoted(t *testing.T) {
 
 // ── Unproven candidates ────────────────────────────────────────────────────
 
-// Task 4.3: an unproven candidate is attempted directly at failover, without
+// An unproven candidate is attempted directly at failover, without
 // a preceding readiness probe, and a successful attempt marks it verified.
 func TestRunTurn_UnprovenCandidateAttemptedDirectly(t *testing.T) {
 	clk := newFakeClock()
@@ -1471,7 +1471,7 @@ func TestRunTurn_UnprovenCandidateAttemptedDirectly(t *testing.T) {
 
 // ── Prompt assembly per attempt (task 5.4) ────────────────────────────────
 
-// Task 5.3/5.4: a tail-dynamic → head-safe retry assembles head-safe for the
+// A tail-dynamic → head-safe retry assembles head-safe for the
 // head-safe candidate, and a same-layout retry is byte-identical.
 func TestRunTurn_PerAttemptAssembly(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: unauthorized")}}}
@@ -1542,7 +1542,7 @@ func TestRunTurn_PerAttemptAssembly(t *testing.T) {
 
 // ── Auxiliary consumers ────────────────────────────────────────────────────
 
-// Tasks 6.3/6.4 mechanics: the aux model walks the chain with the shared
+// The aux model walks the chain with the shared
 // health policy; exhaustion returns ErrChainExhausted.
 func TestAuxModel_WalksChain(t *testing.T) {
 	a0 := &fakeAux{steps: []auxStep{{err: errors.New("error 404: model not found")}}}
@@ -1582,7 +1582,7 @@ func TestAuxModel_Exhaustion(t *testing.T) {
 	}
 }
 
-// Task 2.6: a request-shape 400 on an aux call surfaces unchanged and demotes
+// A request-shape 400 on an aux call surfaces unchanged and demotes
 // nothing.
 func TestAuxModel_RequestShape400(t *testing.T) {
 	a0 := &fakeAux{steps: []auxStep{{err: errors.New("HTTP 400 Bad Request")}}}
@@ -1602,7 +1602,7 @@ func TestAuxModel_RequestShape400(t *testing.T) {
 
 // ── Construction failures, unavailable state, restart reset ───────────────
 
-// Task 4.7/3.11: a construction-failed candidate is unhealthy at boot; when
+// A construction-failed candidate is unhealthy at boot; when
 // no candidate is ready the daemon starts unavailable.
 func TestBoot_NoCandidateReadyStartsUnavailable(t *testing.T) {
 	clk := newFakeClock()
@@ -1624,7 +1624,7 @@ func TestBoot_NoCandidateReadyStartsUnavailable(t *testing.T) {
 	}
 }
 
-// Task 1.5/4.7: a construction failure marks only that candidate unhealthy.
+// A construction failure marks only that candidate unhealthy.
 func TestConstructionFailureIsolated(t *testing.T) {
 	o := newTestOrch(newFakeClock(),
 		func() Candidate {
@@ -1653,7 +1653,7 @@ func TestConstructionFailureIsolated(t *testing.T) {
 	}
 }
 
-// Task 3.11/3.14: health state resets on restart — a fresh orchestrator from
+// Health state resets on restart — a fresh orchestrator from
 // the same configuration starts fully healthy.
 func TestRestartResetsHealth(t *testing.T) {
 	clk := newFakeClock()
@@ -1688,7 +1688,7 @@ func TestRestartResetsHealth(t *testing.T) {
 
 // ── Concurrency ────────────────────────────────────────────────────────────
 
-// Task 3.14: concurrent callers race safely (run under -race).
+// Concurrent callers race safely (run under -race).
 func TestRunTurn_ConcurrentCallers(t *testing.T) {
 	// Two candidates: the first always fails hard, the second always
 	// succeeds; concurrent turns must all complete with a valid answer and
@@ -1734,7 +1734,7 @@ func TestRunTurn_ConcurrentCallers(t *testing.T) {
 
 // ── Transitions ────────────────────────────────────────────────────────────
 
-// Task 6.6: state transitions are observable through Subscribe.
+// State transitions are observable through Subscribe.
 func TestSubscribe_Transitions(t *testing.T) {
 	clk := newFakeClock()
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: unauthorized")}}}
@@ -1772,7 +1772,7 @@ func TestSubscribe_Transitions(t *testing.T) {
 	}
 }
 
-// Task 6.5: ActiveLayout tracks the promoted candidate.
+// ActiveLayout tracks the promoted candidate.
 func TestActiveLayout_TracksPromotion(t *testing.T) {
 	r0 := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: unauthorized")}}}
 	r1 := &fakeRunner{steps: []runnerStep{{outcome: okOutcome("ok")}}}
@@ -1828,7 +1828,7 @@ func TestRunTurn_CallerCancellation(t *testing.T) {
 // Suppress unused-import churn for io (kept for future stream fakes).
 var _ io.Reader = io.Reader(nil)
 
-// Task 6.7: recovery to the default — the default's cooldown expires while a
+// Recovery to the default — the default's cooldown expires while a
 // fallback serves; the background probe restores the default as active.
 func TestRecovery_ToDefault(t *testing.T) {
 	clk := newFakeClock()

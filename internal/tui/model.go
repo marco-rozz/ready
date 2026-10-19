@@ -429,7 +429,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// handleKey implements the keybinding matrix (D12 / spec input-keybindings).
+// handleKey implements the keybinding matrix.
 func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.Key().Keystroke() {
 	case "enter":

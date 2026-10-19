@@ -18,9 +18,10 @@ import (
 
 // Flag literals shared across this file's test-arg slices.
 const (
-	flagConfig = "--config"
-	flagStatus = "--status"
-	flagForget = "--forget"
+	flagConfig     = "--config"
+	flagStatus     = "--status"
+	flagForget     = "--forget"
+	flagDeviceCode = "--device-code"
 
 	testServerKey   = "srv"
 	testCodexTarget = "work"
@@ -30,6 +31,7 @@ const (
 // server (testServerKey) whose credential store lives under oauthDir.
 func minimalOAuthConfigYAML(oauthDir string) string {
 	return `
+config_version: 1
 llm:
   default: "ollama::test"
   providers:
@@ -59,6 +61,7 @@ mcp_servers:
 	}
 
 	return `
+config_version: 1
 llm:
   default: "work::gpt-5-codex"
   providers:
@@ -349,13 +352,13 @@ func TestLoginCodexStatusAndForgetAreRedactedAndNamespaced(t *testing.T) {
 func TestLoginDeviceCodeRejectsMCPAndMaintenanceModes(t *testing.T) {
 	configPath := writeTempConfig(t, minimalOAuthConfigYAML(t.TempDir()))
 	for _, args := range [][]string{
-		{loginLabel, flagConfig, configPath, "--device-code", testServerKey},
-		{loginLabel, flagConfig, configPath, "--device-code", flagStatus, testServerKey},
+		{loginLabel, flagConfig, configPath, flagDeviceCode, testServerKey},
+		{loginLabel, flagConfig, configPath, flagDeviceCode, flagStatus, testServerKey},
 	} {
 		var stdout, stderr bytes.Buffer
 		cmd := newTestLoginCommand(&stdout, &stderr)
 		err := cmd.Run(context.Background(), args)
-		if exitCodeFor(err) != ExitErr || !strings.Contains(stderr.String(), "--device-code") {
+		if exitCodeFor(err) != ExitErr || !strings.Contains(stderr.String(), flagDeviceCode) {
 			t.Fatalf("args=%v error=%v stderr=%q", args, err, stderr.String())
 		}
 	}
@@ -366,6 +369,7 @@ func TestLoginDeviceCodeRejectsMCPAndMaintenanceModes(t *testing.T) {
 // hanging or crashing (task 7.8's generic-error mapping).
 func TestLoginConnectFailureExitsErr(t *testing.T) {
 	configPath := writeTempConfig(t, `
+config_version: 1
 llm:
   default: "ollama::test"
   providers:
