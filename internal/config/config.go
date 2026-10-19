@@ -433,7 +433,6 @@ type ChannelsConfig struct {
 	ZMQCLI   ZMQCLIChannelConfig   `yaml:"zmqcli"`
 	Serial   SerialChannelConfig   `yaml:"serial"`
 	Telegram TelegramChannelConfig `yaml:"telegram"`
-	WhatsApp WhatsAppChannelConfig `yaml:"whatsapp"`
 }
 
 // ZMQCLIChannelConfig holds settings for the ZMQ-attached CLI channel. When
@@ -549,16 +548,6 @@ type TelegramChannelConfig struct {
 	Enabled           bool                `yaml:"enabled"`
 	Token             string              `yaml:"token"`
 	AllowFrom         []string            `yaml:"allow_from"`
-	FormatterSkill    string              `yaml:"formatter_skill"`
-	FormatterPostStep bool                `yaml:"formatter_post_step"`
-	Bootstrap         []string            `yaml:"bootstrap"`
-	SessionReset      *SessionResetConfig `yaml:"session_reset"`
-}
-
-// WhatsAppChannelConfig holds WhatsApp settings.
-type WhatsAppChannelConfig struct {
-	Enabled           bool                `yaml:"enabled"`
-	SessionPath       string              `yaml:"session_path"`
 	FormatterSkill    string              `yaml:"formatter_skill"`
 	FormatterPostStep bool                `yaml:"formatter_post_step"`
 	Bootstrap         []string            `yaml:"bootstrap"`
@@ -1110,7 +1099,6 @@ func (c *Config) Validate() error {
 		{"zmqcli", c.Channels.ZMQCLI.FormatterSkill, c.Channels.ZMQCLI.Bootstrap},
 		{"serial", c.Channels.Serial.FormatterSkill, c.Channels.Serial.Bootstrap},
 		{"telegram", c.Channels.Telegram.FormatterSkill, c.Channels.Telegram.Bootstrap},
-		{"whatsapp", c.Channels.WhatsApp.FormatterSkill, c.Channels.WhatsApp.Bootstrap},
 	}
 
 	for _, ch := range channelChecks {
@@ -1832,8 +1820,7 @@ func (c *Config) HasEnabledChannels() bool {
 	return c.Channels.CLI.Enabled ||
 		c.Channels.ZMQCLI.Enabled ||
 		c.Channels.Serial.Enabled ||
-		c.Channels.Telegram.Enabled ||
-		c.Channels.WhatsApp.Enabled
+		c.Channels.Telegram.Enabled
 }
 
 // applyLogRotationDefaults fills absent file_rotation fields (nil pointers)

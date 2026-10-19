@@ -1,7 +1,7 @@
 # The channels block — how the user talks to READY.
 
-Five channel slots exist in config: `cli`, `zmqcli`, `telegram`, `serial`,
-`whatsapp`. Each has `enabled` plus the universal per-channel keys:
+Four channel slots exist in config: `cli`, `zmqcli`, `telegram`, `serial`.
+Each has `enabled` plus the universal per-channel keys:
 
 - `formatter_skill` — a skill that adapts responses for the channel; empty
   skips formatting entirely.
@@ -67,11 +67,6 @@ request gets `no_active_session`.
 `port` is required when enabled; `baud_rate` defaults to 9600. There is no
 serial channel implementation in the daemon yet — enabling it only
 contributes to enabled-channel checks and defaults.
-
-## whatsapp (planned Phase 5)
-
-`session_path` configuration exists; the `whatsmeow` implementation is not
-in the daemon yet. Enabling it behaves like serial: config-level only.
 
 ## Response routing facts
 

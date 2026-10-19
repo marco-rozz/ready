@@ -31,7 +31,7 @@ type Message struct {
 	ChannelName string
 
 	// Metadata holds optional per-channel key-value data
-	// (e.g., Telegram chat_id, WhatsApp sender number).
+	// (e.g., Telegram chat_id).
 	Metadata map[string]string
 }
 

@@ -23,7 +23,7 @@ type Address string
 
 // AddressOf maps an incoming message to its Conversation address. Each
 // multi-tenant channel contributes its peer key through the metadata it
-// already sets (Telegram: the chat id); adding WhatsApp is one case here.
+// already sets (Telegram: the chat id).
 func AddressOf(msg channel.Message) Address {
 	if msg.ChannelName == telegram.ChannelName {
 		if id := msg.Metadata[telegram.MetadataChatID]; id != "" {

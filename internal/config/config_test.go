@@ -43,9 +43,6 @@ channels:
   telegram:
     enabled: false
     token: ""
-  whatsapp:
-    enabled: false
-    session_path: .ready/whatsapp/
 mcp_servers:
   home_assistant:
     url: http://ha.local:8123/mcp
@@ -134,10 +131,6 @@ channels:
 
 	if cfg.Channels.Telegram.Enabled {
 		t.Error("expected telegram disabled")
-	}
-
-	if cfg.Channels.WhatsApp.Enabled {
-		t.Error("expected whatsapp disabled")
 	}
 
 	// Check defaults were applied (runtime home = the directory holding the

@@ -1,6 +1,6 @@
 ---
 name: ready-guide
-description: "How to use and configure READY., the self-hosted home-automation assistant. Load this skill whenever the user asks anything about using READY. (commands, chat client, TUI, roles/commands such as /new or /compact), or about configuring it: config.yaml keys, LLM providers and failover, channels (cli/zmqcli/telegram/serial/whatsapp), MCP servers, the HA digital twin, MCP profiles, OAuth, sessions, compaction, logging, skill sync, install/upgrade, or any boot failure and error they saw. Guides a config interview: one YAML block at a time until a complete, valid configuration emerges."
+description: "How to use and configure READY., the self-hosted home-automation assistant. Load this skill whenever the user asks anything about using READY. (commands, chat client, TUI, roles/commands such as /new or /compact), or about configuring it: config.yaml keys, LLM providers and failover, channels (cli/zmqcli/telegram/serial), MCP servers, the HA digital twin, MCP profiles, OAuth, sessions, compaction, logging, skill sync, install/upgrade, or any boot failure and error they saw. Guides a config interview: one YAML block at a time until a complete, valid configuration emerges."
 version: "1.0"
 ---
 
@@ -25,7 +25,7 @@ This SKILL.md is a map. The assets carry the details; load the one you need
 | `assets/using-ready.md` | The user asks how to run or talk to READY.: `serve`/`chat`/`login`, TUI keys and `/commands`, exit codes, env vars. |
 | `assets/install-upgrade.md` | Install, upgrade, uninstall, the config election chain, the Install-home layout. |
 | `assets/config-llm.md` | The `llm:` block: provider instances, wire APIs, credentials, context_window, failover and recovery. |
-| `assets/config-channels.md` | The `channels:` block: cli vs zmqcli, telegram, serial, whatsapp, formatters. |
+| `assets/config-channels.md` | The `channels:` block: cli vs zmqcli, telegram, serial, formatters. |
 | `assets/config-ha.md` | `mcp_servers:`, the `home_assistant:` digital twin, tool profiles, MCP OAuth. |
 | `assets/config-runtime.md` | `sessions:`, `compaction:`, `logging:`, `skills:` keys. |
 | `assets/config-runtime-tuning.md` | Numeric tuning: context windows, compaction thresholds, failover timing. |
@@ -44,8 +44,8 @@ When asked to help configure READY., do not dump YAML. Walk the user through
 the configuration, one block at a time, in this order:
 
 1. **Decide how ready is run first**: with a terminal client (`zmqcli`) or
-   the stdin CLI (`cli`)? Exactly one of the two may be enabled. Telegram and
-   WhatsApp come later.
+   the stdin CLI (`cli`)? Exactly one of the two may be enabled. Telegram
+   comes later.
 2. **Then the LLM**: at least one provider (`llm.default`), then whether a
    failover chain makes sense. Ask about budget/privacy (local Ollama vs
    cloud) before proposing models.

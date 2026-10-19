@@ -299,11 +299,6 @@ channels:
     # session_reset:
     #   mode: daily+idle
     #   idle_after: 6h
-  whatsapp:
-    enabled: false
-    session_path: whatsapp/
-    bootstrap: ["home-topology"]
-    formatter_skill: whatsapp-formatter
 
 mcp_servers:
   # Primary Home Assistant MCP server (current configuration): the private

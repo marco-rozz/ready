@@ -2,25 +2,34 @@
 
 ![READY.](READY.png)
 
-`READY.` is a home-automation assistant you host yourself: you talk to your
+It is a home-automation assistant you host yourself: you talk to your
 Home Assistant in natural language — from a terminal (over ZeroMQ), Telegram,
-WhatsApp, or a Commodore 64 over serial — and it turns the request into
+or a Commodore 64 over serial — and it turns the request into
 device commands that are **verified, not just dispatched**.
 
 Most of the value is in the answer to one question: *did it actually work?*
+
 `READY.` does not accept a command as done until Home Assistant's event stream
-confirms the effect on the target entity. Every command returns a per-entity
-outcome — `applied`, `pending`, `already`, `unchanged`, `unavailable`,
-`error` — and when anything goes wrong part-way, the reply says what may have
-run, so a failed request never invites a blind repeat. If the LLM provider
-dies mid-turn, the failover chain (Ollama, OpenRouter, OpenCode, or an
-experimental ChatGPT/Codex-OAuth provider) resumes from the recorded
-transcript without re-executing the actions already completed.
+confirms the effect on the target entity.
+Every command returns a per-entity outcome — `applied`, `pending`, `already`,
+`unchanged`, `unavailable`, `error` — and when anything goes wrong part-way,
+the reply says what may have run, so a failed request never invites a blind
+repeat.
+
+If the LLM provider dies mid-turn, the failover chain (Ollama, OpenRouter,
+OpenCode, or an experimental ChatGPT/Codex-OAuth provider) resumes from the
+recorded transcript without re-executing the actions already completed.
 
 Under the hood it is a Go daemon orchestrating an LLM through the **ReAct**
 pattern (Thought → Action → Observation) with native tool calling, connected
-to Home Assistant via the Model Context Protocol plus an always-on WebSocket
-digital twin that mirrors every entity state and registry in memory.
+to Home Assistant via the Model Context Protocol plus an **always-on WebSocket
+digital twin** that mirrors every entity state and registry in memory.
+
+> **💡 Runs even on a 2014 Raspberry Pi.** The release matrix includes a
+> statically linked `linux/arm/v6` build (`CGO_ENABLED=0`) — an old single-board
+> computer with an **ARMv6** processor is enough to host the READY. daemon
+> (the LLM itself can live on another machine). No glibc loader, no modern
+> hardware required: see the [Install](#install) notes below.
 
 ## Install
 
@@ -69,7 +78,8 @@ Notes:
 - Linux amd64/arm64 binaries are dynamically linked and require the glibc
   loader (`/lib64/ld-linux-x86-64.so.2`, `/lib/ld-linux-aarch64.so.1`):
   Alpine/musl, NixOS and distroless hosts are unsupported (the linux `arm/v6`
-  build is statically linked and needs no loader).
+  build is statically linked and needs no loader — see the highlighted note
+  above: a 2014 Raspberry Pi with an ARMv6 processor is enough to host it).
 - The SHA256 verification of every download guards **integrity** (corruption,
   truncated downloads), not authenticity: the trust root is the GitHub
   repository and TLS.
@@ -235,7 +245,7 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
   connections referenced as `<provider>::<model>`; the failover chain is
   walked live at runtime with health tracking and cooldown ladders.
 - `channels` — `cli` (stdin) or `zmqcli` (for `ready chat`), `telegram`,
-  `serial`, `whatsapp`; each may carry a `formatter_skill`.
+  `serial`; each may carry a `formatter_skill`.
 - `mcp_servers` — Home Assistant (or any MCP server), Streamable HTTP by
   default, per-server tool prefixing, reconnect/health knobs, OAuth.
 - `home_assistant` — the always-on digital twin behind the

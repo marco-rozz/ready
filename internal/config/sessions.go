@@ -165,12 +165,11 @@ func (c *Config) channelSessionResets() map[string]*SessionResetConfig {
 		"zmqcli":   c.Channels.ZMQCLI.SessionReset,
 		"serial":   c.Channels.Serial.SessionReset,
 		"telegram": c.Channels.Telegram.SessionReset,
-		"whatsapp": c.Channels.WhatsApp.SessionReset,
 	}
 }
 
 // SessionResetFor returns the effective reset rule of a channel config key
-// (cli, zmqcli, serial, telegram, whatsapp): the global rule with the
+// (cli, zmqcli, serial, telegram): the global rule with the
 // channel's override fields applied on top.
 func (c *Config) SessionResetFor(channelKey string) SessionResetConfig {
 	rule := c.Sessions.Reset
