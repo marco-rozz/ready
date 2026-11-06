@@ -99,7 +99,12 @@ func TestRepairFixKeyReplacesTheReferencedSecret(t *testing.T) {
 }
 
 func TestRepairNeverRewritesAnExternalSecretFile(t *testing.T) {
-	data := strings.Replace(string(generateConfig(openRouterChoice(), testAgentID, "host", true)), "!secret openrouter_api_key", "!secret_file /run/credentials/key", 1)
+	external := filepath.Join(t.TempDir(), "key")
+	const original = "external-key\n"
+	if err := os.WriteFile(external, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := strings.Replace(string(generateConfig(openRouterChoice(), testAgentID, "host", true)), "!secret openrouter_api_key", "!secret_file "+yamlQuote(external), 1)
 	res, source, occ := repairFixture(t, data)
 	ui := repairUI{interview: interview{read: newPlainReader(strings.NewReader("k\n"))}, out: &strings.Builder{}}
 	if _, err := fixDefaultKey(t.Context(), res, source, occ, ui); !errors.Is(err, errUnsupportedDocument) {
@@ -107,6 +112,9 @@ func TestRepairNeverRewritesAnExternalSecretFile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(res.AgentDir, secretstore.StoreFileName)); err == nil {
 		t.Fatal("a refused repair created a store")
+	}
+	if got := readFileOrFail(t, external); got != original {
+		t.Fatal("a refused repair changed the external secret file")
 	}
 }
 
