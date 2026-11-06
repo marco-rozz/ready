@@ -332,12 +332,12 @@ type headerRoundTripper struct {
 // per request. An unparseable URL leaves serverURL nil, which inScope treats
 // as "never in scope" (fail closed, D1/1.6).
 func newHeaderRoundTripper(cfg *config.MCPServerConfig) *headerRoundTripper {
-	serverURL, err := url.Parse(cfg.URL)
+	serverURL, err := url.Parse(cfg.URL.Value)
 	if err != nil {
 		serverURL = nil
 	}
 
-	return &headerRoundTripper{headers: cfg.Headers, serverURL: serverURL}
+	return &headerRoundTripper{headers: cfg.ResolvedHeaders, serverURL: serverURL}
 }
 
 func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -430,12 +430,12 @@ func newClientTransport(cfg *config.MCPServerConfig, httpClient *http.Client, oa
 	switch cfg.Transport {
 	case "sse":
 		// Legacy SSE transport: opens a persistent GET stream.
-		return &mcp.SSEClientTransport{Endpoint: cfg.URL, HTTPClient: httpClient}
+		return &mcp.SSEClientTransport{Endpoint: cfg.URL.Value, HTTPClient: httpClient}
 	default:
 		// Streamable HTTP transport (default): uses POST for all messages.
 		// Required by Home Assistant MCP endpoint and the 2025-03-26 spec.
 		return &mcp.StreamableClientTransport{
-			Endpoint:     cfg.URL,
+			Endpoint:     cfg.URL.Value,
 			HTTPClient:   httpClient,
 			MaxRetries:   -1,
 			OAuthHandler: oauthHandler,
@@ -532,17 +532,18 @@ func (t *BridgedTool) WireName() string {
 func (t *BridgedTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	// Convert MCP tool schema to Eino ParameterInfo.
 	params := convertMCPSchemaToParams(t.logger, t.mcpTool.Name, t.mcpTool.InputSchema)
-
-	info := &schema.ToolInfo{
-		Name: t.displayName,
-		Desc: t.mcpTool.Description,
+	if params == nil {
+		// A nil ParamsOneOf serialises as `"parameters": null`, which
+		// OpenAI-compatible gateways reject (HTTP 400). Zero-argument tools
+		// must advertise an empty object schema instead.
+		params = map[string]*schema.ParameterInfo{}
 	}
 
-	if len(params) > 0 {
-		info.ParamsOneOf = schema.NewParamsOneOfByParams(params)
-	}
-
-	return info, nil
+	return &schema.ToolInfo{
+		Name:        t.displayName,
+		Desc:        t.mcpTool.Description,
+		ParamsOneOf: schema.NewParamsOneOfByParams(params),
+	}, nil
 }
 
 // InvokableRun executes the MCP tool via the MCP client.

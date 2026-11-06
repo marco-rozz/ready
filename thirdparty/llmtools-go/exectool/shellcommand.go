@@ -72,6 +72,50 @@ var shellCommandToolSpec = spec.Tool{
 },
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"sessionID": {"type": "string"},
+	"workDir": {"type": "string"},
+	"results": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"command": {"type": "string"},
+				"workDir": {"type": "string"},
+				"shell": {"type": "string"},
+				"shellPath": {"type": "string"},
+				"exitCode": {"type": "integer"},
+				"timedOut": {"type": "boolean"},
+				"durationMS": {"type": "integer"},
+				"stdout": {"type": "string"},
+				"stderr": {"type": "string"},
+				"stdoutTruncated": {"type": "boolean"},
+				"stderrTruncated": {"type": "boolean"}
+			},
+			"required": [
+				"command",
+				"workDir",
+				"shell",
+				"shellPath",
+				"exitCode",
+				"timedOut",
+				"durationMS",
+				"stdout",
+				"stderr",
+				"stdoutTruncated",
+				"stderrTruncated"
+			],
+			"additionalProperties": false
+		}
+	}
+},
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: shellCommandFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

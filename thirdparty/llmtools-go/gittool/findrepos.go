@@ -61,6 +61,53 @@ var findReposTool = spec.Tool{
 "required": ["rootPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"rootPath": {"type": "string"},
+	"maxDepth": {"type": "integer"},
+	"maxRepos": {"type": "integer"},
+	"maxVisitedDirs": {"type": "integer"},
+	"includeBare": {"type": "boolean"},
+	"repos": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"repoPath": {"type": "string"},
+				"gitDir": {"type": "string"},
+				"bare": {"type": "boolean"},
+				"branch": {"type": "string"},
+				"headHash": {"type": "string"},
+				"detachedHead": {"type": "boolean"},
+				"unbornHead": {"type": "boolean"}
+			},
+			"required": ["repoPath", "gitDir", "bare", "detachedHead", "unbornHead"],
+			"additionalProperties": false
+		}
+	},
+	"count": {"type": "integer"},
+	"visitedDirs": {"type": "integer"},
+	"skippedByDepth": {"type": "integer"},
+	"truncated": {"type": "boolean"}
+},
+"required": [
+	"rootPath",
+	"maxDepth",
+	"maxRepos",
+	"maxVisitedDirs",
+	"includeBare",
+	"repos",
+	"count",
+	"visitedDirs",
+	"skippedByDepth",
+	"truncated"
+],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: findReposFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

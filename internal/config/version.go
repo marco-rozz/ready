@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -15,7 +16,7 @@ const (
 	// BaselineConfigVersion is the first supported authored configuration.
 	BaselineConfigVersion = 1
 	// TargetConfigVersion changes only with a corresponding migration step.
-	TargetConfigVersion = 1
+	TargetConfigVersion = 2
 	versionKey          = "config_version"
 )
 
@@ -54,7 +55,7 @@ func (e *VersionError) Error() string {
 		shellHint = " in PowerShell"
 	}
 
-	return fmt.Sprintf("config %s has config_version %d, binary target %d: run %s%s to migrate this file and start the daemon", e.Path, e.Current, e.Target, ServeMigrationCommand(e.Path), shellHint)
+	return fmt.Sprintf("config %s has config_version %d, binary target %d: run %s%s to migrate this file and start the daemon", e.Path, e.Current, e.Target, ServeMigrationCommand(filepath.Dir(e.Path)), shellHint)
 }
 
 func (e *VersionError) Unwrap() error {
@@ -65,13 +66,57 @@ func (e *VersionError) Unwrap() error {
 	return ErrMigrationRequired
 }
 
-// ServeMigrationCommand quotes for POSIX shells or PowerShell on Windows.
-func ServeMigrationCommand(path string) string {
-	if runtime.GOOS == "windows" {
-		return "ready serve --config '" + strings.ReplaceAll(path, "'", "''") + "'"
+// ServeMigrationCommand renders the serve invocation for one agent directory
+// (the directory holding the config), quoted for POSIX shells or PowerShell
+// on Windows.
+func ServeMigrationCommand(agentDir string) string {
+	return "ready serve --agent-dir " + quoteAgentDir(agentDir)
+}
+
+// LoginCommand renders the `ready login <args>` remediation for one agent
+// directory. A non-default agent gets the same quoted --agent-dir as
+// ServeMigrationCommand, so following the hint never logs in to another
+// agent; an empty or default directory keeps the short form.
+func LoginCommand(agentDir, args string) string {
+	cmd := "ready login " + args
+	if agentDir == "" || isDefaultAgentDir(agentDir) {
+		return cmd
 	}
 
-	return "ready serve --config '" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
+	return cmd + " --agent-dir " + quoteAgentDir(agentDir)
+}
+
+// IsDefaultAgentDir reports whether agentDir is the physical default agent
+// directory (any resolution failure answers false).
+func IsDefaultAgentDir(agentDir string) bool { return isDefaultAgentDir(agentDir) }
+
+// isDefaultAgentDir reports whether agentDir is the physical default agent
+// directory; any resolution failure answers false (the long form is safe).
+func isDefaultAgentDir(agentDir string) bool {
+	def, err := InstallHome()
+	if err != nil {
+		return false
+	}
+	physical, err := resolvePhysicalDir(def, false)
+	if err != nil {
+		return false
+	}
+
+	return filepath.Clean(agentDir) == physical
+}
+
+// QuoteAgentDir quotes a directory for POSIX shells or PowerShell on
+// Windows — the shared quoting used by every remediation/suggested command
+// init prints (single quotes; embedded quotes escaped per host shell).
+func QuoteAgentDir(agentDir string) string { return quoteAgentDir(agentDir) }
+
+// quoteAgentDir quotes a directory for POSIX shells or PowerShell on Windows.
+func quoteAgentDir(agentDir string) string {
+	if runtime.GOOS == "windows" {
+		return "'" + strings.ReplaceAll(agentDir, "'", "''") + "'"
+	}
+
+	return "'" + strings.ReplaceAll(agentDir, "'", "'\"'\"'") + "'"
 }
 
 func checkVersion(path string, current, target int) error {

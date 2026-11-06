@@ -35,23 +35,37 @@ const execHangTestTimeout = 10 * time.Second
 // handshake, answers exec requests with a fixed OK reply, and reports
 // session_end receptions on the returned channel.
 type fakeChatDaemon struct {
-	router     zmq4.Socket
-	addr       string
-	authOK     bool
-	execReply  string
-	sessionEnd chan string
-	done       chan struct{}
+	router         zmq4.Socket
+	addr           string
+	authOK         bool
+	execReply      string
+	sessionEnd     chan string
+	done           chan struct{}
+	pending        []protocol.PendingSecret
+	secretRequests chan struct{}
+	secret         string
 }
 
-func newFakeChatDaemon(t *testing.T, authOK bool) *fakeChatDaemon {
+func newFakeChatDaemon(t *testing.T, authOK bool, pending ...[]protocol.PendingSecret) *fakeChatDaemon {
+	t.Helper()
+
+	return newFakeChatDaemonWithSecret(t, authOK, "", pending...)
+}
+
+func newFakeChatDaemonWithSecret(t *testing.T, authOK bool, secret string, pending ...[]protocol.PendingSecret) *fakeChatDaemon {
 	t.Helper()
 
 	d := &fakeChatDaemon{
-		router:     zmq4.NewRouter(t.Context()),
-		authOK:     authOK,
-		execReply:  "lights off",
-		sessionEnd: make(chan string, 4),
-		done:       make(chan struct{}),
+		router:         zmq4.NewRouter(t.Context()),
+		authOK:         authOK,
+		secret:         secret,
+		execReply:      "lights off",
+		sessionEnd:     make(chan string, 4),
+		done:           make(chan struct{}),
+		secretRequests: make(chan struct{}, 4),
+	}
+	if len(pending) > 0 {
+		d.pending = pending[0]
 	}
 
 	if err := d.router.Listen("tcp://127.0.0.1:0"); err != nil {
@@ -74,6 +88,7 @@ func newFakeChatDaemon(t *testing.T, authOK bool) *fakeChatDaemon {
 
 func (d *fakeChatDaemon) serve() {
 	defer close(d.done)
+	nonces := make(map[string]string)
 
 	for {
 		msg, err := d.router.Recv()
@@ -99,30 +114,37 @@ func (d *fakeChatDaemon) serve() {
 			case req.AuthToken == "":
 				nonce := make([]byte, 16)
 				_, _ = rand.Read(nonce)
+				nonces[string(identity)] = hex.EncodeToString(nonce)
 				d.reply(identity, protocol.Response{
-					ConnectionID: req.ConnectionID,
-					Status:       protocol.ResponseStatusOK,
-					RequestID:    req.RequestID,
-					ResponseType: protocol.ResponseTypeControl,
-					Content:      hex.EncodeToString(nonce),
-					ErrorCode:    "challenge",
+					ConnectionID:    req.ConnectionID,
+					Status:          protocol.ResponseStatusOK,
+					RequestID:       req.RequestID,
+					ResponseType:    protocol.ResponseTypeControl,
+					Content:         hex.EncodeToString(nonce),
+					ErrorCode:       "challenge",
+					ProtocolVersion: protocol.Version,
 				})
-			case d.authOK:
+			case d.authOK && d.validHMAC(req.AuthToken, nonces[string(identity)]):
 				d.reply(identity, protocol.Response{
-					ConnectionID: req.ConnectionID,
-					Status:       protocol.ResponseStatusOK,
-					RequestID:    req.RequestID,
-					ResponseType: protocol.ResponseTypeControl,
+					ConnectionID:    req.ConnectionID,
+					Status:          protocol.ResponseStatusOK,
+					RequestID:       req.RequestID,
+					ResponseType:    protocol.ResponseTypeControl,
+					ProtocolVersion: protocol.Version,
+					PendingSecrets:  d.pending,
 				})
 			default:
 				d.reply(identity, protocol.Response{
-					ConnectionID: req.ConnectionID,
-					Status:       protocol.ResponseStatusAuthFail,
-					RequestID:    req.RequestID,
-					ResponseType: protocol.ResponseTypeControl,
+					ConnectionID:    req.ConnectionID,
+					Status:          protocol.ResponseStatusAuthFail,
+					RequestID:       req.RequestID,
+					ResponseType:    protocol.ResponseTypeControl,
+					ProtocolVersion: protocol.Version,
 				})
 			}
 
+		case protocol.RequestTypeSecretEntry:
+			d.secretRequests <- struct{}{}
 		case protocol.RequestTypeExec, protocol.RequestTypeMessage:
 			d.reply(identity, protocol.Response{
 				ConnectionID: req.ConnectionID,
@@ -144,6 +166,15 @@ func (d *fakeChatDaemon) serve() {
 	}
 }
 
+func (d *fakeChatDaemon) validHMAC(token, nonce string) bool {
+	if d.secret == "" {
+		return true
+	}
+	expected, err := chatHMAC(d.secret, nonce)
+
+	return err == nil && token == expected
+}
+
 func (d *fakeChatDaemon) reply(identity []byte, resp protocol.Response) {
 	payload, _ := protocol.Marshal(resp)
 	// Framing mirrors internal/transport/zmq.Listener.Send: [identity, "", payload].
@@ -163,6 +194,8 @@ func (d *fakeChatDaemon) waitSessionEnd(t *testing.T) {
 // newChatActionCmd builds the chat command with the real flag wiring; the
 // test calls runChat directly (not cmd.Run, whose HandleExitCoder would
 // os.Exit inside the test process).
+const chatTokenFlag = "token"
+
 func newChatActionCmd(t *testing.T, d *fakeChatDaemon) *cli.Command {
 	t.Helper()
 
@@ -170,16 +203,17 @@ func newChatActionCmd(t *testing.T, d *fakeChatDaemon) *cli.Command {
 		Name: "chat",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "address"},
-			&cli.StringFlag{Name: "token"},
-			&cli.StringFlag{Name: "exec"},
+			&cli.StringFlag{Name: chatTokenFlag},
+			&cli.StringFlag{Name: "token-file"},
+			&cli.StringFlag{Name: flagNameExec},
 			&cli.DurationFlag{Name: "reply-timeout", Value: 5 * time.Second},
-			&cli.BoolFlag{Name: "raw"},
+			&cli.BoolFlag{Name: flagNameRaw},
 		},
 	}
 
 	for _, set := range [][2]string{
 		{"address", d.addr},
-		{"token", "test-secret"},
+		{chatTokenFlag, "test-secret"},
 		{"exec", "turn off the lights"},
 		{"reply-timeout", "5s"},
 		{"raw", "false"},
@@ -238,7 +272,7 @@ func TestChat_HandshakeAuthFailExitsPromptly(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newChatActionCmd(t, d)
-	_ = cmd.Set("token", "wrong-secret")
+	_ = cmd.Set(chatTokenFlag, "wrong-secret")
 
 	done := make(chan error, 1)
 	go func() {

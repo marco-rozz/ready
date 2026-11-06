@@ -1,8 +1,6 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -19,12 +17,9 @@ func validLLMConfig() LLMConfig {
 }
 
 func TestApplyDefaults_OAuthRoot(t *testing.T) {
-	cfg := &Config{LLM: validLLMConfig()}
+	cfg := &Config{Agent: testAgent, LLM: validLLMConfig()}
 	cfg.applyDefaults()
 
-	if cfg.OAuth.TokenStore != tokenStoreFile {
-		t.Errorf("TokenStore = %q, want %q", cfg.OAuth.TokenStore, tokenStoreFile)
-	}
 	// The store default is no longer a cwd-relative literal: it anchors to
 	// the Install home and is only resolved (by ApplyRuntimeHome) when an
 	// OAuth-capable target exists. A direct construction with no target has
@@ -39,9 +34,10 @@ func TestApplyDefaults_OAuthRoot(t *testing.T) {
 
 func TestApplyDefaults_OAuthGrantAuto(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		MCPServers: map[string]MCPServerConfig{
-			testOAuthServerKey: {URL: testOAuthServerURL, OAuth: &MCPOAuthConfig{}},
+			testOAuthServerKey: {URL: SecretString{Value: testOAuthServerURL}, OAuth: &MCPOAuthConfig{}},
 		},
 	}
 	cfg.applyDefaults()
@@ -53,9 +49,10 @@ func TestApplyDefaults_OAuthGrantAuto(t *testing.T) {
 
 func TestValidate_OAuth_UnknownGrant(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		MCPServers: map[string]MCPServerConfig{
-			testOAuthServerKey: {URL: testOAuthServerURL, OAuth: &MCPOAuthConfig{Grant: "bogus"}},
+			testOAuthServerKey: {URL: SecretString{Value: testOAuthServerURL}, OAuth: &MCPOAuthConfig{Grant: "bogus"}},
 		},
 	}
 	if err := cfg.Validate(); err == nil {
@@ -63,47 +60,9 @@ func TestValidate_OAuth_UnknownGrant(t *testing.T) {
 	}
 }
 
-func TestValidate_OAuth_TokenStoreRejectsKeychain(t *testing.T) {
-	cfg := &Config{
-		LLM:   validLLMConfig(),
-		OAuth: OAuthConfig{TokenStore: "keychain"},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected validation error for token_store=keychain")
-	}
-}
-
-func TestValidate_OAuth_TokenStoreRejectsOtherValues(t *testing.T) {
-	cfg := &Config{
-		LLM:   validLLMConfig(),
-		OAuth: OAuthConfig{TokenStore: "vault"},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected validation error for unsupported token_store")
-	}
-}
-
-func TestValidate_OAuth_BothClientSecretAndFile(t *testing.T) {
-	cfg := &Config{
-		LLM: validLLMConfig(),
-		MCPServers: map[string]MCPServerConfig{
-			testOAuthServerKey: {
-				URL: testOAuthServerURL,
-				OAuth: &MCPOAuthConfig{
-					Grant:            "client_credentials",
-					ClientSecret:     "a",
-					ClientSecretFile: "/tmp/secret",
-				},
-			},
-		},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected validation error for client_secret + client_secret_file")
-	}
-}
-
 func TestValidate_OAuth_RedirectPortOutOfRange(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM:   validLLMConfig(),
 		OAuth: OAuthConfig{RedirectPort: 70000},
 	}
@@ -114,11 +73,12 @@ func TestValidate_OAuth_RedirectPortOutOfRange(t *testing.T) {
 
 func TestValidate_OAuth_ExcludesHeaderAuthorization(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		MCPServers: map[string]MCPServerConfig{
 			testOAuthServerKey: {
-				URL:     testOAuthServerURL,
-				Headers: map[string]string{"Authorization": "Bearer x"},
+				URL:     SecretString{Value: testOAuthServerURL},
+				Headers: map[string]SecretRef{"Authorization": testKeyRef},
 				OAuth:   &MCPOAuthConfig{Grant: grantAuto},
 			},
 		},
@@ -130,10 +90,11 @@ func TestValidate_OAuth_ExcludesHeaderAuthorization(t *testing.T) {
 
 func TestValidate_OAuth_ExcludesSSETransport(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		MCPServers: map[string]MCPServerConfig{
 			testOAuthServerKey: {
-				URL:       testOAuthServerURL,
+				URL:       SecretString{Value: testOAuthServerURL},
 				Transport: "sse",
 				OAuth:     &MCPOAuthConfig{Grant: grantAuto},
 			},
@@ -146,9 +107,10 @@ func TestValidate_OAuth_ExcludesSSETransport(t *testing.T) {
 
 func TestValidate_OAuth_ValidConfigPasses(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		MCPServers: map[string]MCPServerConfig{
-			testOAuthServerKey: {URL: testOAuthServerURL, OAuth: &MCPOAuthConfig{Grant: "authorization_code"}},
+			testOAuthServerKey: {URL: SecretString{Value: testOAuthServerURL}, OAuth: &MCPOAuthConfig{Grant: "authorization_code"}},
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -158,55 +120,17 @@ func TestValidate_OAuth_ValidConfigPasses(t *testing.T) {
 
 func TestOAuthBootWarnings_NonHTTPS(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		MCPServers: map[string]MCPServerConfig{
-			"insecure": {URL: "http://example.com/mcp", OAuth: &MCPOAuthConfig{Grant: grantAuto}},
-			"secure":   {URL: testOAuthServerURL, OAuth: &MCPOAuthConfig{Grant: grantAuto}},
-			"noauth":   {URL: "http://example.com/mcp"},
+			"insecure": {URL: SecretString{Value: "http://example.com/mcp"}, OAuth: &MCPOAuthConfig{Grant: grantAuto}},
+			"secure":   {URL: SecretString{Value: testOAuthServerURL}, OAuth: &MCPOAuthConfig{Grant: grantAuto}},
+			"noauth":   {URL: SecretString{Value: "http://example.com/mcp"}},
 		},
 	}
 
 	warnings := cfg.OAuthBootWarnings()
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
-	}
-}
-
-func TestMCPOAuthConfig_ResolveClientSecret_Inline(t *testing.T) {
-	oa := MCPOAuthConfig{ClientSecret: "inline-secret"}
-	got, err := oa.ResolveClientSecret()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "inline-secret" {
-		t.Errorf("got %q, want %q", got, "inline-secret")
-	}
-}
-
-func TestMCPOAuthConfig_ResolveClientSecret_FromFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secret")
-	if err := os.WriteFile(path, []byte("file-secret\n"), 0o600); err != nil {
-		t.Fatalf("failed to write secret file: %v", err)
-	}
-
-	oa := MCPOAuthConfig{ClientSecretFile: path}
-	got, err := oa.ResolveClientSecret()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "file-secret" {
-		t.Errorf("got %q, want %q", got, "file-secret")
-	}
-}
-
-func TestMCPOAuthConfig_ResolveClientSecret_Empty(t *testing.T) {
-	oa := MCPOAuthConfig{}
-	got, err := oa.ResolveClientSecret()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "" {
-		t.Errorf("got %q, want empty", got)
 	}
 }

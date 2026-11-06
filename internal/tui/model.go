@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -58,6 +59,12 @@ func spinnerFrame(idx int) string {
 	return frames[idx%len(frames)]
 }
 
+const (
+	keyControlC = "ctrl+c"
+	keyEnter    = "enter"
+	keyControlD = "ctrl+d"
+)
+
 // reservedCommand maps the TUI-reserved slash commands (/session, /context)
 // to their wire request types: intercepted at send, never
 // forwarded to the model.
@@ -79,6 +86,7 @@ const (
 	stateIdle turnState = iota
 	stateThinking
 	stateStreaming
+	stateReloading
 	stateError
 )
 
@@ -88,6 +96,8 @@ func (s turnState) Label() string {
 		return "thinking…"
 	case stateStreaming:
 		return "streaming…"
+	case stateReloading:
+		return "reloading"
 	case stateError:
 		return "error"
 	default:
@@ -131,11 +141,22 @@ type Options struct {
 	// (zmq-session-liveness); the TUI derives the ping interval from it.
 	// Zero keeps the built-in default interval (old daemon, metadata absent).
 	LivenessTimeout time.Duration
-	// LogoMode / DaemonAddress / ClientVersion configure the static head
+	// LogoMode / DaemonAddress / AgentDir / ClientVersion configure the static head
 	// block (chat-logo-modes): glyph-banner + info block, or info block alone.
 	LogoMode      LogoMode
 	DaemonAddress string
+	// AgentDir is the daemon-authoritative agent directory from the
+	// authenticated handshake (per-user-install-agent-isolation), shown by
+	// the info block beside daemon, session and client. A leading ~ denotes
+	// the DAEMON user's home; never inferred client-side.
+	AgentDir      string
 	ClientVersion string
+	// AgentName and AgentID identify the daemon's agent (handshake).
+	AgentName      string
+	AgentID        string
+	PendingSecrets []protocol.PendingSecret
+	// Credentials are the OAuth targets and their states from the handshake.
+	Credentials []protocol.CredentialInfo
 }
 
 // Model is the Bubble Tea model for the `ready chat` interactive TUI.
@@ -202,6 +223,9 @@ type Model struct {
 	// changes (session-lifecycle).
 	sessionID     string
 	daemonAddress string
+	// agentDir is the daemon-authoritative agent directory (handshake);
+	// shown by the info block only.
+	agentDir      string
 	clientVersion string
 
 	// Liveness heartbeat (zmq-session-liveness): pingInterval derives from
@@ -222,6 +246,46 @@ type Model struct {
 	// turn with a fresh reply timeout. The daemon never sees concurrent
 	// message requests.
 	pending []string
+
+	// Secret entry is deliberately separate from chat drafts and steering.
+	secretMode          bool
+	secretPending       []protocol.PendingSecret
+	secretKnown         bool // the daemon has told us which Secrets are pending
+	secretReveal        bool // Ctrl+R: show the current field's value (per field, never sticky)
+	secretNewlineOK     bool // the operator confirmed a value containing a newline
+	secretShowList      bool // the next list response renders the full table
+	secretRotate        string
+	agentName           string
+	secretAll           []protocol.PendingSecret
+	agentLabel          string
+	secretOperation     string
+	secretInFlight      bool
+	secretEscaped       bool
+	secretEditor        textarea.Model
+	chatEditor          textarea.Model
+	secretPass          []protocol.PendingSecret
+	secretIndex         int
+	secretRequestID     string
+	secretRequestAction protocol.SecretEntryAction
+	secretExitPending   bool
+	secretRefreshNeeded bool
+
+	// Post-save activation (activation.go).
+	actPhase            activationPhase
+	reloadRequired      bool
+	onboardingCommitted bool
+	credentials         []protocol.CredentialInfo
+	oauthMode           bool
+	oauthPass           []string
+	oauthIndex          int
+	oauthOperation      string
+	oauthTarget         string
+	oauthAcceptsManual  bool
+	oauthEditor         textarea.Model
+	oauthRequestID      string
+	oauthRequestAction  protocol.OAuthLoginAction
+	reloading           bool
+	reloadRequestID     string
 
 	spinnerIdx int // working-spinner frame index, advanced by the render tick
 
@@ -256,14 +320,20 @@ func NewModel(d dealer, opts Options) *Model {
 
 		sessionID:     opts.SessionID,
 		daemonAddress: opts.DaemonAddress,
+		agentDir:      opts.AgentDir,
 		clientVersion: opts.ClientVersion,
+		secretKnown:   opts.PendingSecrets != nil,
+		agentLabel:    agentLabel(opts.AgentName, opts.AgentID),
+		agentName:     opts.AgentName,
+		secretPending: pendingOnly(opts.PendingSecrets),
+		credentials:   opts.Credentials,
 	}
 
 	// Static head block (chat-logo-modes D3): rendered once at construction
 	// from the handshake-carried facts. Width-independent by design (short
 	// labelled lines), so resize re-renders re-emit it byte-identical. The
 	// model reference is NOT part of it — the status line is its only home.
-	m.infoBlock = buildInfoBlock(opts.DaemonAddress, opts.SessionID, opts.ClientVersion)
+	m.infoBlock = buildInfoBlock(opts.DaemonAddress, agentLabel(opts.AgentName, opts.AgentID), opts.AgentDir, opts.SessionID, opts.ClientVersion)
 	if opts.LogoMode == LogoGlyph {
 		m.glyphBanner = renderGlyphBanner()
 	}
@@ -298,6 +368,12 @@ func NewModel(d dealer, opts Options) *Model {
 	m.ta.Prompt = ""             // prompt is rendered as a lipgloss prefix outside the buffer
 	m.ta.ShowLineNumbers = false // cleaner chat input
 	_ = m.ta.Focus()             // focus so keystrokes insert; cursor-blink cmd ignored pre-Run
+	m.secretEditor = textarea.New()
+	m.secretEditor.SetStyles(textareaStyles(true))
+	m.secretEditor.Prompt = ""
+	m.secretEditor.ShowLineNumbers = false
+	m.secretEditor.Placeholder = "credential (plain-text terminal echo)"
+	_ = m.secretEditor.Focus()
 
 	return m
 }
@@ -321,11 +397,16 @@ func textareaStyles(isDark bool) textarea.Styles {
 // Init starts the DEALER receive command and requests the terminal background
 // color. The render tick starts on the first send (see sendInput).
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(
+	commands := []tea.Cmd{
 		m.recvCmd(),
 		m.pingTickCmd(),
 		tea.RequestBackgroundColor,
-	)
+	}
+	if len(m.secretPending) > 0 || !m.secretKnown || len(loginRequiredTargets(m.credentials)) > 0 {
+		commands = append(commands, m.startActivation())
+	}
+
+	return tea.Batch(commands...)
 }
 
 // Update handles tea messages.
@@ -431,8 +512,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey implements the keybinding matrix.
 func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.secretMode {
+		return m.handleSecretKey(msg)
+	}
+	if m.oauthMode {
+		return m.handleOAuthKey(msg)
+	}
 	switch msg.Key().Keystroke() {
-	case "enter":
+	case keyEnter:
 		return m.sendInput()
 
 	case "shift+enter", "alt+enter", "ctrl+j":
@@ -441,10 +528,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
-	case "ctrl+c":
+	case keyControlC:
 		return m.quit(exitSIGINT, "")
 
-	case "ctrl+d":
+	case keyControlD:
 		if m.ta.Value() == "" {
 			return m.quit(exitOK, "")
 		}
@@ -497,11 +584,39 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // send, so exactly one timeout per sent turn.
 func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 	text := m.ta.Value()
+	if m.secretMode {
+		if m.secretInFlight || m.secretRequestID != "" || m.secretIndex >= len(m.secretPass) {
+			return m, nil
+		}
+		if strings.Contains(text, "\n") && !m.secretNewlineOK {
+			// A newline in a credential is almost always a paste accident.
+			m.secretNewlineOK = true
+
+			return m, nil
+		}
+		m.secretInFlight = true
+		m.secretReveal, m.secretNewlineOK = false, false
+
+		return m, m.sendSecretSubmit(text)
+	}
+	// Preserve a newly typed chat draft while list/begin/end settles. It must
+	// not race the server's reservation or become a credential submission.
+	if m.secretRequestID != "" {
+		return m, nil
+	}
 	if text == "" {
 		return m, nil
 	}
+	if text == "/secrets" || strings.HasPrefix(text, "/secrets ") {
+		m.ta.Reset()
+		if m.waiting || m.reloading || len(m.pending) > 0 {
+			return m, nil
+		}
 
-	if m.waiting {
+		return m, m.secretsCommand(strings.Fields(text)[1:])
+	}
+
+	if m.waiting || m.reloading {
 		// Steering: queue the prompt, clear the editor, send nothing.
 		m.pending = append(m.pending, text)
 		m.ta.Reset()
@@ -569,8 +684,124 @@ func (m *Model) sendCmdWithID(reqType protocol.RequestType, content, reqID strin
 	}
 }
 
+func (m *Model) beginSecretCmd() tea.Cmd {
+	if m.secretRequestID != "" || m.secretMode || m.waiting || len(m.pending) > 0 {
+		return nil
+	}
+	requestID := uuid.New().String()
+	m.secretRefreshNeeded = false
+
+	return m.sendSecretRequest(requestID, &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionList})
+}
+
+func (m *Model) sendSecretSubmit(value string) tea.Cmd {
+	item := m.secretPass[m.secretIndex]
+	requestID := uuid.New().String()
+
+	return m.sendSecretRequest(requestID, &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionSubmit, OperationID: m.secretOperation, Name: item.Name, Value: &value})
+}
+
+func (m *Model) endSecretCmd() tea.Cmd {
+	if m.secretOperation == "" {
+		return nil
+	}
+
+	op := m.secretOperation
+	m.secretOperation = ""
+
+	return m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionEnd, OperationID: op})
+}
+
+func (m *Model) sendSecretRequest(requestID string, entry *protocol.SecretEntryRequest) tea.Cmd {
+	m.secretRequestID = requestID
+	m.secretRequestAction = entry.Action
+	payload, _ := protocol.Marshal(protocol.Request{ConnectionID: m.connectionID, Type: protocol.RequestTypeSecretEntry, RequestID: requestID, Timestamp: time.Now().UTC().Format(time.RFC3339), SecretEntry: entry})
+	d := m.dealer
+
+	return func() tea.Msg {
+		if err := d.Send(zmq4.NewMsg(payload)); err != nil {
+			return errMsg{err}
+		}
+
+		return sentMsg{}
+	}
+}
+
+func (m *Model) handleSecretKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.secretInFlight {
+		if msg.Key().Keystroke() == keyControlC || msg.Key().Keystroke() == keyControlD {
+			m.secretExitPending = true
+			m.ta.Reset()
+		}
+
+		return m, nil
+	}
+	switch msg.Key().Keystroke() {
+	case keyControlC, keyControlD:
+		m.leaveSecretEditor()
+
+		return m, m.endSecretCmd()
+	case "esc", "escape":
+		if m.secretEscaped || m.secretOperation == "" {
+			m.leaveSecretEditor()
+
+			return m, m.endSecretCmd()
+		}
+		m.secretEscaped = true
+		m.secretIndex++
+		m.ta.Reset()
+		m.rebuildViewport()
+		if m.secretIndex >= len(m.secretPass) {
+			m.leaveSecretEditor()
+
+			return m, m.endSecretCmd()
+		}
+
+		return m, nil
+	case "ctrl+r":
+		m.secretReveal = !m.secretReveal
+
+		return m, nil
+	case keyEnter:
+		return m.sendInput()
+	default:
+		m.secretEscaped = false
+		m.secretNewlineOK = false
+		var cmd tea.Cmd
+		m.ta, cmd = m.ta.Update(msg)
+
+		return m, cmd
+	}
+}
+
+func (m *Model) leaveSecretEditor() {
+	m.secretReveal, m.secretNewlineOK, m.secretRotate = false, false, ""
+	if m.secretMode {
+		m.ta.Reset()
+		m.secretEditor = m.ta
+		m.ta = m.chatEditor
+	}
+	m.secretMode = false
+	m.secretInFlight = false
+	m.secretExitPending = false
+	m.secretPass = nil
+	m.rebuildViewport()
+}
+
 // handleReply finalises a turn from the authoritative reply (D3 / task 3.7).
 func (m *Model) handleReply(resp protocol.Response) (tea.Model, tea.Cmd) {
+	if resp.RequestID != "" && resp.RequestID == m.secretRequestID {
+		return m.handleSecretResponse(resp)
+	}
+	if resp.RequestID != "" && resp.RequestID == m.oauthRequestID {
+		return m.handleOAuthResponse(resp)
+	}
+	if resp.RequestID != "" && resp.RequestID == m.reloadRequestID {
+		return m.handleReloadResponse(resp)
+	}
+	if resp.SecretEntry != nil {
+		return m, m.recvCmd()
+	}
 	// tui-usage-observability: every received reply carrying usage refreshes
 	// the footer's usage segment.
 	if resp.Usage != nil {
@@ -615,8 +846,149 @@ func (m *Model) handleReply(resp protocol.Response) (tea.Model, tea.Cmd) {
 		// ok — render the reply as the turn's final content, then drain the
 		// steering queue (the first pending prompt becomes the live turn).
 		drain := m.completeTurn(resp.Content)
+		// A save committed in this Turn starts (or joins) the Post-save
+		// activation cycle; otherwise only incomplete items start one.
+		if resp.ConfigSaved {
+			m.reloadRequired = true
+		}
+		if resp.ConfigSaved || len(m.secretPending) > 0 || m.secretRefreshNeeded {
+			m.startActivationNoRun()
+		}
 
-		return m, tea.Batch(m.recvCmd(), drain)
+		return m, tea.Batch(m.recvCmd(), drain, m.advanceActivation())
+	}
+}
+
+func (m *Model) handleSecretResponse(resp protocol.Response) (tea.Model, tea.Cmd) {
+	action := m.secretRequestAction
+	m.secretRequestID = ""
+	m.secretRequestAction = ""
+	if resp.Status == protocol.ResponseStatusError {
+		return m.handleSecretRefusal(resp)
+	}
+	if resp.SecretEntry == nil || resp.SecretEntry.Action != action {
+		return m.quit(exitErr, "uncertain secret entry outcome; reconnect and list again")
+	}
+	if action == protocol.SecretEntryActionList {
+		if resp.SecretEntry.Credentials != nil {
+			m.credentials = resp.SecretEntry.Credentials
+		}
+		m.secretKnown = true
+		m.secretPending = pendingOnly(resp.SecretEntry.Secrets)
+		m.secretAll = append([]protocol.PendingSecret(nil), resp.SecretEntry.Secrets...)
+		if m.secretShowList {
+			m.secretShowList = false
+			m.completeCommandBlock(renderSecretTable(resp.SecretEntry.Secrets, resp.SecretEntry.Credentials))
+		}
+		if m.secretMode {
+			if len(m.secretPending) == 0 {
+				// Everything was resolved elsewhere (another writer): release
+				// the operation and the editor.
+				m.leaveSecretEditor()
+
+				return m, tea.Batch(m.recvCmd(), m.endSecretCmd())
+			}
+			// A notification for our own write only refreshes the list; the
+			// open editor keeps its contents.
+			return m, m.recvCmd()
+		}
+		if len(m.secretPending) == 0 || m.waiting || len(m.pending) > 0 {
+			m.rebuildViewport()
+
+			return m, tea.Batch(m.recvCmd(), m.advanceActivation())
+		}
+
+		return m, tea.Batch(m.recvCmd(), m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionBegin}))
+	}
+	if action == protocol.SecretEntryActionEnd {
+		return m, tea.Batch(m.recvCmd(), m.advanceActivation())
+	}
+	if action == protocol.SecretEntryActionBegin {
+		m.secretOperation = resp.SecretEntry.OperationID
+		if m.waiting || len(m.pending) > 0 {
+			return m, tea.Batch(m.recvCmd(), m.endSecretCmd())
+		}
+		m.chatEditor = m.ta
+		m.ta = m.secretEditor
+		m.secretPass = append([]protocol.PendingSecret(nil), m.secretPending...)
+		if m.secretRotate != "" {
+			m.secretPass = []protocol.PendingSecret{m.secretItem(m.secretRotate)}
+		}
+		m.secretIndex = 0
+		m.secretMode = true
+		m.secretInFlight = false
+		m.secretEscaped = false
+		m.appendInfoLine("secret entry active — remote clients must update their token copy after a ZMQ token rotation")
+		m.ta.Reset()
+		m.rebuildViewport()
+
+		return m, m.recvCmd()
+	}
+	if action == protocol.SecretEntryActionDelete {
+		m.secretInFlight = false
+		m.appendInfoLine("secret deleted")
+
+		return m, tea.Batch(m.recvCmd(), m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionList}))
+	}
+	m.secretInFlight = false
+	m.secretEscaped = false
+	m.ta.Reset()
+	for _, warning := range resp.SecretEntry.Warnings {
+		m.appendInfoLine("credential committed: " + warning)
+	}
+	// The daemon wrote the value: that name is no longer pending.
+	if m.secretIndex < len(m.secretPass) {
+		done := m.secretPass[m.secretIndex].Name
+		kept := m.secretPending[:0]
+		for _, item := range m.secretPending {
+			if item.Name != done {
+				kept = append(kept, item)
+			}
+		}
+		m.secretPending = kept
+	}
+	m.secretIndex++
+	m.secretReveal, m.secretNewlineOK = false, false
+	m.onboardingCommitted = true
+	if m.secretRotate != "" && m.actPhase == phaseNone {
+		// On-demand rotation: nothing left to collect, only activation.
+		m.actPhase = phaseReload
+	}
+	if m.secretRotate != "" || len(m.secretPending) == 0 || m.secretIndex >= len(m.secretPass) || m.secretExitPending {
+		m.leaveSecretEditor()
+		if len(m.secretPending) == 0 {
+			m.appendInfoLine("secret saved")
+		}
+
+		return m, tea.Batch(m.recvCmd(), m.endSecretCmd())
+	}
+	m.rebuildViewport()
+
+	return m, m.recvCmd()
+}
+
+// pendingOnly keeps the Secrets that still need a value entered here: pending
+// `!secret` names. External-file references are information only.
+func pendingOnly(in []protocol.PendingSecret) []protocol.PendingSecret {
+	var out []protocol.PendingSecret
+	for _, item := range in {
+		if item.State == protocol.SecretStatePending {
+			out = append(out, item)
+		}
+	}
+
+	return out
+}
+
+// agentLabel renders "name (id)" for the info block; both parts optional.
+func agentLabel(name, id string) string {
+	switch {
+	case name != "" && id != "":
+		return name + " (" + id + ")"
+	case name != "":
+		return name
+	default:
+		return id
 	}
 }
 
@@ -708,6 +1080,35 @@ func (m *Model) startNextQueuedTurn() tea.Cmd {
 // presentation — turn state and transcript content are untouched and the
 // TUI keeps listening.
 func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
+	if resp.Status == protocol.ResponseStatusError && resp.ErrorCode == protocol.ErrorCodeSecretEntryExpired {
+		m.leaveSecretEditor()
+		m.secretOperation = ""
+		m.secretRefreshNeeded = false
+		m.appendInfoLine("secret entry expired; use /secrets to reopen")
+		// Retain correlation for any request already sent when expiry arrived;
+		// its refusal must not be mistaken for an ordinary chat failure.
+		return m, m.recvCmd()
+	}
+	if resp.ResponseType == protocol.ResponseTypeControl && resp.OAuthLogin != nil {
+		return m.handleOAuthResult(resp)
+	}
+	if resp.Content == protocol.ControlConfigReloaded && resp.Status == protocol.ResponseStatusOK {
+		return m.handleConfigReloaded(resp)
+	}
+	if resp.Content == "pending_secrets_changed" {
+		m.secretRefreshNeeded = true
+		if m.secretMode && !m.secretInFlight && m.secretRequestID == "" {
+			m.secretRefreshNeeded = false
+
+			return m, tea.Batch(m.recvCmd(), m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionList}))
+		}
+		if !m.secretMode && m.secretRequestID == "" && !m.waiting && len(m.pending) == 0 && m.actPhase == phaseNone {
+			return m, tea.Batch(m.recvCmd(), m.startActivation())
+		}
+		m.rebuildViewport()
+
+		return m, m.recvCmd()
+	}
 	switch resp.Status {
 	case protocol.ResponseStatusShutdown:
 		return m.quit(exitOK, "daemon shut down")
@@ -736,9 +1137,14 @@ func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
 		// transcript lines only — the turn state is untouched.
 		switch resp.Content {
 		case protocol.ControlSessionChanged:
+			m.resetActivation()
+			m.leaveSecretEditor()
+			m.secretOperation = ""
+			m.secretRequestID = ""
+			m.secretRefreshNeeded = false
 			m.usage = nil // the new Session starts from zero; hidden until data arrives
 			m.sessionID = resp.SessionID
-			m.infoBlock = buildInfoBlock(m.daemonAddress, m.sessionID, m.clientVersion)
+			m.infoBlock = buildInfoBlock(m.daemonAddress, m.agentLabel, m.agentDir, m.sessionID, m.clientVersion)
 			m.appendInfoLine("── new session ──")
 		case protocol.ControlCompacted:
 			if c := resp.Compaction; c != nil {
@@ -802,6 +1208,9 @@ func (m *Model) handleServerError(resp protocol.Response, _ bool) (tea.Model, te
 // command that closes the dealer (unblocking the in-flight recv) and quits the
 // program (D10). The TUI never calls os.Exit.
 func (m *Model) quit(code int, msg string) (tea.Model, tea.Cmd) {
+	m.leaveSecretEditor()
+	m.secretOperation = ""
+	m.secretRequestID = ""
 	if !m.exitSet {
 		m.exitReason = ExitReason{Code: code, Message: msg}
 		m.exitSet = true
@@ -860,6 +1269,12 @@ func (m *Model) recvCmd() tea.Cmd {
 
 // handlePaste inserts bracketed-paste content without sending.
 func (m *Model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.secretMode {
+		m.secretEscaped = false
+		if m.secretInFlight {
+			return m, nil
+		}
+	}
 	m.ta.InsertString(msg.Content)
 	m.applyLayout()
 
@@ -1308,8 +1723,21 @@ func (m *Model) View() tea.View {
 	m.applyLayout()
 
 	transcript := m.vp.View()
-	prompt := lipgloss.NewStyle().Faint(true).Render(m.prompt)
-	input := lipgloss.JoinHorizontal(lipgloss.Top, prompt, m.ta.View())
+	promptText := m.prompt
+	if m.secretMode && m.secretIndex < len(m.secretPass) {
+		item := m.secretPass[m.secretIndex]
+		promptText = fmt.Sprintf("❯ secret %q (%s) [%d/%d] ", item.Name, strings.Join(item.Fields, ", "), m.secretIndex+1, len(m.secretPass))
+	}
+	promptStyle := lipgloss.NewStyle().Faint(!m.secretMode)
+	if m.secretMode {
+		promptStyle = promptStyle.Foreground(lipgloss.Color("9"))
+	}
+	prompt := promptStyle.Render(promptText)
+	editor := m.ta.View()
+	if m.secretMode {
+		editor = m.maskedEditor()
+	}
+	input := lipgloss.JoinHorizontal(lipgloss.Top, prompt, editor)
 
 	topBar, bottomBar := m.inputBars()
 	status := m.statusLine()
@@ -1351,6 +1779,9 @@ func (m *Model) statusLine() string {
 	// turn is in flight the working spinner is additionally embedded in the
 	// input's top border.
 	parts = append(parts, m.state.Label())
+	if m.agentName != "" {
+		parts = append(parts, m.agentName)
+	}
 	if region := m.modelRegion(); region != "" {
 		parts = append(parts, region)
 	}
@@ -1362,6 +1793,9 @@ func (m *Model) statusLine() string {
 	}
 	if m.copiedMsg != "" {
 		parts = append(parts, m.copiedMsg)
+	}
+	if len(m.secretPending) > 0 {
+		parts = append(parts, fmt.Sprintf("secrets pending: %d", len(m.secretPending)))
 	}
 
 	return lipgloss.NewStyle().Faint(true).Render(strings.Join(parts, " · "))
@@ -1422,7 +1856,7 @@ func (m *Model) String() string {
 // working reports whether a model turn is in flight (thinking or streaming):
 // the working spinner is embedded in the input's top border.
 func (m *Model) working() bool {
-	return m.state == stateThinking || m.state == stateStreaming
+	return m.state == stateThinking || m.state == stateStreaming || m.state == stateReloading
 }
 
 // usageSegment renders the status line's usage segment (tui-usage-
@@ -1484,6 +1918,11 @@ func compactTokens(n int) string {
 // textarea's internal scroll window. During a turn the top bar embeds the
 // working spinner Pi-style (workingTopBorder).
 func (m *Model) inputBars() (top, bottom string) {
+	if m.secretMode {
+		bar := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(strings.Repeat("━", max(m.width, 0)))
+
+		return bar, bar
+	}
 	hiddenAbove, hiddenBelow := m.hiddenInputLines()
 
 	switch {
@@ -1667,4 +2106,131 @@ func ctxOccupancyColor(pct float64) string {
 	default:
 		return ""
 	}
+}
+
+// secretsCommand handles `/secrets`, `/secrets set <name>` (rotate any Secret)
+// and `/secrets rm <name> [confirm]` (delete an unused one).
+func (m *Model) secretsCommand(args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.secretShowList = true
+
+		return m.beginSecretCmd()
+	}
+	switch args[0] {
+	case "set", "rotate":
+		if len(args) < 2 {
+			m.appendInfoLine("usage: /secrets set <name>")
+
+			return nil
+		}
+		m.secretRotate = args[1]
+
+		return m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionBegin, Name: args[1]})
+	case "rm", "delete":
+		if len(args) < 2 {
+			m.appendInfoLine("usage: /secrets rm <name> confirm")
+
+			return nil
+		}
+		if len(args) < 3 || args[2] != "confirm" {
+			m.appendInfoLine("this deletes the unused secret " + args[1] + " permanently; run `/secrets rm " + args[1] + " confirm` to proceed")
+
+			return nil
+		}
+
+		return m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionDelete, Name: args[1]})
+	default:
+		m.appendInfoLine("usage: /secrets | /secrets set <name> | /secrets rm <name> confirm")
+
+		return nil
+	}
+}
+
+// secretItem finds a listed Secret by name (a stub when it is not listed).
+func (m *Model) secretItem(name string) protocol.PendingSecret {
+	for _, s := range m.secretAll {
+		if s.Name == name {
+			return s
+		}
+	}
+
+	return protocol.PendingSecret{Name: name, State: protocol.SecretStateSet}
+}
+
+// renderSecretTable renders the list response as a transcript block: names,
+// states and referencing fields — never a value.
+func renderSecretTable(secrets []protocol.PendingSecret, creds []protocol.CredentialInfo) string {
+	var b strings.Builder
+	b.WriteString("**Secrets**\n\n| name | state | used by |\n|---|---|---|\n")
+	for _, s := range secrets {
+		state := string(s.State)
+		if s.Rule != "" {
+			state += " (" + s.Rule + ")"
+		}
+		b.WriteString("| " + s.Name + " | " + state + " | " + strings.Join(s.Fields, ", ") + " |\n")
+	}
+	if len(secrets) == 0 {
+		b.WriteString("| — | | |\n")
+	}
+	if len(creds) > 0 {
+		b.WriteString("\n**Credentials** (managed by `ready login`)\n\n")
+		for _, c := range creds {
+			b.WriteString("- " + c.Target + " — " + c.State + "\n")
+		}
+	}
+	b.WriteString("\n`/secrets set <name>` rotates one · `/secrets rm <name> confirm` deletes an unused one")
+
+	return b.String()
+}
+
+// maskedEditor renders the RED secret editor: the value is never drawn (only
+// bullets and a count) unless the operator toggles Ctrl+R for this field.
+func (m *Model) maskedEditor() string {
+	value := m.ta.Value()
+	n := utf8.RuneCountInString(value)
+	shown := strings.Repeat("•", min(n, 40))
+	if n > 40 {
+		shown += "…"
+	}
+	if m.secretReveal {
+		shown = strings.ReplaceAll(value, "\n", "⏎")
+	}
+	hints := []string{fmt.Sprintf("%d chars", n), "Ctrl+R show/hide"}
+	if value != "" && (value != strings.TrimSpace(value)) {
+		hints = append(hints, "⚠ leading/trailing whitespace is kept")
+	}
+	if strings.Contains(value, "\n") {
+		hints = append(hints, "⚠ contains a newline — RETURN again to confirm")
+	}
+	line := shown + "▏"
+	hint := lipgloss.NewStyle().Faint(true).Render("  " + strings.Join(hints, " · "))
+
+	return lipgloss.NewStyle().Height(max(1, m.ta.Height())).Render(line + hint)
+}
+
+// handleSecretRefusal renders a refused secret-entry request with its
+// operator guidance and leaves the editor when the operation is gone.
+func (m *Model) handleSecretRefusal(resp protocol.Response) (tea.Model, tea.Cmd) {
+	m.secretInFlight = false
+	guidance := ""
+	switch resp.ErrorCode {
+	case protocol.ErrorCodeProfileRequired:
+		guidance = " — the active profile does not expose config-manager (serve with a profile that does, e.g. --profile admin)"
+	case protocol.ErrorCodeLoopbackRequired:
+		guidance = " — use a numeric loopback bind or SSH forwarding"
+	case protocol.ErrorCodeInvalidValue:
+		if resp.SecretEntry != nil && resp.SecretEntry.RuleCode != "" {
+			guidance = " — the value breaks rule " + resp.SecretEntry.RuleCode
+		}
+	case protocol.ErrorCodeNameInUse:
+		guidance = " — a configuration field still references it"
+	}
+	m.appendInfoLine("secret entry refused: " + resp.ErrorCode + guidance)
+	if resp.ErrorCode == protocol.ErrorCodeSecretEntryExpired || m.secretExitPending {
+		m.leaveSecretEditor()
+
+		return m, tea.Batch(m.recvCmd(), m.endSecretCmd())
+	}
+
+	return m, tea.Batch(m.recvCmd(), m.advanceActivation())
 }

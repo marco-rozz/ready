@@ -28,7 +28,6 @@ func newLivenessChannel(ctx context.Context, t *testing.T, liveness time.Duratio
 
 	cfg := config.ZMQCLIChannelConfig{
 		Bind:                  testBindAddr,
-		AuthToken:             "secret-liveness",
 		ConnectionIdleTimeout: 15 * time.Minute,
 		LivenessTimeout:       liveness,
 	}

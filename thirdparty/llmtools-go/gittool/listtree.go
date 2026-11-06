@@ -61,6 +61,42 @@ var listTreeTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"revision": {"type": "string"},
+	"path": {"type": "string"},
+	"recursive": {"type": "boolean"},
+	"includeDirs": {"type": "boolean"},
+	"maxEntries": {"type": "integer"},
+	"entries": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"path": {"type": "string"},
+				"kind": {
+					"type": "string",
+					"enum": ["tree", "symlink", "submodule", "blob"]
+				},
+				"mode": {"type": "string"},
+				"hash": {"type": "string"},
+				"size": {"type": "integer"}
+			},
+			"required": ["path", "kind", "mode", "hash"],
+			"additionalProperties": false
+		}
+	},
+	"count": {"type": "integer"},
+	"truncated": {"type": "boolean"}
+},
+"required": ["repoPath", "revision", "path", "recursive", "includeDirs", "maxEntries", "entries", "count", "truncated"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: listTreeFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

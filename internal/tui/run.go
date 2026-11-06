@@ -50,10 +50,20 @@ type RunOptions struct {
 	// it on the main screen before the alt-screen program starts; the same
 	// glyph art IS rendered inside the viewport on every non-off run.
 	LogoMode LogoMode
-	// DaemonAddress / ClientVersion are static info-block facts
-	// (chat-tui-logo-modes task 4.1), alongside ModelRef and SessionID above.
+	// DaemonAddress / AgentDir / ClientVersion are static info-block facts
+	// (chat-tui-logo-modes task 4.1; AgentDir per-user-install-agent-
+	// isolation), alongside ModelRef and SessionID above.
 	DaemonAddress string
+	// AgentDir is the daemon-authoritative agent directory from the
+	// authenticated handshake (a leading ~ is the daemon user's home).
+	AgentDir      string
 	ClientVersion string
+	// AgentName and AgentID identify the daemon's agent (handshake).
+	AgentName      string
+	AgentID        string
+	PendingSecrets []protocol.PendingSecret
+	// Credentials are the daemon's OAuth targets and their states (handshake).
+	Credentials []protocol.CredentialInfo
 }
 
 // Run drives the interactive TUI to completion and returns the final model
@@ -77,7 +87,12 @@ func Run(ctx context.Context, d dealer, opts RunOptions) (*Model, error) {
 		LivenessTimeout: opts.LivenessTimeout,
 		LogoMode:        opts.LogoMode,
 		DaemonAddress:   opts.DaemonAddress,
+		AgentDir:        opts.AgentDir,
 		ClientVersion:   opts.ClientVersion,
+		AgentName:       opts.AgentName,
+		AgentID:         opts.AgentID,
+		PendingSecrets:  opts.PendingSecrets,
+		Credentials:     opts.Credentials,
 	})
 
 	prog := tea.NewProgram(

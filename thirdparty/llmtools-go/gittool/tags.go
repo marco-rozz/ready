@@ -38,6 +38,38 @@ var tagsTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"pattern": {"type": "string"},
+	"tags": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"name": {"type": "string"},
+				"hash": {"type": "string"},
+				"shortHash": {"type": "string"},
+				"annotated": {"type": "boolean"},
+				"targetHash": {"type": "string"},
+				"targetType": {"type": "string"},
+				"taggerName": {"type": "string"},
+				"taggerEmail": {"type": "string"},
+				"taggerWhen": {"type": "string", "format": "date-time"},
+				"message": {"type": "string"}
+			},
+			"required": ["name", "hash", "shortHash", "annotated"],
+			"additionalProperties": false
+		}
+	}
+},
+"required": ["repoPath", "tags"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: tagsFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

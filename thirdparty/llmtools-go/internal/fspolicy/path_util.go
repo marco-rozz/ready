@@ -34,7 +34,7 @@ func ensureWithinRoots(p string, roots []string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: %q", ErrOutsideAllowedRoots, p)
+	return fmt.Errorf("%w: path %q is outside allowed roots %q", ErrOutsideAllowedRoots, p, roots)
 }
 
 func isPathWithinRoot(root, p string) (bool, error) {

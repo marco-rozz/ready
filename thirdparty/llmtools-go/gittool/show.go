@@ -47,6 +47,52 @@ var showTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"revision": {"type": "string"},
+	"commit": {
+		"type": "object",
+		"properties": {
+			"hash": {"type": "string"},
+			"shortHash": {"type": "string"},
+			"authorName": {"type": "string"},
+			"authorEmail": {"type": "string"},
+			"authorWhen": {"type": "string", "format": "date-time"},
+			"subject": {"type": "string"},
+			"body": {"type": "string"}
+		},
+		"required": ["hash", "shortHash", "authorName", "authorEmail", "authorWhen", "subject"],
+		"additionalProperties": false
+	},
+	"parentHashes": {
+		"type": ["array", "null"],
+		"items": {"type": "string"}
+	},
+	"patch": {"type": "string"},
+	"patchBytes": {"type": "integer"},
+	"patchTruncated": {"type": "boolean"},
+	"outputMeta": {
+		"type": "object",
+		"properties": {
+			"bytes": {"type": "integer"},
+			"truncated": {"type": "boolean"},
+			"omittedBinaryFiles": {"type": "integer"},
+			"skippedLargeFiles": {"type": "integer"},
+			"maxBytes": {"type": "integer"}
+		},
+		"required": ["bytes", "truncated", "omittedBinaryFiles", "skippedLargeFiles", "maxBytes"],
+		"additionalProperties": false
+	},
+	"note": {"type": "string"}
+},
+"required": ["repoPath", "revision", "commit"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: showFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
+
+	"github.com/marco-rozz/ready/internal/secretstore"
 )
 
 // Migration transforms only the authored document. It must perform no external actions.
@@ -38,9 +41,9 @@ func NewMigrationRegistry(target int, steps ...Migration) (*MigrationRegistry, e
 	return &MigrationRegistry{target: target, steps: append([]Migration(nil), steps...)}, nil
 }
 
-// ProductionMigrations is explicit: the initial version has no historical steps.
+// ProductionMigrations is explicit: version 2 moves credentials into the Secret store.
 func ProductionMigrations() (*MigrationRegistry, error) {
-	return NewMigrationRegistry(TargetConfigVersion)
+	return NewMigrationRegistry(TargetConfigVersion, migrationV2{})
 }
 
 type MigrationStepReport struct {
@@ -76,6 +79,10 @@ func (r *MigrationRegistry) Prepare(ctx context.Context, path string, validate f
 }
 
 type migrationIO struct {
+	// backup, when set, transforms the pre-commit source bytes into the stored
+	// backup (encrypted for a migration that imports secrets) and names its
+	// file suffix (".age"). Nil keeps the plaintext backup.
+	backup  func([]byte) ([]byte, string, error)
 	replace func(context.Context, string, string) error
 	syncDir func(context.Context, string) error
 	write   func(context.Context, string, string, []byte, os.FileMode) (string, error)
@@ -141,6 +148,7 @@ func (r *MigrationRegistry) prepare(ctx context.Context, path string, validate f
 
 		return cfg, report, loadErr
 	}
+	var plans []ImportPlan
 	for i, step := range r.steps {
 		destination := BaselineConfigVersion + i + 1
 		if destination <= version {
@@ -150,6 +158,17 @@ func (r *MigrationRegistry) prepare(ctx context.Context, path string, validate f
 			return nil, report, fmt.Errorf("migrate config: %w", err)
 		}
 		start := time.Now()
+		if importer, ok := step.(SecretImporter); ok {
+			existing, perr := probeExistingAgentID(ctx, dir)
+			if perr != nil {
+				return nil, report, perr
+			}
+			plan, perr := importer.PlanImport(doc, ImportContext{AgentDir: dir, ExistingAgentID: existing})
+			if perr != nil {
+				return nil, report, fmt.Errorf("config %s migration to %d refused: %w", path, destination, perr)
+			}
+			plans = append(plans, plan)
+		}
 		if err = step.Up(doc); err != nil {
 			// Do not render step errors: they may include a configuration value.
 			return nil, report, fmt.Errorf("config %s migration to %d failed: %w", path, destination,
@@ -174,9 +193,22 @@ func (r *MigrationRegistry) prepare(ctx context.Context, path string, validate f
 	if err != nil {
 		return nil, report, err
 	}
+	// Secret-import phases (one importer step at most): the values enter the
+	// Secret store BEFORE the commit and are idempotent, so a crash here leaves
+	// the v1 file and its plaintext files intact and the next boot repeats the
+	// work. The backup is sealed to the new Store key.
+	committedStore, ierr := importPlans(ctx, dir, plans, &fs)
+	if ierr != nil {
+		return nil, report, fmt.Errorf("config %s migration refused: %w", path, ierr)
+	}
 	err = commitMigration(ctx, targetPath, data, candidate, info, &report, fs)
 	if err != nil {
 		return nil, report, fmt.Errorf("migrate config %s%s: %w", path, report.CommitContext(), err)
+	}
+	if committedStore != nil && report.Committed {
+		// Point of no return passed: delete the recorded plaintext files.
+		// Failures only WARN and are retried at every boot.
+		RunSecretCleanup(ctx, committedStore, path, zerolog.Nop())
 	}
 
 	return cfg, report, nil
@@ -216,4 +248,24 @@ func setDocumentVersion(doc *yaml.Node, version int) error {
 	}
 
 	return fmt.Errorf("migration removed version marker: %w", ErrInvalidConfigDocument)
+}
+
+// importPlans runs the store-write phase of every planned import and, when one
+// ran, seals the config backup to the new Store key. It returns the store (nil
+// when no step imported anything).
+func importPlans(ctx context.Context, dir string, plans []ImportPlan, fs *migrationIO) (*secretstore.Store, error) {
+	var last *secretstore.Store
+	for _, plan := range plans {
+		store, err := importIntoStore(ctx, dir, plan)
+		if err != nil {
+			return nil, err
+		}
+		last = store
+	}
+	if last != nil {
+		store := last
+		fs.backup = encryptedBackup(func(b []byte) ([]byte, error) { return store.Seal(ctx, b) })
+	}
+
+	return last, nil
 }

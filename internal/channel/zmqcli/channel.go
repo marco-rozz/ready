@@ -40,6 +40,9 @@ const (
 	// Status=ok. Today the only producer is the dispatcher, setting it to
 	// protocol.ErrorCodeLLMUnavailable for an exhausted LLM chain.
 	ErrorCode = "error_code"
+	// ConfigSaved is the channel.Message metadata key set to "true" when
+	// ConfigManager.Save committed a configuration change during the turn.
+	ConfigSaved = "config_saved"
 )
 
 // errNoActiveSession is the error code sent when a request targets a session
@@ -88,8 +91,17 @@ func (ss *sessionState) tryAcquire(connectionID string, identity []byte) bool {
 // release closes the current session. Safe to call when no session is active.
 // Callers must not hold ss.mu.
 func (ss *sessionState) release() {
+	ss.releaseConnection("")
+}
+
+// releaseConnection prevents a delayed handshake worker from releasing a
+// newer connection after the original client has already ended its session.
+func (ss *sessionState) releaseConnection(connectionID string) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	if connectionID != "" && ss.connectionID != connectionID {
+		return
+	}
 	ss.connectionID = ""
 	ss.identity = nil
 	ss.openedAt = time.Time{}
@@ -189,11 +201,19 @@ type Channel struct {
 	logger          zerolog.Logger
 	payloadsEnabled bool
 
+	// agentDirDisplay is the authenticated handshake's agent_dir field:
+	// the daemon's physical agent directory, home-prefix sanitised by
+	// cmd/serve.go at wiring time (a leading ~ denotes the daemon user's
+	// home). Empty in tests and pre-change payloads — omitted, never
+	// inferred client-side.
+	agentDirDisplay string
+
 	// modelMu guards the model-status fields below (handshake reporting vs
 	// the WatchModelStatus subscription goroutine).
-	modelMu     sync.Mutex
-	modelStatus ModelStatusEvent
-	modelKnown  bool
+	modelMu          sync.Mutex
+	modelStatus      ModelStatusEvent
+	modelKnown       bool
+	modelWatchCancel func()
 
 	// usageMu guards the usage-source hook below (wired once at boot by
 	// cmd/serve.go, read on every reply and handshake — tui-usage-
@@ -209,7 +229,28 @@ type Channel struct {
 	// controlHandler answers TUI-reserved control requests (session_info,
 	// context_usage) with the markdown content for the reply. Wired once at
 	// boot by cmd/serve.go; nil in tests that never set it.
-	control ControlRequestHandler
+	control           ControlRequestHandler
+	secretEntry       SecretEntryHandler
+	oauthLogin        OAuthLoginHandler
+	runtimeReload     RuntimeReloadHandler
+	pendingSource     func(context.Context) []protocol.PendingSecret
+	credentialsSource func(context.Context) []protocol.CredentialInfo
+	agentID           string
+	agentName         string
+	secretRefresh     func(context.Context) (string, bool)
+	currentSecret     string
+	// secretMu serializes the connection-bound direct-entry / OAuth-login
+	// operation with ordinary message/exec traffic. The handler itself runs
+	// outside the recv loop, but the ownership decision must remain atomic
+	// across those paths.
+	secretMu           sync.Mutex
+	secretOwner        string
+	secretBusy         bool
+	secretEnding       bool
+	secretLastActivity time.Time
+	secretWorkMu       sync.Mutex
+	secretRelease      func(string)
+	oauthRelease       func(string)
 
 	// connStart is the Connection start hook (session-lifecycle D6): it
 	// evaluates the Session reset rule at every successful handshake and
@@ -281,6 +322,7 @@ func NewChannel(
 	ch := &Channel{
 		listener:              listener,
 		challenges:            challenges,
+		currentSecret:         secret,
 		connectionIdleTimeout: cfg.ConnectionIdleTimeout,
 		replyTimeout:          replyTimeout,
 		livenessTimeout:       livenessTimeout,
@@ -312,6 +354,42 @@ func (c *Channel) Name() string {
 // channel formatter.
 type ControlRequestHandler func(reqType protocol.RequestType, connectionID string) string
 
+// SecretEntryHandler is the daemon-owned direct-entry boundary. The channel
+// performs routing identity and active-session checks before invoking it; the
+// handler owns profile, operation and Secret-store policy.
+// It must return metadata only and never echo a submitted value.
+type SecretEntryHandler func(context.Context, []byte, bool, protocol.Request) protocol.Response
+
+// OAuthLoginHandler is the daemon-owned interactive OAuth login boundary
+// coordinated over ZMQ for an authenticated loopback connection.
+type OAuthLoginHandler func(context.Context, []byte, bool, protocol.Request) protocol.Response
+
+// RuntimeReloadHandler triggers an in-process Runtime Generation reload and
+// returns the refreshed model/identity/secret/credential state.
+type RuntimeReloadHandler func(context.Context, []byte, bool, protocol.Request) protocol.Response
+
+// IsNumericLoopback reports whether the ZMQ listener is bound to a numeric
+// loopback address (127.0.0.1 or ::1).
+func (c *Channel) IsNumericLoopback() bool {
+	return c.listener != nil && c.listener.IsNumericLoopback()
+}
+
+// UpdateTimeouts updates the channel's idle, reply, and liveness timeouts in
+// place when the channel is preserved across an in-process runtime reload.
+func (c *Channel) UpdateTimeouts(connectionIdleTimeout, replyTimeout, livenessTimeout time.Duration) {
+	if replyTimeout == 0 {
+		replyTimeout = defaultReplyTimeout
+	}
+	if livenessTimeout == 0 {
+		livenessTimeout = defaultLivenessTimeout
+	}
+	c.secretMu.Lock()
+	c.connectionIdleTimeout = connectionIdleTimeout
+	c.replyTimeout = replyTimeout
+	c.livenessTimeout = livenessTimeout
+	c.secretMu.Unlock()
+}
+
 // SetUsageSource wires the hook that produces the session's cumulative usage
 // totals for reply attachment and the handshake seed (tui-usage-
 // observability). Nil (never wired) keeps pre-usage payloads valid.
@@ -320,6 +398,51 @@ func (c *Channel) SetUsageSource(source func() *protocol.UsageInfo) {
 	defer c.usageMu.Unlock()
 
 	c.usageSource = source
+}
+
+// SetAgentDirDisplay wires the authenticated handshake's agent_dir display
+// text: the daemon's sanitised agent directory (a leading ~ denotes the
+// daemon user's home). Empty means the field is omitted.
+func (c *Channel) SetAgentDirDisplay(display string) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+
+	c.agentDirDisplay = display
+}
+
+// ReplaceAuthSecret adopts a newly committed ZMQ credential for future
+// handshakes. Existing authenticated connections and already-issued
+// challenges retain their established authentication state.
+func (c *Channel) ReplaceAuthSecret(secret string) {
+	c.usageMu.Lock()
+	c.currentSecret = secret
+	c.usageMu.Unlock()
+	c.challenges.ReplaceSecret(secret)
+}
+
+// SetSecretRefresh installs the per-handshake secret source: before each
+// verification the channel asks it for the current shared secret (a stat of the
+// Secret store's cached view, never a decryption per handshake) and swaps it
+// into the challenge store only when it changed. A writer outside the daemon
+// (`ready secrets set`) is therefore adopted without a restart.
+func (c *Channel) SetSecretRefresh(f func(context.Context) (string, bool)) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.secretRefresh = f
+}
+
+// refreshSecret runs outside the challenge store's mutex, before a challenge
+// is issued (a challenge keeps the secret it was issued under).
+func (c *Channel) refreshSecret() {
+	c.usageMu.Lock()
+	f, last := c.secretRefresh, c.currentSecret
+	c.usageMu.Unlock()
+	if f == nil {
+		return
+	}
+	if secret, ok := f(c.ctx); ok && secret != "" && secret != last {
+		c.ReplaceAuthSecret(secret)
+	}
 }
 
 // SetControlRequestHandler wires the daemon-side handler for the
@@ -333,6 +456,195 @@ func (c *Channel) SetControlRequestHandler(h ControlRequestHandler) {
 	defer c.usageMu.Unlock()
 
 	c.control = h
+}
+
+// SetSecretEntryHandler installs the dedicated direct-entry control handler.
+func (c *Channel) SetSecretEntryHandler(h SecretEntryHandler) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.secretEntry = h
+}
+
+// SetSecretEntryReleaseHandler connects operation expiry/lifecycle to the
+// configuration gate. Release runs off recv and settles after any disk work.
+func (c *Channel) SetSecretEntryReleaseHandler(h func(string)) {
+	c.secretMu.Lock()
+	defer c.secretMu.Unlock()
+	c.secretRelease = h
+}
+
+// SetOAuthLoginHandler installs the dedicated interactive OAuth login control handler.
+func (c *Channel) SetOAuthLoginHandler(h OAuthLoginHandler) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.oauthLogin = h
+}
+
+// SetOAuthLoginReleaseHandler connects connection close/expiry to the OAuth
+// login handler so any active loopback callback server is cancelled immediately.
+func (c *Channel) SetOAuthLoginReleaseHandler(h func(string)) {
+	c.secretMu.Lock()
+	defer c.secretMu.Unlock()
+	c.oauthRelease = h
+}
+
+// SetRuntimeReloadHandler installs the daemon's in-process runtime reload handler.
+func (c *Channel) SetRuntimeReloadHandler(h RuntimeReloadHandler) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.runtimeReload = h
+}
+
+// SetCredentialsSource wires the metadata-only OAuth Credential snapshot used
+// on authenticated handshakes.
+func (c *Channel) SetCredentialsSource(source func(context.Context) []protocol.CredentialInfo) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.credentialsSource = source
+}
+
+func (c *Channel) credentialsSnapshot(ctx context.Context) []protocol.CredentialInfo {
+	c.usageMu.Lock()
+	source := c.credentialsSource
+	c.usageMu.Unlock()
+	if source == nil {
+		return nil
+	}
+
+	return source(ctx)
+}
+
+func (c *Channel) releaseSecretOperation(owner string) {
+	c.finishSecretOperation(owner, false)
+}
+
+// finishSecretOperation keeps the gate closed until persistence and the
+// optional expiry notification settle, so an old expiry cannot end a new pass.
+func (c *Channel) finishSecretOperation(owner string, expired bool) {
+	c.secretMu.Lock()
+	if owner == "" || c.secretOwner != owner || c.secretEnding ||
+		(expired && (c.secretBusy || time.Since(c.secretLastActivity) <= c.connectionIdleTimeout)) {
+		c.secretMu.Unlock()
+
+		return
+	}
+	c.secretEnding = true
+	release := c.secretRelease
+	oauthRelease := c.oauthRelease
+	c.secretMu.Unlock()
+	go func() {
+		c.secretWorkMu.Lock()
+		defer c.secretWorkMu.Unlock()
+		if release != nil {
+			release(owner)
+		}
+		if oauthRelease != nil {
+			oauthRelease(owner)
+		}
+		if expired {
+			active, identity, _, _ := c.sess.snapshot()
+			if active == owner {
+				_ = c.sendSecretResponse(identity, protocol.Response{
+					ConnectionID: owner, ResponseType: protocol.ResponseTypeControl,
+					Status: protocol.ResponseStatusError, ErrorCode: protocol.ErrorCodeSecretEntryExpired,
+				})
+			}
+		}
+		c.secretMu.Lock()
+		c.secretOwner = ""
+		c.secretEnding = false
+		c.secretMu.Unlock()
+	}()
+}
+
+// SetPendingSource wires the metadata-only Secret snapshot used on
+// authenticated handshakes: every Secret name with its referencing fields and
+// derived state, never a value. A nil result means "unavailable" (omitted from
+// the handshake); an empty non-nil slice is an authoritative "nothing pending".
+// The source must honor cancellation.
+func (c *Channel) SetPendingSource(source func(context.Context) []protocol.PendingSecret) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.pendingSource = source
+}
+
+// SetAgentIdentity sets the agent id and display name the authenticated
+// handshake carries, so the TUI can say which agent it is attached to.
+func (c *Channel) SetAgentIdentity(id, name string) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	c.agentID, c.agentName = id, name
+}
+
+func (c *Channel) pendingSnapshot(ctx context.Context) ([]protocol.PendingSecret, bool) {
+	c.usageMu.Lock()
+	source := c.pendingSource
+	c.usageMu.Unlock()
+	if source == nil {
+		return nil, false
+	}
+	pending := source(ctx)
+
+	return pending, pending != nil
+}
+
+// SendPendingSecretsChanged publishes a metadata-only notification without
+// allocating a conversational reply slot. Clients must re-list from disk.
+func (c *Channel) SendPendingSecretsChanged(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("notify pending credentials: %w", err)
+	}
+	connectionID, identity, _, _ := c.sess.snapshot()
+	if connectionID == "" || len(identity) == 0 {
+		return nil
+	}
+	// This is an invalidation signal only. The client re-lists from disk;
+	// scanning here would duplicate I/O and delay notification delivery.
+	return c.sendSecretResponse(identity, protocol.Response{
+		ConnectionID: connectionID,
+		ResponseType: protocol.ResponseTypeControl,
+		Status:       protocol.ResponseStatusOK,
+		Content:      "pending_secrets_changed",
+	})
+}
+
+// SendOAuthLoginResult releases the active OAuth login ownership for
+// connectionID and pushes an unsolicited oauth_login_result control event to
+// the connected client.
+func (c *Channel) SendOAuthLoginResult(connectionID string, resp protocol.Response) error {
+	c.secretMu.Lock()
+	if c.secretOwner == connectionID {
+		c.secretOwner = ""
+	}
+	c.secretLastActivity = time.Now()
+	c.secretMu.Unlock()
+
+	activeID, identity, _, _ := c.sess.snapshot()
+	if activeID == "" || activeID != connectionID || len(identity) == 0 {
+		return nil
+	}
+	resp.ConnectionID = connectionID
+	resp.ResponseType = protocol.ResponseTypeControl
+	if resp.Content == "" {
+		resp.Content = protocol.ControlOAuthLoginResult
+	}
+
+	return c.sendSecretResponse(identity, resp)
+}
+
+// SendConfigReloaded broadcasts an unsolicited config_reloaded control event
+// to the active ZMQ connection when a runtime reload completes outside the TUI.
+func (c *Channel) SendConfigReloaded(resp protocol.Response) error {
+	connectionID, identity, _, _ := c.sess.snapshot()
+	if connectionID == "" || len(identity) == 0 {
+		return nil
+	}
+	resp.ConnectionID = connectionID
+	resp.ResponseType = protocol.ResponseTypeControl
+	resp.Status = protocol.ResponseStatusOK
+	resp.Content = protocol.ControlConfigReloaded
+
+	return c.sendSecretResponse(identity, resp)
 }
 
 // OnConnectionStart wires the Connection start hook (channel.ConnectionOriented).
@@ -368,6 +680,9 @@ func (c *Channel) connectionStart(connectionID string) (channel.ConnectionInfo, 
 // Session ID.
 func (c *Channel) SendSessionEvent(kind, sessionID string, compaction *protocol.CompactionInfo) error {
 	connectionID, identity, _, _ := c.sess.snapshot()
+	if kind == protocol.ControlSessionChanged {
+		c.releaseSecretOperation(connectionID)
+	}
 	if connectionID == "" || len(identity) == 0 {
 		return nil
 	}
@@ -471,6 +786,7 @@ func (c *Channel) Send(_ context.Context, msg channel.Message) error {
 		ResponseType: protocol.ResponseTypeReply,
 		Content:      msg.Content,
 		ErrorCode:    msg.Metadata[ErrorCode],
+		ConfigSaved:  msg.Metadata[ConfigSaved] == "true",
 		// tui-usage-observability: every final reply carries the session's
 		// cumulative totals (success AND failure — a failed attempt still
 		// consumed tokens); nil keeps pre-usage payloads valid.
@@ -604,6 +920,7 @@ func (c *Channel) Close() error {
 		}
 
 		// 2. Stop internal goroutines.
+		c.releaseSecretOperation(connectionID)
 		c.cancel()
 
 		// 3. Close listener (this also unblocks any pending Recv).
@@ -664,6 +981,15 @@ func (c *Channel) dispatchLoop() {
 			c.handlePing(identity, req)
 		case protocol.RequestTypeSessionInfo, protocol.RequestTypeContextUsage:
 			c.handleControlRequest(identity, req)
+		case protocol.RequestTypeSecretEntry:
+			// Secret controls never enter the conversational queue. Run the
+			// bounded handler independently so recv/ping/session_end remain
+			// responsive while disk work is in progress.
+			c.handleSecretEntry(identity, req)
+		case protocol.RequestTypeOAuthLogin:
+			c.handleOAuthLogin(identity, req)
+		case protocol.RequestTypeRuntimeReload:
+			c.handleRuntimeReload(identity, req)
 		}
 	}
 }
@@ -673,17 +999,45 @@ func (c *Channel) dispatchLoop() {
 // Round 1 (probe): AuthToken is empty → issue nonce challenge.
 // Round 2 (verify): AuthToken is non-empty → verify HMAC and try to acquire session.
 func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
+	// guided-init D11a: the protocol version gate precedes any challenge,
+	// nonce, HMAC or session-lock work. A mismatch (including an absent
+	// version) creates NO pending challenge and NO
+	// session state for that identity.
+	if req.ProtocolVersion != protocol.Version {
+		c.logger.Warn().
+			Str("identity", shortIdentity(identity)).
+			Int("declared", req.ProtocolVersion).
+			Int("daemon", protocol.Version).
+			Msg("protocol_version mismatch: session_start refused before authentication")
+		resp, _ := protocol.Marshal(protocol.Response{
+			ConnectionID:    req.ConnectionID,
+			Status:          protocol.ResponseStatusError,
+			RequestID:       req.RequestID,
+			ResponseType:    protocol.ResponseTypeControl,
+			ErrorCode:       protocol.ErrorCodeProtocolMismatch,
+			ProtocolVersion: protocol.Version,
+		})
+		_ = c.listener.Send(identity, resp)
+
+		return
+	}
+
 	if req.AuthToken == "" {
-		// Round 1: challenge probe. Issue a nonce and reply with it.
+		// Round 1: challenge probe. The challenge captures the shared secret at
+		// issue time, so a secret rotated outside the daemon is adopted HERE,
+		// before the nonce — otherwise the first handshake after a rotation
+		// would still be verified against the old value.
+		c.refreshSecret()
 		nonceHex, err := c.challenges.IssueChallenge(identity)
 		if err != nil {
 			c.logger.Error().Err(err).Msg("failed to issue challenge")
 			resp, _ := protocol.Marshal(protocol.Response{
-				ConnectionID: req.ConnectionID,
-				Status:       protocol.ResponseStatusError,
-				RequestID:    req.RequestID,
-				ResponseType: protocol.ResponseTypeControl,
-				ErrorCode:    "internal_error",
+				ConnectionID:    req.ConnectionID,
+				Status:          protocol.ResponseStatusError,
+				RequestID:       req.RequestID,
+				ResponseType:    protocol.ResponseTypeControl,
+				ErrorCode:       "internal_error",
+				ProtocolVersion: protocol.Version,
 			})
 			_ = c.listener.Send(identity, resp)
 
@@ -691,26 +1045,29 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 		}
 
 		resp, _ := protocol.Marshal(protocol.Response{
-			ConnectionID: req.ConnectionID,
-			Status:       protocol.ResponseStatusOK,
-			RequestID:    req.RequestID,
-			ResponseType: protocol.ResponseTypeControl,
-			Content:      nonceHex,
-			ErrorCode:    Challenge,
+			ConnectionID:    req.ConnectionID,
+			Status:          protocol.ResponseStatusOK,
+			RequestID:       req.RequestID,
+			ResponseType:    protocol.ResponseTypeControl,
+			Content:         nonceHex,
+			ErrorCode:       Challenge,
+			ProtocolVersion: protocol.Version,
 		})
 		_ = c.listener.Send(identity, resp)
 
 		return
 	}
 
-	// Round 2: verify HMAC token.
+	// Round 2: verify the HMAC token against the secret captured when the
+	// nonce was issued (round 1 adopts a rotated secret first).
 	if err := c.challenges.VerifyAuthToken(identity, req.AuthToken); err != nil {
 		c.logger.Warn().Str("reason", "hmac_mismatch").Msg("auth_failed")
 		resp, _ := protocol.Marshal(protocol.Response{
-			ConnectionID: req.ConnectionID,
-			Status:       protocol.ResponseStatusAuthFail,
-			RequestID:    req.RequestID,
-			ResponseType: protocol.ResponseTypeControl,
+			ConnectionID:    req.ConnectionID,
+			Status:          protocol.ResponseStatusAuthFail,
+			RequestID:       req.RequestID,
+			ResponseType:    protocol.ResponseTypeControl,
+			ProtocolVersion: protocol.Version,
 		})
 		_ = c.listener.Send(identity, resp)
 
@@ -723,10 +1080,11 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 			Str(ConnectionID, req.ConnectionID).
 			Msg("session_busy_rejected")
 		resp, _ := protocol.Marshal(protocol.Response{
-			ConnectionID: req.ConnectionID,
-			Status:       protocol.ResponseStatusBusy,
-			RequestID:    req.RequestID,
-			ResponseType: protocol.ResponseTypeControl,
+			ConnectionID:    req.ConnectionID,
+			Status:          protocol.ResponseStatusBusy,
+			RequestID:       req.RequestID,
+			ResponseType:    protocol.ResponseTypeControl,
+			ProtocolVersion: protocol.Version,
 		})
 		_ = c.listener.Send(identity, resp)
 
@@ -740,11 +1098,16 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 	// polling. Omitted entirely when no status source is wired (tests,
 	// pre-change shape).
 	okResp := protocol.Response{
-		ConnectionID: req.ConnectionID,
-		Status:       protocol.ResponseStatusOK,
-		RequestID:    req.RequestID,
-		ResponseType: protocol.ResponseTypeControl,
+		ConnectionID:    req.ConnectionID,
+		Status:          protocol.ResponseStatusOK,
+		RequestID:       req.RequestID,
+		ResponseType:    protocol.ResponseTypeControl,
+		ProtocolVersion: protocol.Version,
 	}
+	// per-user-install-agent-isolation: the authenticated handshake carries
+	// the daemon-authoritative agent directory (pre-sanitised at boot).
+	// Challenges and auth failures never see it.
+	okResp.AgentDir = c.agentDirDisplay
 	if ev, known := c.currentModelStatus(); known {
 		okResp.ModelRef = ev.Ref
 		okResp.ModelState = ev.State
@@ -764,11 +1127,32 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 	// daemon's liveness timeout (interval = timeout / 3) — one knob, no
 	// client-side configuration.
 	okResp.LivenessTimeout = c.livenessTimeout.String()
+	// Pending discovery can wait for config persistence. It must not block
+	// recv, pings or session_end while the authenticated reply is prepared.
+	go c.sendHandshakeOK(c.ctx, identity, okResp)
+}
+
+func (c *Channel) sendHandshakeOK(ctx context.Context, identity []byte, okResp protocol.Response) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if pending, available := c.pendingSnapshot(ctx); available && ctx.Err() == nil {
+		okResp.PendingSecrets = pending
+	}
+	if creds := c.credentialsSnapshot(ctx); len(creds) > 0 && ctx.Err() == nil {
+		okResp.Credentials = creds
+	}
+	c.usageMu.Lock()
+	okResp.AgentID, okResp.AgentName = c.agentID, c.agentName
+	c.usageMu.Unlock()
+	active, peer, _, _ := c.sess.snapshot()
+	if c.ctx.Err() != nil || active != okResp.ConnectionID || !bytes.Equal(peer, identity) {
+		return
+	}
 	resp, marshalErr := protocol.Marshal(okResp)
 	if marshalErr != nil {
 		// Bug-level failure: release the just-acquired session so the next
 		// client is not locked out until the watchdog.
-		c.sess.release()
+		c.sess.releaseConnection(okResp.ConnectionID)
 		c.logger.Error().Err(marshalErr).Msg("failed to marshal handshake OK reply")
 
 		return
@@ -779,9 +1163,9 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 	// fire-and-forget send left the session locked until the idle watchdog
 	// when the network send failed.
 	if sendErr := c.listener.Send(identity, resp); sendErr != nil {
-		c.sess.release()
+		c.sess.releaseConnection(okResp.ConnectionID)
 		c.logger.Error().Err(sendErr).
-			Str(ConnectionID, req.ConnectionID).
+			Str(ConnectionID, okResp.ConnectionID).
 			Msg("failed to send handshake OK reply — session released")
 	}
 }
@@ -805,6 +1189,22 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 		return
 	}
 
+	c.secretMu.Lock()
+	secretActive := c.secretOwner == req.ConnectionID
+	if secretActive {
+		c.secretMu.Unlock()
+		resp, _ := protocol.Marshal(protocol.Response{
+			ConnectionID: req.ConnectionID,
+			Status:       protocol.ResponseStatusError,
+			RequestID:    req.RequestID,
+			ResponseType: protocol.ResponseTypeControl,
+			ErrorCode:    protocol.ErrorCodeSecretEntryActive,
+		})
+		_ = c.listener.Send(identity, resp)
+
+		return
+	}
+
 	// Update last-activity and register the pending reply entry.
 	c.sess.touchActivity()
 
@@ -817,6 +1217,7 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 	c.pendingMu.Unlock()
 
 	if inFlight && existing.requestID != req.RequestID {
+		c.secretMu.Unlock()
 		c.logger.Warn().Str(ConnectionID, req.ConnectionID).Msg("request_in_flight_rejected")
 		resp, _ := protocol.Marshal(protocol.Response{
 			ConnectionID: req.ConnectionID,
@@ -836,6 +1237,7 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 		requestID: req.RequestID,
 	}
 	c.pendingMu.Unlock()
+	c.secretMu.Unlock()
 
 	msg := channel.Message{
 		Content:     req.Content,
@@ -844,6 +1246,7 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 			ConnectionID:   req.ConnectionID,
 			RequestID:      req.RequestID,
 			"request_type": string(req.Type),
+			"transport":    "zmq",
 		},
 	}
 
@@ -916,6 +1319,323 @@ func (c *Channel) handleControlRequest(identity []byte, req protocol.Request) {
 	c.sess.touchActivity()
 }
 
+func (c *Channel) handleSecretEntry(identity []byte, req protocol.Request) {
+	activeConnectionID, activeIdentity, _, _ := c.sess.snapshot()
+	if activeConnectionID != req.ConnectionID || !bytes.Equal(activeIdentity, identity) {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeNoActiveSession,
+		})
+
+		return
+	}
+
+	c.usageMu.Lock()
+	handler := c.secretEntry
+	c.usageMu.Unlock()
+	if writesSecrets(req.SecretEntry.Action) && !c.listener.IsNumericLoopback() {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeLoopbackRequired,
+		})
+
+		return
+	}
+	if handler == nil {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeNoPendingSecrets,
+		})
+
+		return
+	}
+	c.sess.touchActivity()
+	c.secretMu.Lock()
+	if c.secretBusy || c.secretEnding {
+		c.secretMu.Unlock()
+		_ = c.sendSecretResponse(identity, protocol.Response{ConnectionID: req.ConnectionID, RequestID: req.RequestID, Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: protocol.ErrorCodeRequestInFlight})
+
+		return
+	}
+	if req.SecretEntry.Action == protocol.SecretEntryActionBegin {
+		c.pendingMu.Lock()
+		_, pending := c.pending[req.ConnectionID]
+		c.pendingMu.Unlock()
+		if pending {
+			c.secretMu.Unlock()
+			_ = c.sendSecretResponse(identity, protocol.Response{ConnectionID: req.ConnectionID, RequestID: req.RequestID, Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: protocol.ErrorCodeRequestInFlight})
+
+			return
+		}
+		if c.secretOwner != "" {
+			c.secretMu.Unlock()
+			_ = c.sendSecretResponse(identity, protocol.Response{ConnectionID: req.ConnectionID, RequestID: req.RequestID, Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: protocol.ErrorCodeSecretEntryActive})
+
+			return
+		}
+		c.secretOwner = req.ConnectionID
+	}
+	c.secretBusy = true
+	c.secretLastActivity = time.Now()
+	c.secretMu.Unlock()
+	go c.runSecretEntry(identity, req, handler)
+}
+
+// writesSecrets reports whether the action changes or exposes the Secret
+// store and therefore needs a numeric loopback listener.
+func writesSecrets(a protocol.SecretEntryAction) bool {
+	switch a {
+	case protocol.SecretEntryActionBegin, protocol.SecretEntryActionSubmit, protocol.SecretEntryActionDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Channel) runSecretEntry(identity []byte, req protocol.Request, handler SecretEntryHandler) {
+	c.secretWorkMu.Lock()
+	defer c.secretWorkMu.Unlock()
+	defer func() { c.secretMu.Lock(); c.secretBusy = false; c.secretMu.Unlock() }()
+	active, peer, _, _ := c.sess.snapshot()
+	if active != req.ConnectionID || !bytes.Equal(peer, identity) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+	resp := handler(ctx, identity, c.listener.IsNumericLoopback(), req)
+	resp.ConnectionID = req.ConnectionID
+	resp.RequestID = req.RequestID
+	if resp.ResponseType == "" {
+		resp.ResponseType = protocol.ResponseTypeReply
+	}
+	c.secretMu.Lock()
+	if (req.SecretEntry.Action == protocol.SecretEntryActionBegin && resp.Status != protocol.ResponseStatusOK) ||
+		(resp.SecretEntry != nil && resp.SecretEntry.Outcome == protocol.SecretEntryOutcomeReleased) {
+		c.secretOwner = ""
+	}
+	c.secretLastActivity = time.Now()
+	c.secretMu.Unlock()
+	_ = c.sendSecretResponse(identity, resp)
+}
+
+func (c *Channel) sendSecretResponse(identity []byte, resp protocol.Response) error {
+	data, err := protocol.Marshal(resp)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to marshal secret-entry response")
+
+		return err
+	}
+	if err := c.listener.Send(identity, data); err != nil {
+		c.logger.Warn().Err(err).Msg("failed to send secret-entry response")
+
+		return err
+	}
+
+	return nil
+}
+
+func (c *Channel) handleOAuthLogin(identity []byte, req protocol.Request) {
+	activeConnectionID, activeIdentity, _, _ := c.sess.snapshot()
+	if activeConnectionID != req.ConnectionID || !bytes.Equal(activeIdentity, identity) {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeNoActiveSession,
+		})
+
+		return
+	}
+	if !c.listener.IsNumericLoopback() {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeLoopbackRequired,
+		})
+
+		return
+	}
+	c.usageMu.Lock()
+	handler := c.oauthLogin
+	c.usageMu.Unlock()
+	if handler == nil {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeProfileRequired,
+		})
+
+		return
+	}
+	c.sess.touchActivity()
+	c.secretMu.Lock()
+	if c.secretBusy || c.secretEnding {
+		c.secretMu.Unlock()
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeRequestInFlight,
+		})
+
+		return
+	}
+	if req.OAuthLogin.Action == protocol.OAuthLoginActionBegin {
+		c.pendingMu.Lock()
+		_, pending := c.pending[req.ConnectionID]
+		c.pendingMu.Unlock()
+		if pending {
+			c.secretMu.Unlock()
+			_ = c.sendSecretResponse(identity, protocol.Response{
+				ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+				Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+				ErrorCode: protocol.ErrorCodeRequestInFlight,
+			})
+
+			return
+		}
+		if c.secretOwner != "" {
+			c.secretMu.Unlock()
+			_ = c.sendSecretResponse(identity, protocol.Response{
+				ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+				Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+				ErrorCode: protocol.ErrorCodeSecretEntryActive,
+			})
+
+			return
+		}
+		c.secretOwner = req.ConnectionID
+	} else if c.secretOwner != req.ConnectionID {
+		c.secretMu.Unlock()
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeSecretEntryExpired,
+		})
+
+		return
+	}
+	c.secretBusy = true
+	c.secretLastActivity = time.Now()
+	c.secretMu.Unlock()
+	go c.runOAuthLogin(identity, req, handler)
+}
+
+func (c *Channel) runOAuthLogin(identity []byte, req protocol.Request, handler OAuthLoginHandler) {
+	c.secretWorkMu.Lock()
+	defer c.secretWorkMu.Unlock()
+	defer func() { c.secretMu.Lock(); c.secretBusy = false; c.secretMu.Unlock() }()
+	active, peer, _, _ := c.sess.snapshot()
+	if active != req.ConnectionID || !bytes.Equal(peer, identity) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+	resp := handler(ctx, identity, c.listener.IsNumericLoopback(), req)
+	resp.ConnectionID = req.ConnectionID
+	resp.RequestID = req.RequestID
+	if resp.ResponseType == "" {
+		resp.ResponseType = protocol.ResponseTypeReply
+	}
+	c.secretMu.Lock()
+	keepActive := (req.OAuthLogin.Action == protocol.OAuthLoginActionBegin &&
+		resp.Status == protocol.ResponseStatusOK &&
+		resp.OAuthLogin != nil &&
+		resp.OAuthLogin.Outcome == protocol.OAuthLoginOutcomeWaiting) ||
+		(req.OAuthLogin.Action == protocol.OAuthLoginActionSubmit &&
+			resp.Status != protocol.ResponseStatusOK &&
+			resp.ErrorCode == protocol.ErrorCodeInvalidValue)
+	if !keepActive && c.secretOwner == req.ConnectionID {
+		c.secretOwner = ""
+	}
+	c.secretLastActivity = time.Now()
+	c.secretMu.Unlock()
+	_ = c.sendSecretResponse(identity, resp)
+}
+
+func (c *Channel) handleRuntimeReload(identity []byte, req protocol.Request) {
+	activeConnectionID, activeIdentity, _, _ := c.sess.snapshot()
+	if activeConnectionID != req.ConnectionID || !bytes.Equal(activeIdentity, identity) {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeNoActiveSession,
+		})
+
+		return
+	}
+	if !c.listener.IsNumericLoopback() {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeLoopbackRequired,
+		})
+
+		return
+	}
+	c.usageMu.Lock()
+	handler := c.runtimeReload
+	c.usageMu.Unlock()
+	if handler == nil {
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeProfileRequired,
+		})
+
+		return
+	}
+	c.secretMu.Lock()
+	if c.secretBusy || c.secretEnding || c.secretOwner != "" {
+		c.secretMu.Unlock()
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeSecretEntryActive,
+		})
+
+		return
+	}
+	c.pendingMu.Lock()
+	_, pending := c.pending[req.ConnectionID]
+	c.pendingMu.Unlock()
+	if pending {
+		c.secretMu.Unlock()
+		_ = c.sendSecretResponse(identity, protocol.Response{
+			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeRequestInFlight,
+		})
+
+		return
+	}
+	c.secretBusy = true
+	c.secretLastActivity = time.Now()
+	c.secretMu.Unlock()
+	c.sess.touchActivity()
+
+	go func() {
+		c.secretWorkMu.Lock()
+		defer c.secretWorkMu.Unlock()
+		defer func() { c.secretMu.Lock(); c.secretBusy = false; c.secretMu.Unlock() }()
+		active, peer, _, _ := c.sess.snapshot()
+		if active != req.ConnectionID || !bytes.Equal(peer, identity) {
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
+		defer cancel()
+		resp := handler(ctx, identity, c.listener.IsNumericLoopback(), req)
+		resp.ConnectionID = req.ConnectionID
+		resp.RequestID = req.RequestID
+		if resp.ResponseType == "" {
+			resp.ResponseType = protocol.ResponseTypeReply
+		}
+		c.sess.touchActivity()
+		_ = c.sendSecretResponse(identity, resp)
+	}()
+}
+
 // handleSessionEnd handles a session_end request. It verifies the session_id
 // matches the active session and releases the lock. The ZMQ identity is NOT
 // checked (change zmq-session-liveness): the client sends its
@@ -942,6 +1662,7 @@ func (c *Channel) handleSessionEnd(identity []byte, req protocol.Request) {
 	}
 
 	c.sess.release()
+	c.releaseSecretOperation(req.ConnectionID)
 
 	c.pendingMu.Lock()
 	delete(c.pending, req.ConnectionID)
@@ -1015,6 +1736,12 @@ func (c *Channel) watchdogLoop() {
 // checkIdleTimeout is called by watchdogLoop. Factored out so tests can drive
 // it directly without a timer.
 func (c *Channel) checkIdleTimeout() {
+	c.secretMu.Lock()
+	owner, lastSecret, busy := c.secretOwner, c.secretLastActivity, c.secretBusy
+	c.secretMu.Unlock()
+	if owner != "" && !busy && time.Since(lastSecret) > c.connectionIdleTimeout {
+		c.finishSecretOperation(owner, true)
+	}
 	connectionID, identity, openedAt, lastActivity := c.sess.snapshot()
 	if connectionID == "" {
 		return // no active session
@@ -1064,6 +1791,7 @@ func (c *Channel) checkIdleTimeout() {
 // cycle. reason is one of "idle_timeout" or "reply_timeout".
 func (c *Channel) releaseTimedOut(connectionID string, _ []byte, openedAt time.Time, reason string) {
 	c.sess.release()
+	c.releaseSecretOperation(connectionID)
 
 	c.pendingMu.Lock()
 	delete(c.pending, connectionID)

@@ -21,10 +21,11 @@ func newServeCommand(_ io.Writer) *cli.Command {
 		Usage: "Run the home-agent daemon (channels, MCP, agent loop)",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				// Optional: without it the resolution chain elects
-				// ./.ready/config.yaml, then ~/.ready/config.yaml.
-				Name:  "config",
-				Usage: "path to the YAML configuration file (elected through the resolution chain when omitted)",
+				// Optional: without it the default agent directory ~/.ready
+				// is selected, independent of the working directory. The
+				// directory must exist and hold the sole config.yaml.
+				Name:  flagAgentDirName,
+				Usage: "agent directory holding config.yaml and the agent's private state (default: ~/.ready)",
 			},
 			&cli.BoolFlag{
 				Name:  "mock-mcp",
@@ -33,7 +34,7 @@ func newServeCommand(_ io.Writer) *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "profile",
-				Usage: "active MCP profile (default|edit|<custom>); overrides READY_MCP_PROFILE and mcp_profile config",
+				Usage: "active MCP profile (default|edit|<custom>); overrides READY_DEFAULT_PROFILE and default_profile config",
 			},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
@@ -45,9 +46,9 @@ func newServeCommand(_ io.Writer) *cli.Command {
 			printReady()
 
 			opts := ServeOptions{
-				ConfigPath: c.String("config"),
-				MockMCP:    c.Bool("mock-mcp"),
-				Profile:    c.String("profile"),
+				AgentDir: c.String(flagAgentDirName),
+				MockMCP:  c.Bool("mock-mcp"),
+				Profile:  c.String("profile"),
 			}
 
 			return Serve(ctx, opts)

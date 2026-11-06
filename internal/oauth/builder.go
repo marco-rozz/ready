@@ -29,6 +29,10 @@ const (
 type HandlerConfig struct {
 	// ServerKey names the server for error messages and challengeAwareHandler.
 	ServerKey string
+	// AgentDir is the agent directory owning the credential store; it makes
+	// the login-required remediation name the same agent. Empty keeps the
+	// short `ready login <server>` form.
+	AgentDir string
 	// Grant is the resolved grant (GrantAuthorizationCode or
 	// GrantClientCredentials — never "auto").
 	Grant string
@@ -117,7 +121,7 @@ func buildAuthorizationCodeHandler(cfg HandlerConfig) (auth.OAuthHandler, error)
 	haveFreshFlow := cfg.RegisteredClient != nil && cfg.Fetcher != nil
 
 	if !haveUsableCredential && !haveFreshFlow {
-		return newLoginRequiredHandler(cfg.ServerKey), nil
+		return newLoginRequiredHandler(cfg.ServerKey, cfg.AgentDir), nil
 	}
 
 	if cfg.RegisteredClient == nil {

@@ -20,16 +20,24 @@ func prepareServeConfig(ctx context.Context, path string, opts ServeOptions, reg
 		}
 	}
 
-	return registry.Prepare(ctx, path, func(cfg *config.Config) error {
+	return registry.Prepare(ctx, path, validateServeLocalConfig(opts))
+}
+
+// validateServeLocalConfig returns the serve-local checks every config
+// candidate must pass: at least one enabled channel and a resolvable MCP
+// profile under the boot's flag/env precedence. Shared by boot preparation
+// and the config-manager tool's private candidate validation.
+func validateServeLocalConfig(opts ServeOptions) func(*config.Config) error {
+	return func(cfg *config.Config) error {
 		if !cfg.HasEnabledChannels() {
 			return fmt.Errorf("no channels enabled in configuration")
 		}
-		if _, _, err := cfg.ResolveProfile(opts.Profile, os.Getenv("READY_MCP_PROFILE")); err != nil {
+		if _, _, err := cfg.ResolveProfile(opts.Profile, os.Getenv(config.ProfileEnvName)); err != nil {
 			return fmt.Errorf("failed to resolve MCP profile: %w", err)
 		}
 
 		return nil
-	})
+	}
 }
 
 func logConfigMigration(logger zerolog.Logger, report config.MigrationReport) {

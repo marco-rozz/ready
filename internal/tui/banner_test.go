@@ -190,7 +190,7 @@ func TestInfoBlockNotMarkdown(t *testing.T) {
 
 	m := newLogoTestModel(t, LogoNone)
 
-	want := buildInfoBlock(testDaemonAddr, testSessionID, testClientVer)
+	want := buildInfoBlock(testDaemonAddr, "", "", testSessionID, testClientVer)
 	if m.infoBlock != want {
 		t.Errorf("info block not the static construction output:\nwant=%q\n got=%q", want, m.infoBlock)
 	}

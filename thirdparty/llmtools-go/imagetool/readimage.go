@@ -37,6 +37,26 @@ var readImageTool = spec.Tool{
 "required": ["path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"path": {"type": "string"},
+	"name": {"type": "string"},
+	"exists": {"type": "boolean"},
+	"sizeBytes": {"type": "integer"},
+	"modTime": {"type": "string", "format": "date-time"},
+	"width": {"type": "integer"},
+	"height": {"type": "integer"},
+	"format": {"type": "string"},
+	"mimeType": {"type": "string"},
+	"base64Data": {"type": "string"}
+},
+"required": ["path", "name", "exists"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: readImageFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

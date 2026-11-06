@@ -207,13 +207,12 @@ func TestChat_PipedInteractiveNoBanner(t *testing.T) {
 // prints no banner before the status table — the banner is gone from the
 // binary entry point entirely.
 func TestLoginStdoutHasNoBanner(t *testing.T) {
-	oauthDir := t.TempDir()
-	configPath := writeTempConfig(t, minimalOAuthConfigYAML(oauthDir))
+	agentDir := writeTempAgentDir(t, minimalOAuthConfigYAML())
 
 	var stdout, stderr bytes.Buffer
 	cmd := newTestLoginCommand(&stdout, &stderr)
 
-	err := cmd.Run(context.Background(), []string{loginLabel, flagConfig, configPath, flagStatus})
+	err := cmd.Run(context.Background(), []string{loginLabel, flagAgentDir, agentDir, flagStatus})
 	if exitCodeFor(err) != ExitOK {
 		t.Fatalf("exit code: got %d, want %d; stderr=%q", exitCodeFor(err), ExitOK, stderr.String())
 	}

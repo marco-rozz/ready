@@ -44,7 +44,11 @@ type Tool struct {
 
 	// ArgSchema describes the JSON arguments that are passed when the tool is invoked.
 	ArgSchema JSONSchema `json:"argSchema"`
-	GoImpl    GoToolImpl `json:"goImpl"`
+
+	// OutputSchema describes the logical JSON result returned by the tool.
+	OutputSchema JSONSchema `json:"outputSchema,omitempty"`
+
+	GoImpl GoToolImpl `json:"goImpl"`
 
 	CreatedAt  time.Time `json:"createdAt"`
 	ModifiedAt time.Time `json:"modifiedAt"`

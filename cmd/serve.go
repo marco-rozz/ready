@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
@@ -37,10 +38,10 @@ import (
 	"github.com/marco-rozz/ready/internal/privacy"
 	"github.com/marco-rozz/ready/internal/profile"
 	"github.com/marco-rozz/ready/internal/protocol"
+	"github.com/marco-rozz/ready/internal/secretstore"
 	"github.com/marco-rozz/ready/internal/session"
 	"github.com/marco-rozz/ready/internal/skillcache"
 	"github.com/marco-rozz/ready/internal/skills"
-	"github.com/marco-rozz/ready/internal/skillssync"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/twin"
 	"github.com/marco-rozz/ready/internal/usage"
@@ -135,15 +136,16 @@ func (r *agentRegistry) PromptLayout() llm.PromptLayout {
 // declared on the urfave/cli command so a future flag addition only touches
 // `cmd/main.go` and this struct.
 type ServeOptions struct {
-	// ConfigPath is an explicit config file path. Optional: when empty, the
-	// resolution chain elects ./.ready/config.yaml then ~/.ready/config.yaml.
-	ConfigPath string
+	// AgentDir is an explicit agent directory holding the sole config.yaml.
+	// Optional: when empty, the default agent directory ~/.ready is selected
+	// unconditionally, independent of the working directory.
+	AgentDir string
 	// MockMCP selects the in-process MCP mock instead of a real Home
 	// Assistant connection. Useful for local development and CI.
 	MockMCP bool
 	// Profile is the active MCP profile name from the --profile flag. Empty
 	// means "not set on the command line"; resolution falls back to the
-	// READY_MCP_PROFILE env var, then the mcp_profile config key.
+	// READY_DEFAULT_PROFILE env var, then the default_profile config key.
 	Profile string
 }
 
@@ -158,17 +160,40 @@ type ServeOptions struct {
 //   - signal handling is rooted in the supplied ctx via NotifyContext, so
 //     tests and the dispatcher can cancel the daemon deterministically.
 func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
-	// Config resolution chain (install-home): the explicit --config wins with
-	// no fallback, else ./.ready/config.yaml, else ~/.ready/config.yaml.
-	resolution, err := config.Elect(ctx, opts.ConfigPath)
+	// Agent-directory selection (per-user-install-agent-isolation): the
+	// explicit --agent-dir wins with no fallback, else ~/.ready — always,
+	// independent of the working directory. No cwd discovery or merging.
+	resolution, err := config.SelectAgentDir(ctx, opts.AgentDir)
 	if err != nil {
-		return fmt.Errorf("failed to elect config: %w", err)
+		return fmt.Errorf("failed to select agent directory: %w", err)
+	}
+	if cfgErr := ensureConfigExists(resolution.Path, false); cfgErr != nil {
+		return cfgErr
+	}
+
+	// Lock ordering (per-user-install-agent-isolation): the shared
+	// maintenance gate first, then exclusive daemon ownership — both before
+	// config migration, configured logging, sync, retention, network setup
+	// or workers, so a duplicate start has no runtime side effects and an
+	// installer purge can exclude this daemon for its whole operation.
+	releaseLocks, lockErr := acquireDirectoryLocks(ctx, resolution.AgentDir)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer releaseLocks(&serveErr)
+
+	// Recheck under ownership (per-user-install-agent-isolation): a purge
+	// that raced between selection and acquisition may have removed the
+	// directory or config; never boot against a deleted/obsolete snapshot.
+	if cfgErr := ensureConfigExists(resolution.Path, true); cfgErr != nil {
+		return cfgErr
 	}
 
 	cfg, migrationReport, err := prepareServeConfig(ctx, resolution.Path, opts, nil)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+
 	defer func() {
 		if serveErr != nil && migrationReport.Committed {
 			serveErr = fmt.Errorf("%w%s", serveErr, migrationReport.CommitContext())
@@ -176,11 +201,13 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	}()
 	cfg.Origin = resolution.Origin
 
-	activeProfileName, activeProfile, err := cfg.ResolveProfile(opts.Profile, os.Getenv("READY_MCP_PROFILE"))
-	if err != nil {
+	if _, _, err = cfg.ResolveProfile(opts.Profile, os.Getenv(config.ProfileEnvName)); err != nil {
 		return fmt.Errorf("failed to resolve MCP profile: %w", err)
 	}
 
+	// The logger lives in the Process Shell: its rotating file sink holds a
+	// directory lock, so it cannot be rebuilt in-process (logging.* changes
+	// take effect at the next daemon start).
 	logRes, err := buildLogger(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialise logger: %w", err)
@@ -190,178 +217,36 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 
 	logger := rootLogger.With().Str("component", "main").Logger()
 	logConfigMigration(logger, migrationReport)
-
-	// Elected config visibility (install-home): the chain can pick the
-	// cwd's ./.ready/config.yaml without the operator noticing — the boot
-	// always names the file and how it was elected, and warns when a local
-	// file is readable by group or others (never fatal, unix only).
-	logger.Info().
-		Str("config", cfg.ElectedPath).
-		Str("origin", string(cfg.Origin)).
-		Str("runtime_home", cfg.RuntimeHome).
-		Msg("elected config")
-	if w := warnConfigPermissions(cfg.ElectedPath); w != "" {
-		logger.Warn().Msg(w)
-	}
-
-	logger.Info().
-		Str("mcp_profile", activeProfileName).
-		Strs("inject_skills", activeProfile.InjectSkills).
-		Msg("active MCP profile resolved")
-
-	// Warn when thoughts is enabled but the effective log level is too high.
 	warnThoughtsLevelMismatch(rootLogger, cfg, logRes)
 
-	// Secret files read through *_file configuration keys are permission-checked at
-	// boot — a file readable by group or others WARNs naming the path.
-	warnSecretFilePermissions(cfg, rootLogger)
-
-	// Privacy guardrail: redact the user's home directory prefix (the
-	// privacy-sensitive part of any absolute path, e.g. the username) to "~"
-	// and the resolved runtime home (the elected config's directory) to a
-	// neutral placeholder wherever filesystem paths cross into the LLM
-	// context or out to the user. Deterministic prefix replacement — never
-	// touches strings that merely resemble paths (MCP tool names, URLs,
-	// dates).
+	// Privacy guardrail: redact the user's home directory prefix and the
+	// resolved runtime home wherever filesystem paths cross into the LLM
+	// context or out to the user.
 	sanitizer := privacy.FromRun(cfg.RuntimeHome, nil)
 
-	// Skill library sync (install-home D14): bring the runtime skill copy up
-	// to date with the shipped library before the skills manager starts —
-	// per file, three-way against the recorded state, so untouched files
-	// receive shipped fixes and operator edits are never overwritten.
-	if err = skillssync.Run(ctx, cfg.Skills, cfg.RuntimeHome, rootLogger); err != nil {
-		return fmt.Errorf("failed to sync the skill library: %w", err)
+	shell := &serveShell{ctx: ctx, opts: opts, resolution: resolution, rootLogger: rootLogger, logger: logger}
+
+	// First Runtime Generation: LLM orchestrator + runners, MCP, Twin, skills,
+	// tools, bootstrapper. A boot failure here is fatal; later generations
+	// (Runtime reload) keep the previous one on failure.
+	gen, err := shell.buildGeneration(cfg)
+	if err != nil {
+		return err
 	}
+	bootCfg := gen.bootCfg
 
-	skillsMgr, skillCache := mustInitInfra(ctx, cfg, rootLogger)
+	mgr, err := buildChannelManager(ctx, bootCfg, rootLogger)
+	if err != nil {
+		gen.shutdown(ctx, rootLogger)
 
-	// Start the HA digital twin (non-blocking; nil when home_assistant.enabled: false).
-	// criticalities-remediation (LOW): twin.Init returns construction errors
-	// instead of exiting the process from inside the library.
-	haTwin, twinErr := twin.Init(ctx, cfg.HomeAssistant, rootLogger)
-	if twinErr != nil {
-		return fmt.Errorf("failed to start HA digital twin: %w", twinErr)
+		return err
 	}
-
-	agentTools, mcpRuntime, blockedTools := buildTools(ctx, cfg, skillsMgr, skillCache, opts.MockMCP, activeProfileName, haTwin, rootLogger)
-
-	// denied-tool-disclosure: when the active profile opts in,
-	// the sentinel tool joins the agent's tool configuration (and is therefore
-	// advertised) and the blocked set is loaded into the tool-name resolver's
-	// ghost index. With the knob off, none of this happens — behavior is
-	// byte-identical to the pre-disclosure daemon.
-	discloseDenied := activeProfile.DiscloseDeniedTools
-	if discloseDenied {
-		agentTools = append(agentTools, toolnames.NewPolicyBlockTool())
-		logger.Info().
-			Str("mcp_profile", activeProfileName).
-			Int("blocked_tools", len(blockedTools)).
-			Msg("disclose_denied_tools enabled — blocked-call disclosure active")
-	}
-
-	resolver := buildToolNameResolver(ctx, agentTools, rootLogger, blockedTools, discloseDenied)
-
-	// LLM orchestrator (change llm-failover-orchestrator): compile the
-	// immutable ordered candidate chain, build one runner per candidate at
-	// boot (both construction paths), then lazily evaluate readiness until
-	// the first ready candidate. Fatal global registry errors (reference
-	// shape, undeclared providers, duplicates) fail boot; per-candidate
-	// construction/credential/readiness failures mark only that candidate
-	// unhealthy — and when no candidate is ready the daemon still starts in
-	// the orchestrator's unavailable state instead of failing boot.
-	llmCands, fatalLLMErr := buildLLMCandidates(ctx, cfg, agentTools, rootLogger, resolver, activeProfileName, discloseDenied)
-	if fatalLLMErr != nil {
-		return fmt.Errorf("invalid LLM registry: %w", fatalLLMErr)
-	}
-
-	orch := orchestrator.New(orchestrator.Config{
-		Candidates:      llmCands,
-		Registry:        &cfg.LLM,
-		Recovery:        cfg.LLM.ResolvedRecovery(),
-		AttemptTimeout:  cfg.LLM.ResolvedFailoverAttemptTimeout(),
-		Retries:         cfg.LLM.ResolvedFailoverRetries(),
-		RetryBackoff:    cfg.LLM.ResolvedFailoverRetryBackoff(),
-		RetryBackoffCap: 30 * time.Second,
-	}, rootLogger)
-
-	orch.Boot(ctx)
-
-	// The background recovery worker runs until the daemon context is
-	// cancelled; it is joined by the deferred shutdown (orch.Wait).
-	sigCtx := ctx
-	orch.Start(sigCtx)
-	defer orch.Wait()
-
-	llmSnap := orch.Snapshot()
-	if llmSnap.State == orchestrator.StateUnavailable {
-		logger.Warn().
-			Strs("candidates", candidateRefs(llmCands)).
-			Msg("no LLM candidate ready at boot: daemon starts unavailable; recovery probing begins with agent traffic — check llm provider endpoints/credentials")
-	} else {
-		logger.Info().
-			Str("active_model", llmSnap.ActiveRef).
-			Str("api", llmSnap.ActiveAPI).
-			Msg("LLM model resolved")
-
-		if llmSnap.ActiveRef != cfg.LLM.Default {
-			logger.Warn().
-				Str("default_model", cfg.LLM.Default).
-				Str("active_model", llmSnap.ActiveRef).
-				Msg("LLM failover activated a different model than the default; session history is retained but may reference a different provider/protocol")
-		}
-	}
-
-	agentReg := &agentRegistry{exec: orch, orch: orch, layout: orch.ActiveLayout()}
-
-	// auxChatModel is handed to the auxiliary consumers (formatter post-step,
-	// compaction summariser) — none needs tool calling, just plain Generate.
-	// They are routed through the orchestrator (tasks 6.3/6.4): it walks the
-	// candidate chain with the shared health policy and the proportional-share
-	// attempt budget, and each consumer degrades on a failed or exhausted call
-	// (deliver unformatted / leave the Session unchanged).
-	auxChatModel := orch.AuxModel()
-
-	outputFormatter := formatter.New(auxChatModel, skillsMgr, skillCache)
-	fmtRegistry := buildFormatterRegistry(cfg)
-
-	bootstrapCfg := buildBootstrapCfg(cfg, activeProfile.InjectSkills)
-	bootstrapper := bootstrap.New(skillsMgr, skillCache, bootstrapCfg, rootLogger)
-
-	// Register hot-reload callback: evict file cache and invalidate bootstrap
-	// static shell so the next turn rebuilds from updated files.
-	skillsMgr.OnReload(func(_ context.Context, skillName string) {
-		if path, pathErr := skillsMgr.SkillFilePath(skillName); pathErr == nil {
-			skillCache.Evict(path)
-		}
-
-		bootstrapper.Invalidate(skillName)
-	})
-
-	// Start the snapshot generator for the home-topology skill. It waits for
-	// the twin ready internally and regenerates on every topology-change signal.
-	if haTwin != nil {
-		if skillDir, skillDirErr := skillsMgr.GetSkillLocation("home-topology"); skillDirErr == nil {
-			snapshotter := twin.NewSnapshotter(haTwin, skillDir, bootstrapper, rootLogger)
-			snapshotter.Start(ctx)
-		} else {
-			logger.Warn().Err(skillDirErr).Msg("home-topology skill not found — digital twin snapshots disabled")
-		}
-	}
-
-	mgr := buildChannelManager(ctx, cfg, rootLogger)
-
-	// llm-status-visibility: wire the orchestrator's model status into the
-	// ZMQ channel — the authenticated handshake reports the active candidate,
-	// and every promotion / transition to unavailable is broadcast to the
-	// connected session as an unsolicited control event.
-	if zmqCh := getZMQChannel(mgr, zmqcli.ChannelName); zmqCh != nil {
-		zmqCh.WatchModelStatus(orchestratorStatusSource{orch: orch})
+	shell.mgr = mgr
+	if bootCfg.Channels.ZMQCLI.Enabled {
+		shell.zmqBind.Store(bootCfg.Channels.ZMQCLI.Bind)
 	}
 
 	logger.Info().Msg("READY. (Agentic Home System) started. Type a message (Ctrl+C to quit).")
-
-	// sigCtx was already bound to the caller-supplied ctx earlier (it is
-	// bound to SIGINT/SIGTERM via signal.NotifyContext in main()).
 
 	// tui-usage-observability + session-lifecycle D7: the daemon-global
 	// per-Session usage registry, keyed by Session ID and re-seeded at
@@ -371,6 +256,9 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 
 	sessStore, err := session.NewStore(cfg.Sessions.Path, rootLogger.With().Str("component", "sessions").Logger())
 	if err != nil {
+		_ = mgr.Stop()
+		gen.shutdown(ctx, rootLogger)
+
 		return fmt.Errorf("failed to initialise the session store: %w", err)
 	}
 
@@ -381,26 +269,31 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	}, rootLogger.With().Str("component", "sessions").Logger())
 
 	rt := &sessionRuntime{
-		mgr:          mgr,
-		agentReg:     agentReg,
-		fmtr:         outputFormatter,
-		reg:          fmtRegistry,
-		bootstrapper: bootstrapper,
-		bootstrapCfg: bootstrapCfg,
-		skillsMgr:    skillsMgr,
-		skillCache:   skillCache,
-		agentTools:   agentTools,
-		hist:         histStore,
-		sessions:     sessMgr,
-		usageStore:   usageStore,
-		sanitizer:    sanitizer,
-		logger:       rootLogger.With().Str("component", "dispatcher").Logger(),
+		mgr:        mgr,
+		hist:       histStore,
+		sessions:   sessMgr,
+		usageStore: usageStore,
+		sanitizer:  sanitizer,
+		logger:     rootLogger.With().Str("component", "dispatcher").Logger(),
 	}
-	configureSessionRuntime(cfg, rt, auxChatModel)
+	rt.applyGeneration(gen)
+	shell.rt = rt
+
+	coord := &reloadCoordinator{
+		rt:      rt,
+		build:   shell.reloadBuild,
+		grace:   dispatcherWaitGrace,
+		logger:  rootLogger.With().Str("component", "reload").Logger(),
+		current: gen,
+	}
+	coord.afterSwap = func(g *runtimeGeneration, fromTUI bool) { shell.afterSwap(g, fromTUI) }
+	shell.coord = coord
+	shell.reloadFn = shell.runtimeReloadHandler
+	rt.onAutoReload = coord.RequestAutoReload
 
 	// Session end: release the Session-scoped state, then a background
 	// retention pass (also run once now, at boot).
-	triggerRetention := sessStore.RunRetention(sigCtx, session.RetentionPolicy{
+	triggerRetention := sessStore.RunRetention(ctx, session.RetentionPolicy{
 		Days:         cfg.Sessions.Retention.Days(),
 		MaxTotalSize: int64(cfg.Sessions.Retention.MaxTotalSize),
 	})
@@ -409,21 +302,21 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 		triggerRetention()
 	})
 
-	if zmqCh := getZMQChannel(mgr, zmqcli.ChannelName); zmqCh != nil {
-		wireZMQSessions(sigCtx, zmqCh, rt, orch)
-	}
+	shell.wireZMQ(gen)
 
-	// Start health monitors for all connected MCP servers (managed internally
-	// by CompositeRuntime). Monitors are stopped via mcpRuntime.Close() later.
-	if cr, ok := mcpRuntime.(*homemcp.CompositeRuntime); ok {
-		cr.StartMonitors(sigCtx)
-		logger.Info().Msg("MCP health monitors started")
-	}
+	// One process-lifetime watcher: writers outside the daemon (`ready
+	// secrets`, `ready login`) change secrets.age — tell the connected TUI to
+	// re-list, whichever generation is current.
+	_ = secretstore.Watch(ctx, cfg.RuntimeHome, func() {
+		if zmqCh := getZMQChannel(mgr, zmqcli.ChannelName); zmqCh != nil {
+			_ = zmqCh.SendPendingSecretsChanged(ctx)
+		}
+	})
 
-	disp := newDispatcher(sigCtx, mgr, rt, rootLogger)
+	disp := newDispatcher(ctx, mgr, rt, rootLogger)
 	go disp.run()
 
-	<-sigCtx.Done()
+	<-ctx.Done()
 	logger.Info().Msg("shutting down...")
 
 	// Stop the channel manager first — this closes the incoming channel,
@@ -448,22 +341,9 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 		logger.Warn().Dur("grace", dispatcherWaitGrace).Msg("dispatcher drain deadline exceeded — proceeding with shutdown")
 	}
 
-	// Use a fresh context with a short deadline for graceful cleanup — the
-	// original ctx is already cancelled by the signal handler.
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-
-	if err = bootstrapper.CloseAll(shutdownCtx); err != nil {
-		logger.Error().Err(err).Msg("error closing bootstrapper sessions")
-	}
-
-	if haTwin != nil {
-		if err = haTwin.Close(); err != nil {
-			logger.Error().Err(err).Msg("error closing HA digital twin")
-		}
-	}
-
-	shutdownResources(mcpRuntime, skillCache, skillsMgr, rootLogger)
+	// Refuse further reloads and release the current generation's resources
+	// (bootstrapper sessions, Twin, MCP, skills, config staging).
+	coord.Close().shutdown(ctx, rootLogger)
 
 	// The final record precedes Close: records logged after it never reach
 	// the log file (they still reach the console).
@@ -474,6 +354,56 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	}
 
 	return nil
+}
+
+// reloadBuild loads the configuration currently on disk and builds the next
+// Runtime Generation from it.
+func (s *serveShell) reloadBuild(ctx context.Context) (*runtimeGeneration, error) {
+	cfg, _, err := prepareServeConfig(ctx, s.resolution.Path, s.opts, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	return s.buildGeneration(cfg)
+}
+
+// afterSwap completes a reload outside the generation lock: channels, ZMQ
+// hooks and — when the reload was not requested by the attached TUI — the
+// unsolicited config_reloaded event.
+func (s *serveShell) afterSwap(g *runtimeGeneration, fromTUI bool) {
+	s.swapChannels(g)
+	s.wireZMQ(g)
+
+	if fromTUI {
+		return
+	}
+	if zmqCh := getZMQChannel(s.mgr, zmqcli.ChannelName); zmqCh != nil {
+		ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+		defer cancel()
+		_ = zmqCh.SendConfigReloaded(s.reloadResponse(ctx, g))
+	}
+}
+
+// runtimeReloadHandler serves the ZMQ runtime_reload request: permission is
+// the active Profile's config-manager exposure (the channel already enforced
+// the numeric loopback listener and the authenticated Connection).
+func (s *serveShell) runtimeReloadHandler(hctx context.Context, _ []byte, _ bool, _ protocol.Request) protocol.Response {
+	if cur := s.coord.currentGen(); cur == nil || !isConfigManagerAllowed(cur.cfg, cur.activeProfileName) {
+		return protocol.Response{Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: protocol.ErrorCodeProfileRequired}
+	}
+
+	g, err := s.coord.Reload(hctx, true)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("runtime_reload request failed")
+
+		return protocol.Response{
+			Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply,
+			ErrorCode: protocol.ErrorCodeWriteNotCommitted,
+			Content:   "Runtime reload failed; the previous configuration stays active (see the daemon log).",
+		}
+	}
+
+	return s.reloadResponse(hctx, g)
 }
 
 // usageTotalsToProtocol maps a usage snapshot to the wire's UsageInfo block
@@ -525,9 +455,13 @@ func configureSessionRuntime(cfg *config.Config, rt *sessionRuntime, aux model.B
 // every successful handshake (never waiting for its worker), the usage seed
 // and final replies read the current Session's totals, and the TUI-reserved
 // /session and /context requests are answered from live state.
-func wireZMQSessions(ctx context.Context, zmqCh *zmqcli.Channel, rt *sessionRuntime, orch *orchestrator.Orchestrator) {
+func wireZMQSessions(ctx context.Context, zmqCh *zmqcli.Channel, rt *sessionRuntime, cfg *config.Config, secrets *bootSecretState, activeProfileName string, reload zmqcli.RuntimeReloadHandler) {
 	zmqCh.OnConnectionStart(func(hctx context.Context, msg channel.Message) channel.ConnectionInfo {
-		id, pending := rt.sessions.RequestReset(hctx, session.AddressOf(msg), rt.resetRule(zmqcli.ChannelName), time.Now())
+		rt.genMu.RLock()
+		rule := rt.resetRule(zmqcli.ChannelName)
+		rt.genMu.RUnlock()
+
+		id, pending := rt.sessions.RequestReset(hctx, session.AddressOf(msg), rule, time.Now())
 
 		return channel.ConnectionInfo{SessionID: id, ResetPending: pending}
 	})
@@ -542,8 +476,10 @@ func wireZMQSessions(ctx context.Context, zmqCh *zmqcli.Channel, rt *sessionRunt
 
 		// Occupancy is computed daemon-side: the last main-agent
 		// call's real prompt tokens ÷ the active candidate's configured
-		// window. Absent without either input — never estimated.
-		if totals.LastMainPromptTokens > 0 {
+		// window. Absent without either input — never estimated. The
+		// orchestrator is read lock-free: this hook runs inside workers that
+		// hold the generation lock.
+		if orch := rt.liveOrch.Load(); orch != nil && totals.LastMainPromptTokens > 0 {
 			if window := orch.Snapshot().ActiveContextWindow; window > 0 {
 				info.ContextOccupancyPct = 100 * float64(totals.LastMainPromptTokens) / float64(window)
 			}
@@ -553,6 +489,7 @@ func wireZMQSessions(ctx context.Context, zmqCh *zmqcli.Channel, rt *sessionRunt
 	})
 
 	zmqCh.SetControlRequestHandler(buildControlRequestHandler(ctx, rt))
+	wireSecretEntry(ctx, zmqCh, cfg, secrets, activeProfileName, reload)
 }
 
 // smallestContextWindow returns the smallest context_window declared by a
@@ -597,28 +534,6 @@ func buildLogger(cfg *config.Config) (logging.Result, error) {
 	return res, nil
 }
 
-// mustInitInfra creates the skills manager and the skill cache. It
-// terminates the process on failure.
-func mustInitInfra(ctx context.Context, cfg *config.Config, rootLogger zerolog.Logger) (
-	*skills.Manager,
-	*skillcache.SkillCache,
-) {
-	logger := rootLogger.With().Str("component", "infra").Logger()
-
-	skillsMgr, err := skills.NewManager(ctx, &cfg.Skills, rootLogger)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to create skills manager")
-	}
-
-	sc, err := skillcache.New()
-	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to create skill cache")
-	}
-	sc.WithLogger(logger.With().Str("component", "skillcache").Logger())
-
-	return skillsMgr, sc
-}
-
 // buildLLMCandidates compiles the immutable ordered candidate chain and
 // builds one production runner per candidate (task 4.7), covering both
 // agent-construction paths: *agent.Agent for every chat protocol
@@ -637,6 +552,7 @@ func buildLLMCandidates(
 	resolver *toolnames.Resolver,
 	activeProfileName string,
 	discloseDenied bool,
+	pendingPaths map[string]bool,
 ) ([]orchestrator.Candidate, error) {
 	logger := rootLogger.With().Str("component", "llm-registry").Logger()
 
@@ -654,6 +570,16 @@ func buildLLMCandidates(
 	cands := make([]orchestrator.Candidate, 0, len(descs))
 	for _, desc := range descs {
 		cand := orchestrator.Candidate{CandidateDescriptor: desc}
+
+		// guided-init B.2: a candidate on a provider whose api_key is pending
+		// is a per-candidate construction failure (never a boot failure, never
+		// a prompt/diagnostic carrying the marker value).
+		if pendingForRef(cfg, desc.Ref, pendingPaths) {
+			cand.ConstructErr = fmt.Errorf("pending credential (llm.providers.<instance>.api_key): this candidate stays off until the credential is supplied")
+			cands = append(cands, cand)
+
+			continue
+		}
 
 		resolved, buildErr := llm.BuildForReference(ctx, &cfg.LLM, desc.Ref)
 		if buildErr != nil {
@@ -779,9 +705,61 @@ func buildTools(
 	activeProfileName string,
 	haTwin *hatwin.Twin,
 	rootLogger zerolog.Logger,
-) ([]tool.BaseTool, homemcp.Runtime, []profile.BlockedTool) {
+	profileOverrides config.ProfileOverrideInputs,
+) ([]tool.BaseTool, homemcp.Runtime, []profile.BlockedTool, *tools.ConfigManager) {
 	logger := rootLogger.With().Str("component", "tools").Logger()
 	decisionLog := cfg.Logging.ProfileDecisions
+
+	// config-manager tool (change config-manager-tool): one daemon-global
+	// staging buffer bound to the elected config and the boot's profile
+	// override inputs; the trusted Session identity comes from the
+	// invocation context, never from model arguments.
+	var cfgMgr *tools.ConfigManager
+	{
+		mgrOpts := tools.ConfigManagerOptions{
+			ElectedPath:      cfg.ElectedPath,
+			ProfileOverrides: profileOverrides,
+			ServeLocalChecks: validateServeLocalConfig(ServeOptions{Profile: profileOverrides.Flag}),
+			SessionIdentity: func(ctx context.Context) (string, bool) {
+				id, ok := ctx.Value(toolSessionKeyCtxKey{}).(string)
+				if !ok {
+					return "", false
+				}
+
+				return id, true
+			},
+			SessionAddress: func(ctx context.Context) string {
+				value, _ := ctx.Value(toolSessionAddressCtxKey{}).(string)
+
+				return value
+			},
+			SessionTransport: func(ctx context.Context) string {
+				value, _ := ctx.Value(toolTransportKeyCtxKey{}).(string)
+
+				return value
+			},
+			// Post-save activation: the Session is an attached loopback TUI
+			// (ZMQ, numeric loopback listener, not --exec).
+			SessionLoopback: func(ctx context.Context) bool {
+				value, _ := ctx.Value(toolLoopbackTUICtxKey{}).(bool)
+
+				return value
+			},
+			// A committed save marks the Turn so the dispatcher can either
+			// flag the final ZMQ reply (config_saved) or schedule an
+			// asynchronous Runtime reload after the worker finishes.
+			OnCommit: func(ctx context.Context, isLoopbackTUI bool) {
+				if tracker, ok := ctx.Value(turnSaveCtxKey{}).(*turnSaveTracker); ok {
+					tracker.mark(isLoopbackTUI)
+				}
+			},
+			Logger: rootLogger.With().Str("component", "config-manager").Logger(),
+		}
+		var err error
+		if cfgMgr, err = tools.NewConfigManager(mgrOpts); err != nil {
+			logger.Warn().Err(err).Msg("config-manager tool disabled")
+		}
+	}
 
 	builtinTools := []tool.BaseTool{
 		skills.NewSkillsLoadTool(skillsMgr),
@@ -789,6 +767,9 @@ func buildTools(
 		skills.NewReadSkillAssetTool(skillsMgr, skillCache),
 		skills.NewListSkillAssetsTool(skillsMgr),
 		tools.NewWaitTool(),
+	}
+	if cfgMgr != nil {
+		builtinTools = append(builtinTools, tools.NewConfigManagerTool(cfgMgr))
 	}
 
 	var blocked []profile.BlockedTool
@@ -804,7 +785,7 @@ func buildTools(
 	if err != nil {
 		logger.Warn().Err(err).Msg("MCP connection failed — device control will be unavailable")
 
-		return wrapWithErrorDigest(agentTools, rootLogger), nil, blocked
+		return wrapWithErrorDigest(agentTools, rootLogger), nil, blocked, cfgMgr
 	}
 	blocked = append(blocked, mcpBlocked...)
 
@@ -812,12 +793,12 @@ func buildTools(
 		mcpTools := runtime.Tools()
 		agentTools = append(agentTools, mcpTools...)
 		logger.Info().
-			Str("mcp_profile", activeProfileName).
+			Str("default_profile", activeProfileName).
 			Int("count", len(mcpTools)).
 			Msg("MCP tools loaded (gated per-server against each server's own profiles block)")
 	}
 
-	return wrapWithErrorDigest(agentTools, rootLogger), runtime, blocked
+	return wrapWithErrorDigest(agentTools, rootLogger), runtime, blocked, cfgMgr
 }
 
 // wrapWithErrorDigest wraps all tools with the error-digestion layer
@@ -849,7 +830,23 @@ func wrapWithErrorDigest(agentTools []tool.BaseTool, rootLogger zerolog.Logger) 
 		Register(hatwin.ErrUnknownEntity, errdigest.Permanent).
 		Register(hatwin.ErrOverCap, errdigest.Permanent).
 		Register(hatwin.ErrMultiTargetToggle, errdigest.Permanent).
-		Register(hatwin.ErrUnknownCallID, errdigest.Permanent)
+		Register(hatwin.ErrUnknownCallID, errdigest.Permanent).
+		// config-manager refusals (change config-manager-tool): ownership,
+		// stale state, invalid edits, unsupported YAML and validation
+		// failures are permanent; only positively not-committed retryable
+		// I/O is transient (config.ErrCommitTransient).
+		Register(tools.ErrConfigStagingBusy, errdigest.Permanent).
+		Register(tools.ErrConfigStaleState, errdigest.Permanent).
+		Register(tools.ErrConfigNoSession, errdigest.Permanent).
+		Register(tools.ErrConfigNoStaging, errdigest.Permanent).
+		Register(tools.ErrConfigInvalidEdit, errdigest.Permanent).
+		Register(tools.ErrConfigUnsupportedYAML, errdigest.Permanent).
+		Register(tools.ErrConfigInvalidCandidate, errdigest.Permanent).
+		Register(tools.ErrLiteralSecret, errdigest.Permanent).
+		Register(config.ErrConfigSourceConflict, errdigest.Permanent).
+		Register(config.ErrNotRegularConfig, errdigest.Permanent).
+		Register(config.ErrCommitTransient, errdigest.Transient).
+		Register(config.ErrCommitPostCommit, errdigest.Transient)
 
 	return errdigest.WrapTools(agentTools, classifier, toolSessionKey,
 		rootLogger.With().Str("component", "errdigest").Logger())
@@ -920,6 +917,34 @@ func toolSessionKey(ctx context.Context) string {
 // toolSessionKeyCtxKey is the context key used to carry the session key into tools.
 type toolSessionKeyCtxKey struct{}
 
+type toolTransportKeyCtxKey struct{}
+
+type toolSessionAddressCtxKey struct{}
+
+// toolLoopbackTUICtxKey carries whether the Turn's Session is an attached
+// loopback ZMQ TUI; turnSaveCtxKey carries the Turn's save tracker.
+type (
+	toolLoopbackTUICtxKey struct{}
+	turnSaveCtxKey        struct{}
+)
+
+// turnSaveTracker records whether ConfigManager.Save committed during a Turn
+// and whether it did so on a loopback ZMQ TUI Session.
+type turnSaveTracker struct {
+	committed atomic.Bool
+	tui       atomic.Bool
+}
+
+func (t *turnSaveTracker) mark(loopbackTUI bool) {
+	t.committed.Store(true)
+	t.tui.Store(loopbackTUI)
+}
+
+// state returns (a save committed, it was on a loopback TUI).
+func (t *turnSaveTracker) state() (bool, bool) {
+	return t.committed.Load(), t.tui.Load()
+}
+
 // connectAllMCP connects to every server declared in cfg.MCPServers and
 // aggregates them under a single CompositeRuntime. Failure of an individual
 // server is logged as Warn and skipped (best-effort boot). When --mock-mcp is
@@ -967,29 +992,43 @@ func connectAllMCP(
 	var oauthStore oauth.Store
 
 	if hasOAuthServer(cfg.MCPServers) {
-		var err error
-
-		oauthStore, err = oauth.NewStore(ctx, cfg.OAuth)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to initialise oauth credential store: %w", err)
+		secrets := cfg.SecretValues.Store()
+		if secrets == nil {
+			return nil, nil, errors.New("failed to initialise oauth credential store: the agent's secret store is not open")
 		}
+		oauthStore = oauth.NewSecretStore(secrets, cfg.OAuth.Path)
 	}
 
 	var entries []homemcp.CompositeEntry
 
 	for serverKey, serverCfg := range cfg.MCPServers {
-		if serverCfg.URL == "" {
+		serverCfgCopy := serverCfg // capture loop var for pointer stability
+
+		// Resolve the URL reference when the field carries one (dynamic
+		// secret-bearing plain field): a pending URL degrades the same way
+		// as pending headers — the server starts after the next restart.
+		if urlPending, urlErr := serverCfgCopy.URL.Resolve(ctx, cfg, "mcp_servers."+serverKey+".url"); urlErr != nil {
+			logger.Warn().Err(urlErr).Str("server", serverKey).Msg("failed to resolve MCP URL secret — skipping server")
+
+			continue
+		} else if urlPending {
+			logger.Warn().Str("server", serverKey).Strs("fields", []string{"mcp_servers." + serverKey + ".url"}).Msg("MCP URL secret is pending — skipping server")
+
+			continue
+		}
+
+		if serverCfgCopy.URL.Value == "" {
 			logger.Warn().Str("server", serverKey).Msg("MCP server entry has no URL — skipping")
 
 			continue
 		}
 
-		effectivePrefix := serverCfg.EffectiveToolPrefix(serverKey)
+		effectivePrefix := serverCfgCopy.EffectiveToolPrefix(serverKey)
 
 		logger.Info().
 			Str("server", serverKey).
-			Str("url", serverCfg.URL).
-			Str("transport", serverCfg.Transport).
+			Str("url", serverCfgCopy.URL.LogValue()).
+			Str("transport", serverCfgCopy.Transport).
 			Str("tool_prefix", effectivePrefix).
 			Msg("connecting to MCP server")
 
@@ -1000,16 +1039,26 @@ func connectAllMCP(
 			ExpectedTools: serverCfg.ExpectedTools,
 			Logger:        rootLogger,
 		}
-		reconnectCfg := homemcp.ReconnectConfigFromConfig(serverCfg.Reconnect)
+		reconnectCfg := homemcp.ReconnectConfigFromConfig(serverCfgCopy.Reconnect)
 
-		serverCfgCopy := serverCfg // capture loop var for pointer stability
+		// Resolve the header references into the runtime-only ResolvedHeaders
+		// (a pending header already removed the server from the degraded view).
+		if pendingHeaders, hdrErr := serverCfgCopy.ResolveHeaders(ctx, cfg.SecretValues, serverKey); hdrErr != nil {
+			logger.Warn().Err(hdrErr).Str("server", serverKey).Msg("failed to resolve MCP header secrets — skipping server")
+
+			continue
+		} else if len(pendingHeaders) > 0 {
+			logger.Warn().Str("server", serverKey).Strs("fields", pendingHeaders).Msg("MCP header secrets are pending — skipping server")
+
+			continue
+		}
 
 		if serverCfgCopy.OAuth != nil {
 			// One scoped *http.Client per server, shared by the transport and
 			// the OAuth handler — one policy, one construction site.
 			httpClient := homemcp.NewScopedHTTPClient(&serverCfgCopy)
 
-			handler, err := buildDaemonOAuthHandler(ctx, oauthStore, serverKey, serverCfgCopy, httpClient)
+			handler, err := buildDaemonOAuthHandler(ctx, oauthStore, cfg.SecretValues, serverKey, serverCfgCopy, httpClient, cfg.RuntimeHome)
 			if err != nil {
 				logger.Warn().
 					Str("server", serverKey).
@@ -1028,7 +1077,7 @@ func connectAllMCP(
 			if errors.Is(err, homemcp.ErrMCPOAuthLoginRequired) {
 				logger.Warn().
 					Str("server", serverKey).
-					Msg("no usable oauth credential for this server — run `ready login " + serverKey + "`; skipping (best-effort boot)")
+					Msg("no usable oauth credential for this server — run `" + config.LoginCommand(cfg.RuntimeHome, serverKey) + "`; skipping (best-effort boot)")
 			} else {
 				logger.Warn().
 					Str("server", serverKey).
@@ -1094,31 +1143,34 @@ func hasOAuthServer(servers map[string]config.MCPServerConfig) bool {
 func buildDaemonOAuthHandler(
 	ctx context.Context,
 	store oauth.Store,
+	secrets *config.SecretSource,
 	serverKey string,
 	srv config.MCPServerConfig,
 	httpClient *http.Client,
+	agentDir string,
 ) (auth.OAuthHandler, error) {
 	cred, err := store.Load(ctx, serverKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load oauth credential for %q: %w", serverKey, err)
 	}
 
-	grant, err := resolveDaemonGrant(srv.OAuth, cred != nil && cred.ClientID != "")
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve oauth grant for %q: %w", serverKey, err)
-	}
+	grant := resolveDaemonGrant(srv.OAuth, cred != nil && cred.ClientID != "")
 
 	handlerCfg := oauth.HandlerConfig{
 		ServerKey:  serverKey,
+		AgentDir:   agentDir,
 		Grant:      grant,
 		HTTPClient: httpClient,
 	}
 
 	switch grant {
 	case oauth.GrantClientCredentials:
-		secret, serr := srv.OAuth.ResolveClientSecret()
+		secret, ok, serr := secrets.Lookup(ctx, srv.OAuth.ClientSecret, "mcp_servers."+serverKey+".oauth.client_secret")
 		if serr != nil {
 			return nil, fmt.Errorf("failed to resolve oauth client secret for %q: %w", serverKey, serr)
+		}
+		if !ok {
+			return nil, fmt.Errorf("the oauth client secret for %q is pending: set it with `ready secrets set`", serverKey)
 		}
 
 		handlerCfg.ClientID = srv.OAuth.ClientID
@@ -1151,26 +1203,23 @@ func buildDaemonOAuthHandler(
 // rule without the authorization-server round trip — a wrong guess simply
 // fails Authorize() and is skipped by the best-effort boot loop like any
 // other connection failure.
-func resolveDaemonGrant(oa *config.MCPOAuthConfig, hasStoredCredential bool) (string, error) {
+func resolveDaemonGrant(oa *config.MCPOAuthConfig, hasStoredCredential bool) string {
 	grant := oa.Grant
 	if grant == "" || grant == grantAuto {
 		if hasStoredCredential {
-			return oauth.GrantAuthorizationCode, nil
+			return oauth.GrantAuthorizationCode
 		}
 
-		secret, err := oa.ResolveClientSecret()
-		if err != nil {
-			return "", err
+		// Structural decision: a configured client secret REFERENCE (not its
+		// value) selects client_credentials, so no secret I/O happens here.
+		if oa.ClientID != "" && oa.ClientSecret.IsSet() {
+			return oauth.GrantClientCredentials
 		}
 
-		if oa.ClientID != "" && secret != "" {
-			return oauth.GrantClientCredentials, nil
-		}
-
-		return oauth.GrantAuthorizationCode, nil
+		return oauth.GrantAuthorizationCode
 	}
 
-	return grant, nil
+	return grant
 }
 
 // buildFormatterRegistry walks the channels configuration and returns the
@@ -1270,75 +1319,55 @@ func mergeSkills(profileSkills, channelSkills []string) []string {
 	return out
 }
 
-// buildChannelManager creates and starts the channel manager with all enabled channels.
+// buildChannelManager creates and starts the channel manager with all enabled
+// channels. Failures are returned (never fatal): a Runtime reload must not
+// terminate the process.
 //
 // cli and zmqcli are mutually exclusive: both use the logical channel name
 // "cli", and config.Validate ensures at most one is enabled at a time.
 // When zmqcli is enabled the legacy stdin cli is NOT registered.
-func buildChannelManager(ctx context.Context, cfg *config.Config, rootLogger zerolog.Logger) *channel.Manager {
-	logger := rootLogger.With().Str("component", "channel-manager").Logger()
-
+func buildChannelManager(ctx context.Context, cfg *config.Config, rootLogger zerolog.Logger) (*channel.Manager, error) {
 	var channels []channel.Channel
+
+	closeBuilt := func() {
+		for _, ch := range channels {
+			_ = ch.Close()
+		}
+	}
 
 	if cfg.Channels.CLI.Enabled {
 		channels = append(channels, cli.New())
 	}
 
 	if cfg.Channels.ZMQCLI.Enabled {
-		secret, err := cfg.Channels.ZMQCLI.ResolveAuthToken()
+		zch, err := buildZMQChannel(ctx, cfg, rootLogger)
 		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to resolve zmqcli auth token")
+			closeBuilt()
+
+			return nil, err
 		}
-
-		zmqCfg := cfg.Channels.ZMQCLI
-
-		// Guard against the reply_timeout watchdog firing before the agent's
-		// own run budget is exhausted (it must never be shorter than the sum
-		// of everything the daemon may spend producing a reply, plus a
-		// buffer) — otherwise a legitimately long-running request gets its
-		// session killed mid-flight and the eventual reply is dropped.
-		minReplyTimeout := agentRunTimeout + formatterTimeout + 30*time.Second
-		if zmqCfg.ReplyTimeout < minReplyTimeout {
-			logger.Warn().
-				Dur("configured_reply_timeout", zmqCfg.ReplyTimeout).
-				Dur("min_reply_timeout", minReplyTimeout).
-				Msg("channels.zmqcli.reply_timeout is too low for the agent run budget — raising it")
-			zmqCfg.ReplyTimeout = minReplyTimeout
-		}
-
-		zch, err := zmqcli.NewChannel(ctx, zmqCfg, secret, cfg.Logging.ZMQPayloadsEnabled, logger)
-		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to create zmqcli channel")
-		}
-
 		channels = append(channels, zch)
-
-		logger.Info().
-			Str("bind", cfg.Channels.ZMQCLI.Bind).
-			Dur("connection_idle_timeout", cfg.Channels.ZMQCLI.ConnectionIdleTimeout).
-			Msg("zmqcli channel enabled")
 	}
 
 	if cfg.Channels.Telegram.Enabled {
-		tch, err := telegram.New(cfg.Channels.Telegram, rootLogger)
+		tch, err := buildTelegramChannel(ctx, cfg, rootLogger)
 		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to create Telegram channel")
+			closeBuilt()
+
+			return nil, err
 		}
-
 		channels = append(channels, tch)
-
-		logger.Info().
-			Int("whitelist_entries", len(cfg.Channels.Telegram.AllowFrom)).
-			Msg("Telegram channel enabled")
 	}
 
 	mgr := channel.NewManager(rootLogger, channels...)
 
 	if err := mgr.Start(); err != nil {
-		logger.Fatal().Err(err).Msg("failed to start channel manager")
+		closeBuilt()
+
+		return nil, fmt.Errorf("failed to start channel manager: %w", err)
 	}
 
-	return mgr
+	return mgr, nil
 }
 
 // agentRunTimeout caps the time a single agent invocation may take.  If the
@@ -1352,13 +1381,18 @@ var agentRunTimeout = 300 * time.Second //nolint:gochecknoglobals // var (not co
 // Terminal failure messages (llm-outage-delivery). Fixed English product
 // strings — deliberately NOT configurable, because a configurable terminal
 // message can be configured to the empty string, which would reintroduce the
-// silent-failure defect this change exists to fix (design A6). Both stay
-// short enough to wrap within three lines at 40 columns so the serial/PETSCII
+// silent-failure defect this change exists to fix (design A6). Each stays
+// short enough to wrap within four lines at 40 columns so the serial/PETSCII
 // channel needs no separate short form.
 const (
 	// msgLLMUnavailable is delivered when nothing ran: no tool call completed
 	// and no content was delivered. Repeating the request later is safe.
 	msgLLMUnavailable = "The AI service is temporarily unavailable. Please try again in a few minutes."
+	// msgRequestRejected is delivered when nothing ran and the provider
+	// answered HTTP 400 to the request shape. It is not an outage: retrying
+	// the same request fails the same way, so the text points at configuration
+	// or compatibility and the daemon log instead of "try again in a few minutes".
+	msgRequestRejected = "The AI provider rejected the request. This is a configuration or compatibility problem, not an outage; see the daemon log."
 	// msgIncompleteResponse is delivered when the turn may have changed the
 	// world (a tool call completed) or already showed output (content was
 	// delivered). The user must check state before repeating the request —
@@ -1367,13 +1401,17 @@ const (
 )
 
 // terminalMessageFor selects the terminal failure message for a failed turn
-// from the outcome metadata (design A2). The discriminator is observable
-// side effects, not the error class: a user who may have had a light switched
-// on must not be told "try again in a few minutes", because repeating the
-// request could run the action twice.
-func terminalMessageFor(outcome agent.TurnOutcome) string {
+// (design A2). Side effects decide first: a user who may have had a light
+// switched on must not be told "try again" — repeating could run it twice.
+// Only when nothing ran does the error decide between an HTTP 400 request
+// rejection (a configuration/compatibility bug, not an outage) and an outage.
+func terminalMessageFor(outcome agent.TurnOutcome, runErr error) string {
 	if outcome.ToolCallStarted || outcome.ToolCallCompleted || outcome.ContentDelivered {
 		return msgIncompleteResponse
+	}
+
+	if llm.IsRequestShapeError(runErr) {
+		return msgRequestRejected
 	}
 
 	return msgLLMUnavailable
@@ -1572,6 +1610,20 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	msgCtx := skills.WithSessionID(ctx, agentSkillsSID)
 	// Carry the Session ID into tools (error-digestion logging).
 	msgCtx = context.WithValue(msgCtx, toolSessionKeyCtxKey{}, cur.ID)
+	msgCtx = context.WithValue(msgCtx, toolSessionAddressCtxKey{}, string(addr))
+	if msg.Metadata["transport"] != "" {
+		msgCtx = context.WithValue(msgCtx, toolTransportKeyCtxKey{}, msg.Metadata["transport"])
+	}
+	// Post-save activation context: an attached loopback ZMQ TUI sends
+	// `message` requests (never `exec`) over a numeric-loopback listener.
+	saveTracker := &turnSaveTracker{}
+	msgCtx = context.WithValue(msgCtx, turnSaveCtxKey{}, saveTracker)
+	if zch := getZMQChannel(rt.mgr, msg.ChannelName); zch != nil &&
+		msg.Metadata["transport"] == "zmq" &&
+		msg.Metadata["request_type"] != string(protocol.RequestTypeExec) &&
+		zch.IsNumericLoopback() {
+		msgCtx = context.WithValue(msgCtx, toolLoopbackTUICtxKey{}, true)
+	}
 	// tui-usage-observability: every LLM call under this turn context —
 	// ReAct iterations, failover attempts, formatter post-step — attributes
 	// to this Session's accumulator. Probes run without this value and record
@@ -1672,6 +1724,15 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	outcome, runErr := rt.agentReg.exec.ExecuteTurn(runCtx, sKey, assemble, resumeReady, onChunk)
 	stopTyping()
 
+	// A configuration save committed during this Turn: on a loopback TUI the
+	// final ZMQ reply carries config_saved (the TUI then runs Post-save
+	// activation); elsewhere the worker schedules an asynchronous reload.
+	savedConfig, savedOnTUI := saveTracker.state()
+	deliverMsg := msg
+	if savedConfig && savedOnTUI {
+		deliverMsg.Metadata = withMetadata(msg.Metadata, zmqcli.ConfigSaved, "true")
+	}
+
 	// Everything after the run completes is delivery bookkeeping — extracted
 	// into its own function to keep processMessage within the complexity
 	// budget (criticalities-remediation M14/M15 wiring included).
@@ -1683,7 +1744,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		sc:        scb,
 		fmtr:      rt.fmtr,
 		fmtCfg:    fmtCfg,
-		msg:       msg,
+		msg:       deliverMsg,
 		sKey:      sKey,
 		mgr:       rt.mgr,
 		logger:    logger,
@@ -1712,6 +1773,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		sid:            agentSkillsSID,
 		measuredValid:  delta.LLMCalls > 0 && !rt.state(cur.ID).projected.Load(),
 		appendedTokens: processTurnAppended(history.Messages()),
+		autoReload:     savedConfig && !savedOnTUI,
 	}
 }
 
@@ -1768,7 +1830,7 @@ func deliverTurnResult(d deliverArgs) {
 			Bool("content_delivered", outcome.ContentDelivered).
 			Msg("agent error")
 
-		terminal = terminalMessageFor(outcome)
+		terminal = terminalMessageFor(outcome, runErr)
 		response = terminal
 	} else {
 		response = outcome.Reply
@@ -2601,32 +2663,6 @@ func applyFormatterInlineReinforcement(
 	return conversation
 }
 
-// shutdownResources performs graceful cleanup of long-lived resources
-// (excluding the channel manager, which is stopped earlier to allow the
-// dispatcher to drain before resources are released).
-func shutdownResources(
-	mcpRuntime homemcp.Runtime,
-	skillCache *skillcache.SkillCache,
-	skillsMgr *skills.Manager,
-	rootLogger zerolog.Logger,
-) {
-	logger := rootLogger.With().Str("component", "shutdown").Logger()
-
-	if mcpRuntime != nil {
-		if err := mcpRuntime.Close(); err != nil {
-			logger.Error().Err(err).Msg("error closing MCP client")
-		}
-	}
-
-	if err := skillCache.Close(); err != nil {
-		logger.Error().Err(err).Msg("error closing skill cache")
-	}
-
-	if err := skillsMgr.Close(); err != nil {
-		logger.Error().Err(err).Msg("error closing skills manager")
-	}
-}
-
 // warnThoughtsLevelMismatch emits a single WARN record when logging.thoughts is
 // true but no sink is at debug or trace (meaning thought records will never be
 // emitted anywhere).  This is a configuration hint, not a hard error.
@@ -2675,14 +2711,11 @@ func warnOllamaContextWindowMismatch(logger zerolog.Logger, cfg *config.Config) 
 	}
 }
 
-// warnSecretFilePermissions checks the permissions of every secret material
-// file referenced through the configuration (criticalities-remediation LOW
-// secret-handling): a file readable by group or others produces a WARN naming the
-// path and the offending bits. Boot proceeds — correcting the permissions is
-// the operator's action.
 // warnConfigPermissions reports when the elected config file is readable by
 // group or others (unix only — the Windows ACL typically already restricts
-// it, and the check is inapplicable there). Advisory, never fatal.
+// it, and the check is inapplicable there). Advisory, never fatal. The file
+// holds references only, but it still names the agent's providers, servers
+// and channels.
 func warnConfigPermissions(path string) string {
 	if onWindows() || path == "" {
 		return ""
@@ -2693,7 +2726,7 @@ func warnConfigPermissions(path string) string {
 		return ""
 	}
 	if perm := info.Mode().Perm(); perm&(0o0040|0o0004) != 0 {
-		return fmt.Sprintf("config file %s is readable by group or others (%s) — consider tightening to 0600 (it may hold provider keys and tokens)", path, perm.String())
+		return fmt.Sprintf("config file %s is readable by group or others (%s) — consider tightening to 0600", path, perm.String())
 	}
 
 	return ""
@@ -2702,39 +2735,51 @@ func warnConfigPermissions(path string) string {
 //nolint:gochecknoglobals // test seam for the OS gate of the permission warning
 var onWindows = func() bool { return runtime.GOOS == "windows" }
 
-func warnSecretFilePermissions(cfg *config.Config, rootLogger zerolog.Logger) {
-	logger := rootLogger.With().Str("component", "config-secrets").Logger()
-
-	check := func(path, kind string) {
-		if path == "" {
-			return
-		}
-
-		info, err := os.Stat(path)
-		if err != nil {
-			return
-		}
-
-		if perm := info.Mode().Perm(); perm&0o077 != 0 {
-			logger.Warn().
-				Str("file", path).
-				Str("kind", kind).
-				Str("perm", perm.String()).
-				Msg("secret file is readable by group or others — tighten its permissions (0600)")
-		}
+// resolveTwinToken resolves the Home Assistant token for the digital twin. A
+// pending token switches the twin off for this boot (the degraded view); an
+// unreadable store is an error.
+func resolveTwinToken(ctx context.Context, cfg, bootCfg *config.Config) (string, error) {
+	if !bootCfg.HomeAssistant.Enabled {
+		return "", nil
+	}
+	// Secret-capable plain field: a referenced URL resolves here; a pending
+	// one degrades per field (the twin starts after the value is entered and
+	// the next restart), exactly like a pending token.
+	if urlPending, err := bootCfg.HomeAssistant.WebSocket.URL.Resolve(ctx, cfg, "home_assistant.websocket.url"); err != nil {
+		return "", fmt.Errorf("failed to resolve the Home Assistant URL secret: %w", err)
+	} else if urlPending {
+		bootCfg.HomeAssistant.Enabled = false
 	}
 
-	for name, providerCfg := range cfg.LLM.Providers {
-		check(providerCfg.APIKeyFile, "llm.providers."+name+".api_key_file")
+	token, ok, err := cfg.ResolveSecret(ctx, bootCfg.HomeAssistant.WebSocket.Token, "home_assistant.websocket.token")
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve the Home Assistant token: %w", err)
+	}
+	if !ok {
+		bootCfg.HomeAssistant.Enabled = false
 	}
 
-	if cfg.Channels.ZMQCLI.Enabled {
-		check(cfg.Channels.ZMQCLI.AuthTokenFile, "channels.zmqcli.auth_token_file")
-	}
+	return token, nil
+}
 
-	for key, serverCfg := range cfg.MCPServers {
-		if serverCfg.OAuth != nil {
-			check(serverCfg.OAuth.ClientSecretFile, "mcp_servers."+key+".oauth.client_secret_file")
-		}
+// logSecretPermissionWarnings WARNs for the store, key or secret file other
+// users could read.
+func logSecretPermissionWarnings(logger zerolog.Logger, cfg *config.Config) {
+	for _, w := range secretPermissionWarnings(cfg) {
+		logger.Warn().Msg(w)
 	}
+}
+
+// withPolicyBlockTool adds the policy_block sentinel to the tool set when the
+// active profile opted into blocked-call disclosure.
+func withPolicyBlockTool(agentTools []tool.BaseTool, disclose bool, logger zerolog.Logger, profileName string, blocked int) []tool.BaseTool {
+	if !disclose {
+		return agentTools
+	}
+	logger.Info().
+		Str("default_profile", profileName).
+		Int("blocked_tools", blocked).
+		Msg("disclose_denied_tools enabled — blocked-call disclosure active")
+
+	return append(agentTools, toolnames.NewPolicyBlockTool())
 }

@@ -40,6 +40,9 @@ const cliAddress = session.Address(zmqcli.ChannelName)
 // application), the Session file, compactions, model, message/turn counts of
 // the model's current view and token totals.
 func (rt *sessionRuntime) sessionInfoMarkdown(ctx context.Context, connectionID string) string {
+	rt.genMu.RLock()
+	defer rt.genMu.RUnlock()
+
 	var b strings.Builder
 	b.WriteString("## Session\n\n")
 
@@ -127,6 +130,9 @@ type contextSection struct {
 // with occupancy and free space only when the active provider declares a
 // context window. Every number is labelled as an estimate.
 func (rt *sessionRuntime) contextUsageMarkdown(ctx context.Context) string {
+	rt.genMu.RLock()
+	defer rt.genMu.RUnlock()
+
 	snap := rt.agentReg.orch.Snapshot()
 	layout := rt.agentReg.PromptLayout()
 

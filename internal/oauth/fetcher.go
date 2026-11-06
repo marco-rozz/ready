@@ -44,6 +44,15 @@ func InteractiveFetcher(redirectPort int, timeout time.Duration) auth.Authorizat
 	return newInteractiveFetcher(redirectPort, timeout, openBrowser)
 }
 
+// InteractiveFetcherWithOpener is InteractiveFetcher with a caller-supplied
+// URL hook invoked after the loopback callback listener is bound and before
+// waiting for the HTTP redirect. Passing a hook that records args.URL without
+// spawning a browser lets the daemon return the authorization URL over ZMQ
+// while keeping the callback server running in the background.
+func InteractiveFetcherWithOpener(redirectPort int, timeout time.Duration, opener func(context.Context, string) error) auth.AuthorizationCodeFetcher {
+	return newInteractiveFetcher(redirectPort, timeout, opener)
+}
+
 // newInteractiveFetcher is InteractiveFetcher with the browser-opening step
 // injected, so tests can exercise the callback server without actually
 // launching a browser.

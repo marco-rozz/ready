@@ -30,6 +30,69 @@ var statusTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"headHash": {"type": "string"},
+	"branch": {"type": "string"},
+	"detachedHead": {"type": "boolean"},
+	"unbornHead": {"type": "boolean"},
+	"isClean": {"type": "boolean"},
+	"defaultAuthorName": {"type": "string"},
+	"defaultAuthorEmail": {"type": "string"},
+	"remotes": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"name": {"type": "string"},
+				"urls": {
+					"type": ["array", "null"],
+					"items": {"type": "string"}
+				}
+			},
+			"required": ["name", "urls"],
+			"additionalProperties": false
+		}
+	},
+	"entries": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"path": {"type": "string"},
+				"staging": {"type": "string"},
+				"worktree": {"type": "string"}
+			},
+			"required": ["path", "staging", "worktree"],
+			"additionalProperties": false
+		}
+	},
+	"summary": {
+		"type": ["object", "null"],
+		"additionalProperties": {"type": "integer"}
+	},
+	"indexState": {
+		"type": "object",
+		"properties": {
+			"entries": {"type": "integer"},
+			"hasConflicts": {"type": "boolean"},
+			"conflictPaths": {
+				"type": ["array", "null"],
+				"items": {"type": "string"}
+			}
+		},
+		"required": ["entries", "hasConflicts"],
+		"additionalProperties": false
+	}
+},
+"required": ["repoPath", "detachedHead", "unbornHead", "isClean", "indexState"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: statusFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -1,7 +1,7 @@
 ---
 name: telegram-formatter
 description: "Formatting rules for Telegram output (HTML mode, emoji, structured responses)."
-version: "1.2"
+version: "1.3"
 ---
 
 # Telegram Formatter Rules
@@ -19,6 +19,15 @@ characters per message.
 - **NEVER use Markdown syntax**: no `**bold**`, no `*italic*`, no `_italic_`,
   no backticks, no `#` headers. Telegram renders HTML mode only — raw
   Markdown asterisks will appear as literal characters in the chat.
+- **NEVER emit `<table>`, `<tr>`, `<td>`, `<th>` or Markdown pipe tables**:
+  Telegram's HTML parse mode has no table support (neither does MarkdownV2).
+  Render tabular data as an aligned `<pre>…</pre>` block (monospace columns)
+  or as a bullet list — one line per row, e.g.
+  `• <b>Luce cucina</b>: <code>on</code>`.
+- The only supported tags are: `b`, `strong`, `i`, `em`, `u`, `ins`, `s`,
+  `strike`, `del`, `code`, `pre`, `blockquote`, `a href`, `tg-emoji`, and
+  spoilers (`tg-spoiler` or `<span class="tg-spoiler">`). Anything else
+  (div, span, ul/li, h1…) appears as literal text or breaks the message.
 - Escape literal `<`, `>`, and `&` only when they appear in plain text (not as
   tag delimiters). Prefer rephrasing over manual escaping.
 

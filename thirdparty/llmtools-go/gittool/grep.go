@@ -87,6 +87,67 @@ var grepTool = spec.Tool{
 "required": ["repoPath", "pattern"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"revision": {"type": "string"},
+	"pattern": {"type": "string"},
+	"paths": {
+		"type": ["array", "null"],
+		"items": {"type": "string"}
+	},
+	"literal": {"type": "boolean"},
+	"ignoreCase": {"type": "boolean"},
+	"contextLines": {"type": "integer"},
+	"maxMatches": {"type": "integer"},
+	"maxFiles": {"type": "integer"},
+	"maxBytes": {"type": "integer"},
+	"matches": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"path": {"type": "string"},
+				"lineNumber": {"type": "integer"},
+				"line": {"type": "string"},
+				"before": {
+					"type": ["array", "null"],
+					"items": {"type": "string"}
+				},
+				"after": {
+					"type": ["array", "null"],
+					"items": {"type": "string"}
+				}
+			},
+			"required": ["path", "lineNumber", "line"],
+			"additionalProperties": false
+		}
+	},
+	"count": {"type": "integer"},
+	"filesVisited": {"type": "integer"},
+	"truncated": {"type": "boolean"},
+	"omittedBinaryFiles": {"type": "integer"},
+	"skippedLargeFiles": {"type": "integer"},
+	"outputMeta": {
+		"type": "object",
+		"properties": {
+			"bytes": {"type": "integer"},
+			"truncated": {"type": "boolean"},
+			"omittedBinaryFiles": {"type": "integer"},
+			"skippedLargeFiles": {"type": "integer"},
+			"maxBytes": {"type": "integer"}
+		},
+		"required": ["bytes", "truncated", "omittedBinaryFiles", "skippedLargeFiles", "maxBytes"],
+		"additionalProperties": false
+	}
+},
+"required": ["repoPath", "revision", "pattern", "literal", "ignoreCase", "contextLines", "maxMatches", "maxFiles", "maxBytes", "matches", "count", "filesVisited", "truncated", "omittedBinaryFiles", "skippedLargeFiles", "outputMeta"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: grepFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

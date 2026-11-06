@@ -82,9 +82,9 @@ func TestTokenSource_RotatedRefreshTokenIsPersisted(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := expiredCredential()
@@ -125,9 +125,9 @@ func TestTokenSource_ResourcePresentOnRefresh(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := expiredCredential()
@@ -149,16 +149,15 @@ func TestTokenSource_ResourcePresentOnRefresh(t *testing.T) {
 
 func TestTokenSource_DeadTokenWithNewerStoredCredentialRecovers(t *testing.T) {
 	fake := &fakeTokenEndpoint{t: t, responses: []func(http.ResponseWriter, *http.Request){
-		errorTokenResponse(http.StatusBadRequest, "invalid_grant"),
 		jsonTokenResponse("access-3", "refresh-3"),
 	}}
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	stale := expiredCredential()
@@ -170,8 +169,7 @@ func TestTokenSource_DeadTokenWithNewerStoredCredentialRecovers(t *testing.T) {
 	ts := NewTokenSourceFromCredential(store, srv.Client(), stale)
 
 	// Simulate `ready login` running out of band: a newer, usable credential
-	// (different refresh token so the second endpoint call would succeed)
-	// lands in the store after ts was constructed.
+	// (different refresh token) lands in the store after ts was constructed.
 	fresh := NewCredential(testServerKey)
 	fresh.ClientID = stale.ClientID
 	fresh.TokenEndpoint = srv.URL
@@ -183,6 +181,9 @@ func TestTokenSource_DeadTokenWithNewerStoredCredentialRecovers(t *testing.T) {
 		t.Fatalf("Save fresh: %v", err)
 	}
 
+	// Under generation adoption the token source observes the newer record
+	// BEFORE its first attempt, so the only refresh call uses the fresh
+	// refresh token and succeeds on the first response.
 	tok, err := ts.Token()
 	if err != nil {
 		t.Fatalf("Token: %v", err)
@@ -200,9 +201,9 @@ func TestTokenSource_DeadTokenWithNoNewerCredentialReturnsOriginalError(t *testi
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := expiredCredential()
@@ -227,6 +228,8 @@ func TestTokenSource_DeadTokenWithNoNewerCredentialReturnsOriginalError(t *testi
 	}
 }
 
+const testTokenNewReg = "access-reregistered"
+
 func TestTokenSource_ExpiredNoRefreshTokenIsLoginRequiredWithoutNetworkIO(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -236,9 +239,9 @@ func TestTokenSource_ExpiredNoRefreshTokenIsLoginRequiredWithoutNetworkIO(t *tes
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := NewCredential(testServerKey)
@@ -269,9 +272,9 @@ func TestTokenSource_ConcurrentTokenCallsAreSafe(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := expiredCredential()
@@ -309,9 +312,9 @@ func TestTokenSource_ConcurrentRegistrationNotClobbered(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := expiredCredential()
@@ -326,7 +329,7 @@ func TestTokenSource_ConcurrentRegistrationNotClobbered(t *testing.T) {
 	// still holds the old one.
 	reregistered := NewCredential(testServerKey)
 	reregistered.ClientID = "client-2"
-	reregistered.AccessToken = "access-new-reg"
+	reregistered.AccessToken = testTokenNewReg
 	reregistered.RefreshToken = "refresh-new-reg"
 	reregistered.Expiry = time.Now().Add(time.Hour)
 	reregistered.UpdatedAt = time.Now()
@@ -338,10 +341,10 @@ func TestTokenSource_ConcurrentRegistrationNotClobbered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	// The already-fetched token (from the stale registration) is still
-	// handed back for this call — it was validly issued.
-	if tok.AccessToken != "access-old-reg" {
-		t.Fatalf("Token() = %+v, want the already-fetched token", tok)
+	// The token source adopts the newer registration's valid access token
+	// without a refresh round-trip and without clobbering its record.
+	if tok.AccessToken != testTokenNewReg {
+		t.Fatalf("Token() = %+v, want the adopted newer registration's token", tok)
 	}
 
 	stored, err := store.Load(ctx, testServerKey)
@@ -351,7 +354,7 @@ func TestTokenSource_ConcurrentRegistrationNotClobbered(t *testing.T) {
 	if stored.ClientID != "client-2" {
 		t.Fatalf("stored ClientID = %q, want the re-registered client-2 to survive untouched", stored.ClientID)
 	}
-	if stored.AccessToken != "access-new-reg" {
+	if stored.AccessToken != testTokenNewReg {
 		t.Fatalf("stored AccessToken = %q, the daemon must not have overwritten the re-registered credential", stored.AccessToken)
 	}
 }

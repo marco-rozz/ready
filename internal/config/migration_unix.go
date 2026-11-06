@@ -27,7 +27,7 @@ func tryMigrationLock(_ context.Context, f *os.File) (bool, error) {
 func checkConfigLinks(_ context.Context, _ *os.File, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Nlink != 1 {
-		return fmt.Errorf("config migration requires a regular file with one hard link; copy it and use --config")
+		return fmt.Errorf("%w: config migration requires a regular file with one hard link; copy it and use --config", ErrNotRegularConfig)
 	}
 
 	return nil

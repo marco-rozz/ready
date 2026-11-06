@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-zeromq/zmq4"
 	"github.com/google/uuid"
+	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/mdrender"
 	"github.com/marco-rozz/ready/internal/privacy"
 	"github.com/marco-rozz/ready/internal/protocol"
@@ -170,6 +171,10 @@ func newChatCommand(stderr io.Writer) *cli.Command {
 				Usage: "HMAC shared secret read from a file (lower precedence than --token and READY_TOKEN)",
 			},
 			&cli.StringFlag{
+				Name:  flagAgentDirName,
+				Usage: "agent directory whose daemon to chat with: its address and chat secret are read from it (default: ~/.ready); explicit --address/--token/--token-file win",
+			},
+			&cli.StringFlag{
 				Name:  "exec",
 				Usage: "send a single message non-interactively and exit",
 			},
@@ -215,7 +220,7 @@ var errControlAfter = errors.New("post-handshake control")
 //     interactive idle select.
 //
 // runChat MUST NOT call os.Exit, log, or touch any runtime or Install-home directory.
-func runChat(_ context.Context, c *cli.Command, stdout, stderr io.Writer, stdin io.Reader) error {
+func runChat(ctx context.Context, c *cli.Command, stdout, stderr io.Writer, stdin io.Reader) error {
 	address := c.String("address")
 	token := c.String("token")
 	tokenFile := c.String("token-file")
@@ -237,9 +242,28 @@ func runChat(_ context.Context, c *cli.Command, stdout, stderr io.Writer, stdin 
 			return fmt.Errorf("failed to read --token-file %q: %w", tokenFile, readErr)
 		}
 
-		token = strings.TrimSpace(string(data))
+		token = string(data)
 		if token == "" {
-			return fmt.Errorf("--token-file %q is empty after trimming whitespace", tokenFile)
+			return fmt.Errorf("--token-file %q is empty", tokenFile)
+		}
+	}
+
+	// No explicit credential: read the local agent's chat secret (and, when no
+	// address was given, its bind). Strictly read-only — no locks, no logging,
+	// nothing created under the agent directory. One stderr line on failure.
+	if token == "" {
+		agent, agentErr := config.ResolveChatAgent(ctx, c.String(flagAgentDirName))
+		switch {
+		case agentErr == nil:
+			token = agent.Token
+			if !c.IsSet("address") {
+				address = agent.Address
+			}
+		case !stdinTTY:
+			return fmt.Errorf("no chat credential: %w", agentErr)
+		default:
+			// A terminal can still ask (a remote daemon has no local agent).
+			_, _ = fmt.Fprintf(stderr, "no local chat credential (%v); asking for the token\n", agentErr)
 		}
 	}
 
@@ -409,9 +433,16 @@ func runChat(_ context.Context, c *cli.Command, stdout, stderr io.Writer, stdin 
 		LogoMode: tuiLogo,
 		// chat-tui-logo-modes: static info-block facts, all known after the
 		// handshake — daemon address, conversation Session ID (SessionID
-		// above), client version.
-		DaemonAddress: address,
-		ClientVersion: clientVersion(),
+		// above), client version. AgentDir (per-user-install-agent-
+		// isolation) is the daemon-authoritative agent directory from the
+		// same handshake; never inferred from local cwd/config.
+		DaemonAddress:  address,
+		AgentDir:       authResp.AgentDir,
+		ClientVersion:  clientVersion(),
+		AgentName:      authResp.AgentName,
+		AgentID:        authResp.AgentID,
+		PendingSecrets: authResp.PendingSecrets,
+		Credentials:    authResp.Credentials,
 	})
 
 	doSessionEnd()
@@ -446,10 +477,11 @@ func chatHandshakeDirect(_ context.Context, dealer zmq4.Socket, connectionID, to
 	// Round 1 — probe.
 	probeReqID := uuid.New().String()
 	probe, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: connectionID,
-		Type:         protocol.RequestTypeSessionStart,
-		RequestID:    probeReqID,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    connectionID,
+		Type:            protocol.RequestTypeSessionStart,
+		RequestID:       probeReqID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		ProtocolVersion: protocol.Version,
 	})
 	if err := chatSendDealer(dealer, probe); err != nil {
 		return protocol.Response{}, mapSendError(stderr, err, sigIntFired)
@@ -467,6 +499,12 @@ func chatHandshakeDirect(_ context.Context, dealer zmq4.Socket, connectionID, to
 		return protocol.Response{}, cli.Exit("", ExitErr)
 	}
 
+	// guided-init D11a: the client checks protocol_version on EVERY
+	// handshake response before computing any HMAC or opening a session.
+	if verr := checkProtocolVersion(&challengeResp, stderr); verr != nil {
+		return protocol.Response{}, verr
+	}
+
 	// Round 2 — authenticated.
 	return chatHandshakeVerify(dealer, connectionID, token, challengeResp.Content, timeout, stderr, sigIntFired, recvDirect)
 }
@@ -477,10 +515,11 @@ func chatHandshakeDirect(_ context.Context, dealer zmq4.Socket, connectionID, to
 func chatHandshakeLoop(chatCtx context.Context, dealer zmq4.Socket, connectionID, token string, timeout time.Duration, stderr io.Writer, sigIntFired chan struct{}, recv *recvLoop) (protocol.Response, error) {
 	probeReqID := uuid.New().String()
 	probe, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: connectionID,
-		Type:         protocol.RequestTypeSessionStart,
-		RequestID:    probeReqID,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    connectionID,
+		Type:            protocol.RequestTypeSessionStart,
+		RequestID:       probeReqID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		ProtocolVersion: protocol.Version,
 	})
 	if err := chatSendDealer(dealer, probe); err != nil {
 		return protocol.Response{}, mapSendError(stderr, err, sigIntFired)
@@ -498,6 +537,11 @@ func chatHandshakeLoop(chatCtx context.Context, dealer zmq4.Socket, connectionID
 		return protocol.Response{}, cli.Exit("", ExitErr)
 	}
 
+	// guided-init D11a: same client-side check on the loop path.
+	if verr := checkProtocolVersion(&challengeResp, stderr); verr != nil {
+		return protocol.Response{}, verr
+	}
+
 	return chatHandshakeVerify(dealer, connectionID, token, challengeResp.Content, timeout, stderr, sigIntFired, func(_ zmq4.Socket, t time.Duration, sig chan struct{}) (protocol.Response, error) {
 		return recv.waitControl(chatCtx, t, sig)
 	})
@@ -505,6 +549,38 @@ func chatHandshakeLoop(chatCtx context.Context, dealer zmq4.Socket, connectionID
 
 // recvFn is either recvDirect (TUI) or recv.waitControl (non-TUI).
 type recvFn func(dealer zmq4.Socket, timeout time.Duration, sigIntFired chan struct{}) (protocol.Response, error)
+
+// checkProtocolVersion enforces the client side of the guided-init D11a
+// handshake gate on one session_start response: a different declared version
+// prints BOTH versions and advises matching `ready` releases, exit 1 (the
+// generic error code, unchanged from the table); a missing version on a
+// declared-mismatch-free reply means a daemon from before protocol
+// versioning, reported as such. Nothing here touches sessions.
+func checkProtocolVersion(resp *protocol.Response, stderr io.Writer) error {
+	if resp.ErrorCode == protocol.ErrorCodeProtocolMismatch {
+		_, _ = fmt.Fprintf(stderr,
+			"protocol version mismatch: client %d, daemon %d — install matching `ready` releases on both ends\n",
+			protocol.Version, resp.ProtocolVersion)
+
+		return cli.Exit("", ExitErr)
+	}
+	if resp.ProtocolVersion == 0 {
+		_, _ = fmt.Fprintf(stderr,
+			"protocol version mismatch: %s (client version %d) — install matching `ready` releases on both ends\n",
+			protocol.PredatesVersioningHint, protocol.Version)
+
+		return cli.Exit("", ExitErr)
+	}
+	if resp.ProtocolVersion != protocol.Version {
+		_, _ = fmt.Fprintf(stderr,
+			"protocol version mismatch: client %d, daemon %d — install matching `ready` releases on both ends\n",
+			protocol.Version, resp.ProtocolVersion)
+
+		return cli.Exit("", ExitErr)
+	}
+
+	return nil
+}
 
 // chatHandshakeVerify sends the authenticated session_start and maps the auth
 // response to an exit code. On success it returns the authenticated response
@@ -519,11 +595,12 @@ func chatHandshakeVerify(dealer zmq4.Socket, connectionID, token, nonceHex strin
 
 	verifyReqID := uuid.New().String()
 	verify, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: connectionID,
-		Type:         protocol.RequestTypeSessionStart,
-		RequestID:    verifyReqID,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		AuthToken:    authToken,
+		ConnectionID:    connectionID,
+		Type:            protocol.RequestTypeSessionStart,
+		RequestID:       verifyReqID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		AuthToken:       authToken,
+		ProtocolVersion: protocol.Version,
 	})
 	if err := chatSendDealer(dealer, verify); err != nil {
 		return protocol.Response{}, mapSendError(stderr, err, sigIntFired)
@@ -532,6 +609,13 @@ func chatHandshakeVerify(dealer zmq4.Socket, connectionID, token, nonceHex strin
 	authResp, err := recv(dealer, timeout, sigIntFired)
 	if err != nil {
 		return protocol.Response{}, handleHandshakeRecvError(stderr, err, sigIntFired)
+	}
+
+	// guided-init D11a: the round-2 (authenticated) response carries the
+	// version too; a mismatch closes the connection before the session
+	// opens (one stderr line, generic exit 1).
+	if verr := checkProtocolVersion(&authResp, stderr); verr != nil {
+		return protocol.Response{}, verr
 	}
 
 	switch authResp.Status {

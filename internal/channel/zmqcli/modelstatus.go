@@ -1,6 +1,8 @@
 package zmqcli
 
 import (
+	"sync"
+
 	"github.com/marco-rozz/ready/internal/protocol"
 )
 
@@ -30,19 +32,45 @@ type ModelStatusSource interface {
 // WatchModelStatus seeds the current model status from src and subscribes to
 // its transitions: each event updates the stored status (reported by later
 // handshakes) and is broadcast to the connected session as an unsolicited
-// control response. Call once after NewChannel; the subscription goroutine
-// runs until the channel's own context is cancelled (Close).
+// control response. Any previous WatchModelStatus subscription is cancelled
+// before starting the new one so in-process runtime reloads never leak
+// subscription goroutines.
 func (c *Channel) WatchModelStatus(src ModelStatusSource) {
+	c.modelMu.Lock()
+	if c.modelWatchCancel != nil {
+		c.modelWatchCancel()
+		c.modelWatchCancel = nil
+	}
+	c.modelMu.Unlock()
+
+	if src == nil {
+		return
+	}
+
 	c.setModelStatus(src.ModelStatus())
 
 	events, cancel := src.SubscribeModelStatus()
+	subDone := make(chan struct{})
+	var stopOnce sync.Once
+	stopSub := func() {
+		stopOnce.Do(func() {
+			close(subDone)
+			cancel()
+		})
+	}
+
+	c.modelMu.Lock()
+	c.modelWatchCancel = stopSub
+	c.modelMu.Unlock()
 
 	go func() {
-		defer cancel()
+		defer stopSub()
 
 		for {
 			select {
 			case <-c.ctx.Done():
+				return
+			case <-subDone:
 				return
 			case ev, ok := <-events:
 				if !ok {

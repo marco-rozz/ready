@@ -12,6 +12,11 @@ func CloneTool(t spec.Tool) spec.Tool {
 		t.ArgSchema = spec.JSONSchema(bytes.Clone([]byte(t.ArgSchema)))
 	}
 
+	// OutputSchema: deep copy even if len==0 but slice is non-nil.
+	if t.OutputSchema != nil {
+		t.OutputSchema = spec.JSONSchema(bytes.Clone([]byte(t.OutputSchema)))
+	}
+
 	// Tags: deep copy even if len==0 but slice is non-nil (may have cap>0 backing array).
 	if t.Tags != nil {
 		dst := make([]string, len(t.Tags))

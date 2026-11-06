@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,20 +14,17 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const (
-	testClientID     = "cid"
-	testClientSecret = "secret"
-)
+const testClientID = "cid"
+
+// testClientSecretRef is a reference; the value is irrelevant to the grant decision.
+var testClientSecretRef = config.SecretRef{Kind: config.SecretRefName, Name: "mcp_s_client_secret"} //nolint:gochecknoglobals // immutable fixture
 
 func newTestOAuthStore(t *testing.T) oauth.Store {
 	t.Helper()
 
-	store, err := oauth.NewFileStore(context.Background(), filepath.Join(t.TempDir(), "oauth"))
-	if err != nil {
-		t.Fatalf("oauth.NewFileStore: %v", err)
-	}
+	dir := t.TempDir()
 
-	return store
+	return oauth.NewSecretStore(testSecretStore(t, dir), filepath.Join(dir, "oauth"))
 }
 
 func TestHasOAuthServer(t *testing.T) {
@@ -51,7 +49,6 @@ func TestResolveDaemonGrant(t *testing.T) {
 		oa                  *config.MCPOAuthConfig
 		hasStoredCredential bool
 		want                string
-		wantErr             bool
 	}{
 		{
 			name: "explicit authorization_code",
@@ -65,13 +62,13 @@ func TestResolveDaemonGrant(t *testing.T) {
 		},
 		{
 			name:                "auto with stored credential is always authorization_code",
-			oa:                  &config.MCPOAuthConfig{Grant: grantAuto, ClientID: testClientID, ClientSecret: testClientSecret},
+			oa:                  &config.MCPOAuthConfig{Grant: grantAuto, ClientID: testClientID, ClientSecret: testClientSecretRef},
 			hasStoredCredential: true,
 			want:                oauth.GrantAuthorizationCode,
 		},
 		{
 			name: "auto with client_id and secret and no stored credential resolves client_credentials",
-			oa:   &config.MCPOAuthConfig{Grant: grantAuto, ClientID: testClientID, ClientSecret: testClientSecret},
+			oa:   &config.MCPOAuthConfig{Grant: grantAuto, ClientID: testClientID, ClientSecret: testClientSecretRef},
 			want: oauth.GrantClientCredentials,
 		},
 		{
@@ -85,25 +82,17 @@ func TestResolveDaemonGrant(t *testing.T) {
 			want: oauth.GrantAuthorizationCode,
 		},
 		{
-			name:    "unreadable client_secret_file surfaces an error",
-			oa:      &config.MCPOAuthConfig{Grant: grantAuto, ClientID: testClientID, ClientSecretFile: filepath.Join(t.TempDir(), "missing-secret")},
-			wantErr: true,
+			// Structural: the decision never touches the secret store or any
+			// file, so an unresolvable reference still selects the grant.
+			name: "auto decides on the reference alone, with no secret I/O",
+			oa:   &config.MCPOAuthConfig{Grant: grantAuto, ClientID: testClientID, ClientSecret: config.SecretRef{Kind: config.SecretRefFile, Path: filepath.Join(t.TempDir(), "missing-secret")}},
+			want: oauth.GrantClientCredentials,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveDaemonGrant(tc.oa, tc.hasStoredCredential)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected an error, got nil")
-				}
-
-				return
-			}
-			if err != nil {
-				t.Fatalf("resolveDaemonGrant: %v", err)
-			}
+			got := resolveDaemonGrant(tc.oa, tc.hasStoredCredential)
 			if got != tc.want {
 				t.Errorf("resolveDaemonGrant() = %q, want %q", got, tc.want)
 			}
@@ -122,7 +111,7 @@ func TestBuildDaemonOAuthHandler_NoStoredCredential(t *testing.T) {
 
 	srv := config.MCPServerConfig{OAuth: &config.MCPOAuthConfig{Grant: grantAuto}}
 
-	handler, err := buildDaemonOAuthHandler(ctx, store, "no-cred-server", srv, &http.Client{})
+	handler, err := buildDaemonOAuthHandler(ctx, store, nil, "no-cred-server", srv, &http.Client{}, "")
 	if err != nil {
 		t.Fatalf("buildDaemonOAuthHandler: %v", err)
 	}
@@ -159,7 +148,7 @@ func TestBuildDaemonOAuthHandler_StoredCredential(t *testing.T) {
 
 	srv := config.MCPServerConfig{OAuth: &config.MCPOAuthConfig{Grant: grantAuto}}
 
-	handler, err := buildDaemonOAuthHandler(ctx, store, "stored-server", srv, &http.Client{})
+	handler, err := buildDaemonOAuthHandler(ctx, store, nil, "stored-server", srv, &http.Client{}, "")
 	if err != nil {
 		t.Fatalf("buildDaemonOAuthHandler: %v", err)
 	}
@@ -201,7 +190,7 @@ func TestBuildDaemonOAuthHandler_ExpiredWithoutRefreshToken(t *testing.T) {
 
 	srv := config.MCPServerConfig{OAuth: &config.MCPOAuthConfig{Grant: grantAuto}}
 
-	handler, err := buildDaemonOAuthHandler(ctx, store, "expired-server", srv, &http.Client{})
+	handler, err := buildDaemonOAuthHandler(ctx, store, nil, "expired-server", srv, &http.Client{}, "")
 	if err != nil {
 		t.Fatalf("buildDaemonOAuthHandler: %v", err)
 	}
@@ -227,10 +216,10 @@ func TestBuildDaemonOAuthHandler_ClientCredentials(t *testing.T) {
 	srv := config.MCPServerConfig{OAuth: &config.MCPOAuthConfig{
 		Grant:        oauth.GrantClientCredentials,
 		ClientID:     testClientID,
-		ClientSecret: testClientSecret,
+		ClientSecret: testSecretFileRef(t, "secret"),
 	}}
 
-	handler, err := buildDaemonOAuthHandler(ctx, store, "cc-server", srv, &http.Client{})
+	handler, err := buildDaemonOAuthHandler(ctx, store, config.NewSecretSource(nil), "cc-server", srv, &http.Client{}, "")
 	if err != nil {
 		t.Fatalf("buildDaemonOAuthHandler: %v", err)
 	}
@@ -252,7 +241,7 @@ func TestBuildDaemonOAuthHandler_ClientCredentialsMissingSecret(t *testing.T) {
 		ClientID: testClientID,
 	}}
 
-	if _, err := buildDaemonOAuthHandler(ctx, store, "cc-server", srv, &http.Client{}); err == nil {
+	if _, err := buildDaemonOAuthHandler(ctx, store, config.NewSecretSource(nil), "cc-server", srv, &http.Client{}, ""); err == nil {
 		t.Error("expected an error for client_credentials with no resolvable secret")
 	}
 }
@@ -265,11 +254,13 @@ func TestBuildDaemonOAuthHandler_ClientCredentialsMissingSecret(t *testing.T) {
 func TestConnectAllMCP_OAuthLoginRequiredIsBestEffortSkipped(t *testing.T) {
 	ctx := context.Background()
 
+	agentDir := t.TempDir()
 	cfg := &config.Config{
-		OAuth: config.OAuthConfig{Path: filepath.Join(t.TempDir(), "oauth")},
+		SecretValues: config.NewSecretSource(testSecretStore(t, agentDir)),
+		OAuth:        config.OAuthConfig{Path: filepath.Join(agentDir, "oauth")},
 		MCPServers: map[string]config.MCPServerConfig{
 			"oauth-server": {
-				URL:       "https://127.0.0.1:0/mcp",
+				URL:       config.SecretString{Value: "https://127.0.0.1:0/mcp"},
 				Transport: "streamable_http",
 				Timeout:   time.Second,
 				OAuth:     &config.MCPOAuthConfig{Grant: grantAuto},
@@ -291,4 +282,15 @@ func TestConnectAllMCP_OAuthLoginRequiredIsBestEffortSkipped(t *testing.T) {
 	}
 
 	_ = homemcp.ErrMCPOAuthLoginRequired // referenced by connectAllMCP; guards against accidental removal
+}
+
+// testSecretFileRef returns a `!secret_file` reference to a temporary file.
+func testSecretFileRef(t *testing.T, value string) config.SecretRef {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return config.SecretRef{Kind: config.SecretRefFile, Path: path}
 }

@@ -4,7 +4,7 @@
 
 ```yaml
 sessions:
-  path: sessions/               # default under the runtime home
+  path: sessions/               # default under the agent directory
   reset:
     mode: daily                 # never | daily | idle | daily+idle
     daily_at: "04:00"           # local HH:MM
@@ -47,7 +47,7 @@ compaction:
 ```
 
 - Random-access memory, in plain terms: after a reply lands, the daemon
-  checks the prompt size (the largest declared `context_window` minus
+  checks the prompt size (the smallest declared `context_window` in the active candidate chain minus
   `reserve_tokens`; without any declared window, turn count vs
   `max_turns`).
 - Over threshold: an LLM call on the aux chain summarises the older part of
@@ -101,13 +101,16 @@ logging:
 
 ```yaml
 skills:
-  path: skills/                     # runtime copy, default under runtime home
+  path: skills/                     # runtime copy, default <agent-dir>/skills/
   sync: auto                        # auto | notify | off
-  # library_path: ../resources/skills/   # default <Install home>/library/skills/
+  # library_path: ../resources/skills/   # read-only source override (default
+                                        # ~/.local/share/ready/library/skills)
   hot_reload: true                  # fsnotify → SKILL.md edits live
 ```
 
-The boot sync is per file, three-way, against a recorded state file
+Fresh init prepares the first copy after saving configuration. Boot sync
+keeps it current. Both use the same per-file, three-way synchronization and
+recorded state file
 (`.library-state.json` inside the runtime copy). Practical outcomes:
 
 | Situation | Result |
@@ -123,7 +126,7 @@ The boot sync is per file, three-way, against a recorded state file
 `notify` does the same accounting but writes nothing (report only); `off`
 skips the sync before touching the filesystem. The daemon never writes into
 the library. A broken library sync fails boot; a missing library is a
-silent no-op (binary-only deployments).
+warning without a boot failure (binary-only deployments).
 
 In-chat skills surface as metadata in the system prompt (progressive
 disclosure); the agent loads full content on demand with `skills-load`,

@@ -61,6 +61,49 @@ var findTextTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"reachedMaxMatches": {"type": "boolean"},
+	"additionalMatchesOmitted": {"type": "integer"},
+	"matchesReturned": {"type": "integer"},
+	"matches": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"matchStartLine": {"type": "integer"},
+				"matchStartColumn": {"type": "integer"},
+				"matchEndLine": {"type": "integer"},
+				"matchEndColumn": {"type": "integer"},
+				"context": {
+					"type": ["array", "null"],
+					"items": {
+						"type": "object",
+						"properties": {
+							"lineNumber": {"type": "integer"},
+							"text": {"type": "string"}
+						},
+						"required": ["lineNumber", "text"],
+						"additionalProperties": false
+					}
+				}
+			},
+			"required": [
+				"matchStartLine",
+				"matchStartColumn",
+				"matchEndLine",
+				"matchEndColumn"
+			],
+			"additionalProperties": false
+		}
+	}
+},
+"required": ["reachedMaxMatches", "matchesReturned", "matches"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: findTextFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -32,8 +32,11 @@ ready-landing
 HA_Backup
 /poc/
 /docs/*
+!/docs/agent-directories.md
 !/docs/config-versioning.md
+!/docs/openai-codex-provider.md
 /tasks/
+/test_ready/
 CONTEXT.md
 handoff-*.md
 

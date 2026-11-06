@@ -96,6 +96,16 @@ func TestRegistry_RegisterTool_Validation(t *testing.T) {
 			wantErrContains: "argSchema is not valid JSON",
 		},
 		{
+			name: "outputSchema invalid JSON",
+			tool: func() spec.Tool {
+				tl := mkTool("x", "s")
+				tl.OutputSchema = spec.JSONSchema([]byte(`{"nope":`))
+				return tl
+			}(),
+			fn:              okFn,
+			wantErrContains: "outputSchema is not valid JSON",
+		},
+		{
 			name:            "nil func",
 			tool:            mkTool("x", "s"),
 			fn:              nil,
@@ -212,10 +222,13 @@ func TestRegistry_Tools_SortedAndCloned(t *testing.T) {
 	}
 
 	// Verify: modifying returned tool does not mutate registry state.
-	if len(got[0].ArgSchema) == 0 || len(got[0].Tags) == 0 {
-		t.Fatalf("test requires non-empty ArgSchema and Tags")
+	if len(got[0].ArgSchema) == 0 ||
+		len(got[0].OutputSchema) == 0 ||
+		len(got[0].Tags) == 0 {
+		t.Fatalf("test requires non-empty ArgSchema, OutputSchema, and Tags")
 	}
 	got[0].ArgSchema[0] ^= 0xFF
+	got[0].OutputSchema[0] ^= 0xFF
 	got[0].Tags[0] = "mutated"
 
 	got2 := r.Tools()
@@ -228,16 +241,21 @@ func TestRegistry_Tools_SortedAndCloned(t *testing.T) {
 	if got2[0].ArgSchema[0] == got[0].ArgSchema[0] {
 		t.Fatalf("registry state mutated via Tools() return value (ArgSchema alias)")
 	}
+	if got2[0].OutputSchema[0] == got[0].OutputSchema[0] {
+		t.Fatalf("registry state mutated via Tools() return value (OutputSchema alias)")
+	}
 
 	// Verify: modifying original tool after registration does not mutate registry state.
 	orig := mkTool("github.com/acme/tools.Orig", "orig")
 	orig.ArgSchema = spec.JSONSchema([]byte(`{"k":1}`))
+	orig.OutputSchema = spec.JSONSchema([]byte(`{"out":1}`))
 	orig.Tags = []string{"x", "y"}
 	if err := r.RegisterTool(orig, dummy); err != nil {
 		t.Fatalf("RegisterTool(orig) error: %v", err)
 	}
 
 	orig.ArgSchema[0] ^= 0xFF
+	orig.OutputSchema[0] ^= 0xFF
 	orig.Tags[0] = "changed"
 
 	all := r.Tools()
@@ -256,6 +274,9 @@ func TestRegistry_Tools_SortedAndCloned(t *testing.T) {
 	}
 	if len(reg.ArgSchema) > 0 && reg.ArgSchema[0] == orig.ArgSchema[0] {
 		t.Fatalf("registry state mutated via caller changing tool after RegisterTool (ArgSchema alias)")
+	}
+	if len(reg.OutputSchema) > 0 && reg.OutputSchema[0] == orig.OutputSchema[0] {
+		t.Fatalf("registry state mutated via caller changing tool after RegisterTool (OutputSchema alias)")
 	}
 }
 
@@ -554,6 +575,7 @@ func mkTool(funcID, slug string) spec.Tool {
 		DisplayName:   slug,
 		Description:   "desc",
 		ArgSchema:     spec.JSONSchema([]byte(`{}`)),
+		OutputSchema:  spec.JSONSchema([]byte(`{}`)),
 		GoImpl:        spec.GoToolImpl{FuncID: spec.FuncID(funcID)},
 		CreatedAt:     spec.SchemaStartTime,
 		ModifiedAt:    spec.SchemaStartTime,

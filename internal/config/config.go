@@ -2,10 +2,13 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -37,7 +40,16 @@ const (
 
 // Config is the root configuration structure for the agent.
 type Config struct {
-	ConfigVersion int                        `yaml:"config_version"`
+	ConfigVersion int `yaml:"config_version"`
+	// Agent is the agent's identity: an immutable ID (also the key of its
+	// vault entry) and an editable display name.
+	Agent AgentConfig `yaml:"agent"`
+	// Secrets configures where the Secret store's key lives.
+	Secrets SecretsConfig `yaml:"secrets"`
+	// SecretValues resolves every Secret reference to its value. Runtime-only:
+	// the daemon installs it after opening the Secret store; a nil source
+	// resolves only `!secret_file` references.
+	SecretValues  *SecretSource              `yaml:"-"`
 	LLM           LLMConfig                  `yaml:"llm"`
 	Channels      ChannelsConfig             `yaml:"channels"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
@@ -46,10 +58,11 @@ type Config struct {
 	Compaction    CompactionConfig           `yaml:"compaction"`
 	Logging       LoggingConfig              `yaml:"logging"`
 	HomeAssistant HomeAssistantConfig        `yaml:"home_assistant"`
-	// MCPProfile names the active MCP exposure profile resolved at boot. It is
-	// the lowest-precedence source (overridden by the --profile flag and the
-	// READY_MCP_PROFILE env var). Defaults to "default" via applyDefaults.
-	MCPProfile string `yaml:"mcp_profile"`
+	// DefaultProfile names the active MCP exposure profile resolved at boot. It
+	// is the lowest-precedence source (overridden by the --profile flag and the
+	// READY_DEFAULT_PROFILE env var). Defaults to "default" via applyDefaults.
+	// The legacy mcp_profile YAML key is rejected by name (renamed selector).
+	DefaultProfile string `yaml:"default_profile"`
 	// Profiles maps a profile name to its cross-cutting injection rules. The
 	// built-in "default" and "edit" profiles are synthesized by applyDefaults
 	// when not overridden here. Per-owner tool gating (allow/deny) lives on
@@ -69,7 +82,7 @@ type Config struct {
 	// constructed directly in Go (e.g. in tests).
 	ElectedPath string `yaml:"-"`
 	// Origin records how ElectedPath was elected (flag/local/global); it is
-	// meaningful only when the caller went through config.Elect.
+	// meaningful only when the caller went through config.SelectAgentDir.
 	Origin OriginKind `yaml:"-"`
 	// RuntimeHome is the directory containing the elected config file —
 	// every runtime path of the run resolves against it:
@@ -118,8 +131,11 @@ type ProfileConfig struct {
 // server, an internal Eino-tool package, or the built-in tools bucket) under
 // one profile name. Allow/Deny are glob patterns (only `*` is significant)
 // matched against the owner's own wire name (unprefixed); Deny takes
-// precedence over Allow. An empty Allow list means "allow everything" (Deny
-// still applies). An owner that does not declare the active profile name at
+// precedence rules: allow and deny are mutually exclusive on one profile
+// entry — an entry is either an allow-list or a deny-list, never both (an
+// absent allow with a deny list means "allow everything except the denied
+// names", so "all except X" is expressed with deny alone). An owner that
+// does not declare the active profile name at
 // all is fail-closed: it contributes zero tools under that profile.
 type OwnerProfileConfig struct {
 	Allow []string `yaml:"allow"`
@@ -131,6 +147,20 @@ type OwnerProfileConfig struct {
 type BuiltinToolsConfig struct {
 	Profiles map[string]OwnerProfileConfig `yaml:"profiles"`
 }
+
+// ProfileEnvName is the environment variable carrying the boot-time profile
+// override (second precedence, below --profile and above default_profile).
+// The removed READY_MCP_PROFILE name is never read — a set legacy env is
+// silently ignored, never aliased.
+const ProfileEnvName = "READY_DEFAULT_PROFILE"
+
+// ConfigManagerToolKey is the builtin wire name of the config-manager tool.
+// It lives here, next to the configuration definitions, because the
+// synthesized builtin owner policies must reference it; the tools package
+// imports the constant instead of redefining the name.
+const ConfigManagerToolKey = "config-manager"
+
+const configManagerToolKey = ConfigManagerToolKey
 
 // LoggingConfig holds structured logging settings.
 type LoggingConfig struct {
@@ -240,6 +270,9 @@ type LLMConfig struct {
 	// OAuthPath is copied from the root oauth.path after defaults are applied.
 	// It is runtime wiring, not a second YAML configuration surface.
 	OAuthPath string `yaml:"-"`
+	// Secrets resolves the providers' api_key references. Runtime-only: set
+	// by the daemon after decoding; a nil source resolves only `!secret_file`.
+	Secrets *SecretSource `yaml:"-"`
 
 	// FailoverAttemptTimeout bounds the time until a streaming candidate
 	// produces its first token or chunk. Nil means the 45s default; an explicit
@@ -312,12 +345,13 @@ type LadderConfig struct {
 type LLMProviderConfig struct {
 	// Name is backfilled from the YAML map key by applyLLMDefaults; it is a
 	// diagnostic label only and is not parsed from YAML.
-	Name       string `yaml:"-"`
-	Provider   string `yaml:"provider"`
-	API        string `yaml:"api"`
-	APIKey     string `yaml:"api_key"`
-	APIKeyFile string `yaml:"api_key_file"`
-	BaseURL    string `yaml:"base_url"`
+	Name     string `yaml:"-"`
+	Provider string `yaml:"provider"`
+	API      string `yaml:"api"`
+	// APIKey references the provider key in the Secret store
+	// (`!secret <name>`) or an external file (`!secret_file <path>`).
+	APIKey  SecretRef `yaml:"api_key"`
+	BaseURL string    `yaml:"base_url"`
 
 	// KeepAlive is an Ollama-only knob controlling how long the model stays
 	// loaded in memory after a request (e.g. "30m"). A nil value (field
@@ -361,47 +395,10 @@ type OllamaOptions struct {
 	NumThread     *int     `yaml:"num_thread"`
 }
 
-// ResolvedAPIKey returns the effective API key for this provider instance,
-// reading from APIKeyFile when APIKey is empty. Returns ("", nil) when neither
-// is set. The returned string is trimmed of leading/trailing whitespace
-// (incl. trailing newline). The key applies to every model referenced through
-// this provider.
-func (p LLMProviderConfig) ResolvedAPIKey(ctx context.Context) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", fmt.Errorf("failed to resolve API key: %w", ctx.Err())
-	default:
-	}
-	if p.APIKey != "" {
-		return p.APIKey, nil
-	}
-
-	if p.APIKeyFile == "" {
-		return "", nil
-	}
-
-	data, err := os.ReadFile(p.APIKeyFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read api_key_file %q: %w", p.APIKeyFile, err)
-	}
-
-	key := strings.TrimSpace(string(data))
-	if key == "" {
-		return "", fmt.Errorf("api_key_file %q is empty after trimming whitespace", p.APIKeyFile)
-	}
-
-	return key, nil
-}
-
 // modelRefSeparator is the separator between a provider instance name and a
 // model-id in a `<provider>::<model>` reference. Chosen because real model IDs
 // contain single `:` (e.g. `gemma4:31b`) but never `::` — see the design doc.
 const modelRefSeparator = "::"
-
-// minAuthTokenLength is the minimum accepted length for the ZMQ shared
-// secret (criticalities-remediation M18, BREAKING): 32 characters — 128 bits
-// when hex-encoded.
-const minAuthTokenLength = 32
 
 // ParseModelReference splits a `<provider>::<model>` reference on the first
 // `::` occurrence. The provider name is the part before the separator; the
@@ -449,8 +446,15 @@ type ChannelsConfig struct {
 func (c *ChannelsConfig) UnmarshalYAML(value *yaml.Node) error {
 	type rawChannelsConfig ChannelsConfig // strips the UnmarshalYAML method
 	var raw rawChannelsConfig
-	if err := value.Decode(&raw); err != nil {
-		return err
+	// value.Decode uses a fresh, non-strict decoder, so the channels subtree
+	// would escape the strict decode of decodeConfigTarget: re-marshal the
+	// node and decode it with the same unknown-fields-are-errors rule.
+	channelData, err := yaml.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("failed to decode the channels block: %w", err)
+	}
+	if err := strictDecode(channelData, &raw); err != nil {
+		return fmt.Errorf("channels: %w", err)
 	}
 
 	*c = ChannelsConfig(raw)
@@ -500,14 +504,10 @@ type ZMQCLIChannelConfig struct {
 	// port (primarily useful in tests; Listener.Addr() reports the resolved
 	// address).
 	Bind string `yaml:"bind"`
-	// AuthToken is the shared secret used to derive HMAC-SHA256 over the
-	// per-connection challenge nonce. Exactly one of AuthToken or
-	// AuthTokenFile must be set (after expansion) when Enabled is true.
-	AuthToken string `yaml:"auth_token"`
-	// AuthTokenFile, when set, is read at startup and its trimmed content is
-	// used as the shared secret. Use this to keep the secret out of the YAML
-	// itself (e.g. pointed at a file with 0400 mode).
-	AuthTokenFile string `yaml:"auth_token_file"`
+	// AuthToken references the shared secret used to derive HMAC-SHA256 over
+	// the per-connection challenge nonce. A reference is required when Enabled
+	// is true; the value lives in the Secret store (or a `!secret_file`).
+	AuthToken SecretRef `yaml:"auth_token"`
 	// ConnectionIdleTimeout bounds the per-session idle window. After this duration
 	// without a message from the active client, the daemon releases the
 	// session lock and emits Response{Status:"error", ErrorCode:"session_timeout"}.
@@ -549,33 +549,6 @@ type ZMQCLIChannelConfig struct {
 	SessionReset *SessionResetConfig `yaml:"session_reset"`
 }
 
-// ResolveAuthToken returns the effective shared secret for the ZMQ CLI
-// channel, reading from AuthTokenFile when AuthToken is empty. It returns a
-// non-nil error only when both sources are empty or the file is unreadable.
-// The returned string is trimmed of leading/trailing whitespace (incl. a
-// trailing newline written by editors).
-func (z ZMQCLIChannelConfig) ResolveAuthToken() (string, error) {
-	if z.AuthToken != "" {
-		return z.AuthToken, nil
-	}
-
-	if z.AuthTokenFile == "" {
-		return "", errors.New("channels.zmqcli.auth_token or channels.zmqcli.auth_token_file is required when zmqcli is enabled")
-	}
-
-	data, err := os.ReadFile(z.AuthTokenFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read channels.zmqcli.auth_token_file %q: %w", z.AuthTokenFile, err)
-	}
-
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("channels.zmqcli.auth_token_file %q is empty after trimming whitespace", z.AuthTokenFile)
-	}
-
-	return token, nil
-}
-
 // CLIChannelConfig holds CLI-specific settings.
 type CLIChannelConfig struct {
 	Enabled           bool                `yaml:"enabled"`
@@ -599,7 +572,7 @@ type SerialChannelConfig struct {
 // TelegramChannelConfig holds Telegram bot settings.
 type TelegramChannelConfig struct {
 	Enabled           bool                `yaml:"enabled"`
-	Token             string              `yaml:"token"`
+	Token             SecretRef           `yaml:"token"`
 	AllowFrom         []string            `yaml:"allow_from"`
 	FormatterSkill    string              `yaml:"formatter_skill"`
 	FormatterPostStep bool                `yaml:"formatter_post_step"`
@@ -657,14 +630,14 @@ type HACommandsConfig struct {
 }
 
 // HAWebSocketConfig holds HA WS endpoint and authentication.
-// Exactly one of Token/TokenFile must be set when enabled is true.
+// A Token reference is required when enabled is true.
 type HAWebSocketConfig struct {
 	// URL is the HA WebSocket endpoint, e.g. "ws://homeassistant.local:8123/api/websocket".
-	URL string `yaml:"url"`
-	// Token is the Long-Lived Access Token. Mutually exclusive with TokenFile.
-	Token string `yaml:"token"`
-	// TokenFile is the path to a file containing the token (trimmed on read).
-	TokenFile string `yaml:"token_file"`
+	// Secret-capable plain field: a literal is kept in clear, a `!secret`
+	// reference is resolved at boot (dynamic per instance).
+	URL SecretString `yaml:"url"`
+	// Token references the Long-Lived Access Token.
+	Token SecretRef `yaml:"token"`
 }
 
 // HAMonitoringConfig holds twin operational parameters.
@@ -687,8 +660,18 @@ type HAMonitoringConfig struct {
 
 // MCPServerConfig holds connection info for an MCP server.
 type MCPServerConfig struct {
-	URL     string            `yaml:"url"`
-	Headers map[string]string `yaml:"headers"`
+	// URL is the server endpoint. Secret-capable plain field: a literal is
+	// kept in clear (endpoints without credentials), a `!secret` reference
+	// is resolved at boot — dynamic per instance (some deployments embed a
+	// token in the query string, others are plain).
+	URL SecretString `yaml:"url"`
+	// Headers maps a header name to a reference to its value: every header
+	// value is treated as a Secret.
+	Headers map[string]SecretRef `yaml:"headers"`
+	// ResolvedHeaders holds the header values resolved from Headers' Secret
+	// references. Runtime-only and in-memory: filled by ResolveHeaders after
+	// decoding, never marshalled, never logged.
+	ResolvedHeaders map[string]string `yaml:"-"`
 	// Profiles gates this server's tools per profile name, keyed by wire name
 	// (unprefixed). An owner that does not declare the active profile is
 	// fail-closed: it contributes zero tools under that profile.
@@ -726,12 +709,11 @@ type MCPServerConfig struct {
 	OAuth *MCPOAuthConfig `yaml:"oauth,omitempty"`
 }
 
-// Accepted MCPOAuthConfig.Grant values and the sole accepted OAuthConfig.TokenStore value.
+// Accepted MCPOAuthConfig.Grant values.
 const (
 	grantAuto              = "auto"
 	grantAuthorizationCode = "authorization_code"
 	grantClientCredentials = "client_credentials"
-	tokenStoreFile         = "file"
 )
 
 // isValidGrant reports whether grant is one of the accepted
@@ -769,12 +751,12 @@ type MCPHealthCheckConfig struct {
 // other value, including "keychain", is rejected explicitly by Validate
 // rather than silently falling back.
 type OAuthConfig struct {
-	// TokenStore selects the credential-persistence backend. Only "file" is
-	// accepted today. Default: "file".
-	TokenStore string `yaml:"token_store"`
 	// Path is the directory the file backend stores one JSON record per
-	// server under. Default: <Install home>/oauth/ (the design doc — the Install-home anchor; an explicit relative oauth.path resolves against the runtime home).
-	Path string `yaml:"path"`
+	// server under. It is runtime-derived state, never author config: the
+	// oauth.path YAML key is rejected and the directory is always
+	// <agent-dir>/oauth (filled in by ApplyRuntimeHome; empty for a Config
+	// constructed directly in Go until the caller resolves it).
+	Path string `yaml:"-"`
 	// RedirectPort is the fixed loopback port `ready login` binds for the
 	// authorization-code callback. Frozen into the persisted client
 	// registration, so it must stay stable across logins. Default: 7601.
@@ -795,39 +777,9 @@ type MCPOAuthConfig struct {
 	// pre-registered client for authorization_code (skipping Dynamic Client
 	// Registration). Optional for authorization_code servers that support DCR.
 	ClientID string `yaml:"client_id"`
-	// ClientSecret and ClientSecretFile are mutually exclusive. ClientSecret
-	// is required for the client_credentials grant.
-	ClientSecret string `yaml:"client_secret"`
-	// ClientSecretFile, when set, is read at load time and its trimmed
-	// content used as the secret, mirroring
-	// ZMQCLIChannelConfig.AuthTokenFile.
-	ClientSecretFile string `yaml:"client_secret_file"`
-}
-
-// ResolveClientSecret returns the effective client secret, reading from
-// ClientSecretFile when ClientSecret is empty. Mirrors
-// ZMQCLIChannelConfig.ResolveAuthToken. Returns ("", nil) when neither is
-// set — the client_credentials grant validates that requirement separately.
-func (o MCPOAuthConfig) ResolveClientSecret() (string, error) {
-	if o.ClientSecret != "" {
-		return o.ClientSecret, nil
-	}
-
-	if o.ClientSecretFile == "" {
-		return "", nil
-	}
-
-	data, err := os.ReadFile(o.ClientSecretFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read client_secret_file %q: %w", o.ClientSecretFile, err)
-	}
-
-	secret := strings.TrimSpace(string(data))
-	if secret == "" {
-		return "", fmt.Errorf("client_secret_file %q is empty after trimming whitespace", o.ClientSecretFile)
-	}
-
-	return secret, nil
+	// ClientSecret references the client secret. A reference is required for
+	// the client_credentials grant.
+	ClientSecret SecretRef `yaml:"client_secret"`
 }
 
 // SkillsConfig holds skill-related settings.
@@ -838,7 +790,7 @@ type SkillsConfig struct {
 	// entirely. Any other value fails boot.
 	Sync string `yaml:"sync"`
 	// LibraryPath is the shipped skill library the runtime copy is synced
-	// from (default <Install home>/library/skills/; absolute as-is, relative
+	// from (default ~/.local/share/ready/library/skills/; absolute as-is, relative
 	// resolved against the runtime home). The installer owns that directory
 	// and replaces it on every install; the daemon never writes into it.
 	LibraryPath string `yaml:"library_path"`
@@ -857,9 +809,9 @@ func (s SkillsConfig) SyncMode() string {
 // validateProfileNamed checks that the configured mcp_profile (when present)
 // is declared under profiles.
 func (c *Config) validateProfileNamed() error {
-	if c.MCPProfile != "" {
-		if _, ok := c.Profiles[c.MCPProfile]; !ok {
-			return fmt.Errorf("mcp_profile %q is not declared under profiles (built-ins: default, edit)", c.MCPProfile) // user-facing config error
+	if c.DefaultProfile != "" {
+		if _, ok := c.Profiles[c.DefaultProfile]; !ok {
+			return fmt.Errorf("default_profile %q is not declared under profiles (built-ins: default, edit)", c.DefaultProfile) // user-facing config error
 		}
 	}
 
@@ -902,8 +854,18 @@ func Load(ctx context.Context, path string) (*Config, error) {
 	default:
 	}
 
+	// A linked config leaf relaxes the directory boundary; reject it before
+	// reading.
+	if err := RejectLinkedConfig(path); err != nil {
+		return nil, err
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read config file %s: %w (the sole accepted filename is %s)", path, err, ConfigFileName)
+		}
+
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
@@ -912,6 +874,13 @@ func Load(ctx context.Context, path string) (*Config, error) {
 
 // decodeConfig keeps runtime-only defaults and resolved secrets out of the YAML document.
 func decodeConfig(ctx context.Context, data []byte, path string, target int) (*Config, error) {
+	return decodeConfigTarget(ctx, data, path, target)
+}
+
+// decodeConfigTarget decodes and defaults a document at the given schema
+// target. Sensitive fields decode only as Secret references (SecretRef), so
+// a literal credential is refused here, before any runtime or config write.
+func decodeConfigTarget(ctx context.Context, data []byte, path string, target int) (*Config, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("failed to decode config %s: %w", path, err)
 	}
@@ -923,13 +892,53 @@ func decodeConfig(ctx context.Context, data []byte, path string, target int) (*C
 		return nil, err
 	}
 	var cfg Config
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config %s (check field types): %w: %w", path, ErrInvalidConfigDocument, &privateConfigError{message: "YAML field decoding failed", cause: err})
-	}
+	// Superseded shapes are probed on the raw document BEFORE the strict
+	// decode: their keys are no longer struct fields, so the strict decoder
+	// would reject them with a generic unknown-field message instead of the
+	// operator-facing migration reason. The probes read only the raw YAML.
+	// Historical targets (migration source decoding) keep the lenient decode:
+	// their keyset is the document's own and the migration steps own its
+	// reshaping — only the current target rejects unknown keys.
+	if target == TargetConfigVersion {
+		superseded := Config{
+			legacyProfileFields: detectLegacyProfileFields(data),
+			removedFields:       detectRemovedFields(data),
+		}
+		superseded.LLM.legacyLLMFields = detectLegacyLLMFields(data)
+		if err = superseded.validateSupersededShapes(); err != nil {
+			return nil, err
+		}
 
-	cfg.legacyProfileFields = detectLegacyProfileFields(data)
-	cfg.LLM.legacyLLMFields = detectLegacyLLMFields(data)
-	cfg.removedFields = detectRemovedFields(data)
+		// Strict decode: unknown or misspelled keys are a decoding error, never
+		// a silent drop (e.g. `home_assistant.url` instead of the nested
+		// `home_assistant.websocket.url` would otherwise disable the twin and
+		// vanish without a trace).
+		if err = strictDecode(data, &cfg); err != nil {
+			if literals := LiteralSecretPaths(data); len(literals) > 0 {
+				return nil, fmt.Errorf("%w: %s hold a literal value; a sensitive field takes only `!secret <name>` or `!secret_file <absolute path>` (set the value with `ready secrets set`)",
+					ErrInvalidSecretRef, strings.Join(literals, ", "))
+			}
+
+			if detail := safeUnknownFieldDetail(err); detail != "" {
+				return nil, fmt.Errorf("failed to parse config %s: %w: unknown or misspelled key: %s", path, ErrInvalidConfigDocument, detail)
+			}
+
+			return nil, fmt.Errorf("failed to parse config %s (unknown or misspelled keys are rejected — check field names and types): %w: %w", path, ErrInvalidConfigDocument, &privateConfigError{message: "YAML field decoding failed", cause: err})
+		}
+	} else {
+		if err = yaml.Unmarshal(data, &cfg); err != nil {
+			if literals := LiteralSecretPaths(data); len(literals) > 0 {
+				return nil, fmt.Errorf("%w: %s hold a literal value; a sensitive field takes only `!secret <name>` or `!secret_file <absolute path>` (set the value with `ready secrets set`)",
+					ErrInvalidSecretRef, strings.Join(literals, ", "))
+			}
+
+			return nil, fmt.Errorf("failed to parse config %s (check field types): %w: %w", path, ErrInvalidConfigDocument, &privateConfigError{message: "YAML field decoding failed", cause: err})
+		}
+
+		cfg.legacyProfileFields = detectLegacyProfileFields(data)
+		cfg.LLM.legacyLLMFields = detectLegacyLLMFields(data)
+		cfg.removedFields = detectRemovedFields(data)
+	}
 
 	if err = cfg.ApplyRuntimeHome(path); err != nil {
 		return nil, err
@@ -938,6 +947,39 @@ func decodeConfig(ctx context.Context, data []byte, path string, target int) (*C
 	cfg.applyDefaults()
 
 	return &cfg, nil
+}
+
+// safeUnknownFieldDetail extracts, from a yaml TypeError, only the entries
+// matching "field X not found in type Y": those are generated from the schema
+// and by construction carry field and type names (never document values), so
+// they are safe to render. Every other entry (type mismatches can embed
+// document values) is dropped — the privateConfigError policy holds.
+func safeUnknownFieldDetail(err error) string {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return ""
+	}
+
+	re := regexp.MustCompile(`line \d+: (?:[a-z_]+: )*field \S+ not found in type \S+`)
+	var keep []string
+	for _, entry := range typeErr.Errors {
+		if m := re.FindString(entry); m != "" {
+			keep = append(keep, m)
+		}
+	}
+
+	return strings.Join(keep, "; ")
+}
+
+// strictDecode decodes one YAML document refusing fields that do not exist
+// in the destination struct: a typo or a misplaced key is an error, never a
+// silent drop. Custom UnmarshalYAML implementations re-enter this helper so
+// their subtree keeps the same strictness.
+func strictDecode(data []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+
+	return dec.Decode(out)
 }
 
 // detectLegacyProfileFields scans the raw YAML for pre-refactor
@@ -978,7 +1020,14 @@ var removedKeys = []struct { //nolint:gochecknoglobals // immutable lookup table
 	{"persistence.plan_ttl", "removed: the Plan subsystem no longer exists — delete the key"},
 	{"channels.zmqcli.session_timeout", "renamed: use channels.zmqcli.connection_idle_timeout"},
 	{"persistence.checkpoints_path", "replaced: use sessions.path — delete the key and the legacy checkpoints directory (no migration)"},
+	{"mcp_profile", "renamed: use default_profile — rename the key in the config file (no historical alias)"},
 	{"persistence.max_history", "replaced: use compaction.max_turns (turn-count compaction trigger when no context_window is declared)"},
+	{"oauth.path", "removed: the OAuth credential store is fixed at <agent-dir>/oauth — delete the key"},
+	{"oauth.token_store", "removed: credentials live in the agent's Secret store — delete the key"},
+	{"llm.providers.*.api_key_file", "removed: use `api_key: !secret_file /absolute/path` or `api_key: !secret <name>` (see `ready secrets set`)"},
+	{"channels.zmqcli.auth_token_file", "removed: use `auth_token: !secret_file /absolute/path` or `auth_token: !secret <name>`"},
+	{"home_assistant.websocket.token_file", "removed: use `token: !secret_file /absolute/path` or `token: !secret <name>`"},
+	{"mcp_servers.*.oauth.client_secret_file", "removed: use `client_secret: !secret_file /absolute/path` or `client_secret: !secret <name>`"},
 }
 
 // detectRemovedFields scans the raw YAML for removed or renamed keys and
@@ -1000,7 +1049,8 @@ func detectRemovedFields(data []byte) []string {
 	return found
 }
 
-// yamlPathExists reports whether the mapping-key path exists under node.
+// yamlPathExists reports whether the mapping-key path exists under node. A
+// "*" segment matches any key of the mapping at that level.
 func yamlPathExists(node *yaml.Node, path []string) bool {
 	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
 		node = node.Content[0]
@@ -1015,8 +1065,10 @@ func yamlPathExists(node *yaml.Node, path []string) bool {
 	}
 
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == path[0] {
-			return yamlPathExists(node.Content[i+1], path[1:])
+		if path[0] == "*" || node.Content[i].Value == path[0] {
+			if yamlPathExists(node.Content[i+1], path[1:]) {
+				return true
+			}
 		}
 	}
 
@@ -1074,9 +1126,20 @@ func (c *Config) validateSupersededShapes() error {
 	return nil
 }
 
-// Validate checks that the configuration is semantically correct.
+// Validate checks that the configuration is semantically correct. It is
+// purely structural with respect to secrets: it reads no Secret store, no
+// Store key and no secret file. Value rules apply when a value is written.
 func (c *Config) Validate() error {
-	if err := c.validateSupersededShapes(); err != nil {
+	return c.validate()
+}
+
+// validate is the full boot-time gatekeeper.
+func (c *Config) validate() error {
+	if supErr := c.validateSupersededShapes(); supErr != nil {
+		return supErr
+	}
+
+	if err := c.validateAgentAndSecrets(); err != nil {
 		return err
 	}
 
@@ -1096,61 +1159,25 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if c.HomeAssistant.Enabled {
-		if c.HomeAssistant.WebSocket.URL == "" {
-			return errors.New("home_assistant.websocket.url is required when home_assistant.enabled is true")
-		}
-		hasToken := c.HomeAssistant.WebSocket.Token != ""
-		hasFile := c.HomeAssistant.WebSocket.TokenFile != ""
-		if !hasToken && !hasFile {
-			return errors.New("home_assistant.websocket.token or home_assistant.websocket.token_file is required when home_assistant.enabled is true")
-		}
-		if hasToken && hasFile {
-			return errors.New("home_assistant.websocket.token and home_assistant.websocket.token_file are mutually exclusive")
-		}
+	if err := c.validateOwnerProfiles(); err != nil {
+		return err
 	}
 
-	if c.Channels.Telegram.Enabled && c.Channels.Telegram.Token == "" {
-		return errors.New("channels.telegram.token is required when telegram is enabled")
-	}
-
-	if c.Channels.Telegram.Enabled && len(c.Channels.Telegram.AllowFrom) == 0 {
-		return errors.New("channels.telegram.allow_from is required when telegram is enabled")
-	}
-
-	if c.Channels.Serial.Enabled && c.Channels.Serial.Port == "" {
-		return errors.New("channels.serial.port is required when serial is enabled")
-	}
-
-	if c.Channels.ZMQCLI.Enabled {
-		if c.Channels.CLI.Enabled {
-			return errors.New("channels.cli and channels.zmqcli cannot both be enabled (zmqcli replaces the stdin CLI under the same logical channel name)")
-		}
-
-		if c.Channels.ZMQCLI.AuthToken == "" && c.Channels.ZMQCLI.AuthTokenFile == "" {
-			return errors.New("channels.zmqcli.auth_token or channels.zmqcli.auth_token_file is required when channels.zmqcli.enabled is true")
-		}
-
-		// criticalities-remediation (M18, BREAKING): a short shared secret
-		// lets an attacker sniff one challenge/response pair (the handshake
-		// is TCP in the clear) and brute-force the HMAC offline forever —
-		// enforce a 32-character minimum (128 bits of entropy at full
-		// hex/alphabet spread).
-		secret, resolveErr := c.Channels.ZMQCLI.ResolveAuthToken()
-		if resolveErr != nil {
-			return resolveErr
-		}
-
-		if len(secret) < minAuthTokenLength {
-			return fmt.Errorf("channels.zmqcli.auth_token must be at least %d characters long (got %d) — generate one with e.g. `openssl rand -hex 16`", minAuthTokenLength, len(secret))
-		}
-
-		if c.Channels.ZMQCLI.Bind == "" {
-			return errors.New("channels.zmqcli.bind is required when channels.zmqcli.enabled is true")
-		}
+	if err := c.validateChannelsAndHA(); err != nil {
+		return err
 	}
 
 	if err := c.validateOAuth(); err != nil {
+		return err
+	}
+
+	// Agent-directory confinement (per-user-install-agent-isolation): every
+	// writable runtime destination must stay inside the agent directory
+	// after link resolution — identical rules for boot loading and the
+	// config-manager candidate validation. The read-only skill library
+	// override (skills.library_path) is the deliberate program-content
+	// exception.
+	if err := c.validateStateConfined(); err != nil {
 		return err
 	}
 
@@ -1178,6 +1205,87 @@ func (c *Config) Validate() error {
 			if skill == ch.formatterSkill {
 				return fmt.Errorf("channels.%s: formatter_skill %q must not also appear in bootstrap (use one or the other)", ch.name, ch.formatterSkill)
 			}
+		}
+	}
+
+	return nil
+}
+
+// validateOwnerProfiles refuses allow and deny on the same profile entry:
+// the two lists are mutually exclusive — an entry expresses either an
+// allow-list or a deny-list (an absent allow with a deny list means
+// "allow everything except the denied names"). Every policy owner (each
+// MCP server, the HA digital twin, builtin_tools) follows the same rule.
+func (c *Config) validateOwnerProfiles() error {
+	owners := make([]struct {
+		owner    string
+		profiles map[string]OwnerProfileConfig
+	}, 0, 2+len(c.MCPServers))
+	owners = append(owners,
+		struct {
+			owner    string
+			profiles map[string]OwnerProfileConfig
+		}{"home_assistant", c.HomeAssistant.Profiles},
+		struct {
+			owner    string
+			profiles map[string]OwnerProfileConfig
+		}{"builtin_tools", c.BuiltinTools.Profiles},
+	)
+	for _, key := range slices.Sorted(maps.Keys(c.MCPServers)) {
+		owners = append(owners, struct {
+			owner    string
+			profiles map[string]OwnerProfileConfig
+		}{"mcp_servers." + key, c.MCPServers[key].Profiles})
+	}
+
+	for _, o := range owners {
+		for _, name := range slices.Sorted(maps.Keys(o.profiles)) {
+			p := o.profiles[name]
+			if len(p.Allow) > 0 && len(p.Deny) > 0 {
+				return fmt.Errorf("%s.profiles.%s: allow and deny are mutually exclusive — declare one list only (an absent allow with a deny list means \"allow everything except the denied names\")", o.owner, name)
+			}
+		}
+	}
+
+	return nil
+}
+
+// validateChannelsAndHA runs the channel/HA enablement and presence rules.
+// A sensitive field is present when it carries a reference; the value behind
+// it is judged when it is written (secretstore.CheckValue), never here.
+func (c *Config) validateChannelsAndHA() error {
+	if c.HomeAssistant.Enabled {
+		if c.HomeAssistant.WebSocket.URL.Value == "" && !c.HomeAssistant.WebSocket.URL.IsReference() {
+			return errors.New("home_assistant.websocket.url is required when home_assistant.enabled is true")
+		}
+		if !c.HomeAssistant.WebSocket.Token.IsSet() {
+			return errors.New("home_assistant.websocket.token (a `!secret` reference) is required when home_assistant.enabled is true")
+		}
+	}
+
+	if c.Channels.Telegram.Enabled && !c.Channels.Telegram.Token.IsSet() {
+		return errors.New("channels.telegram.token (a `!secret` reference) is required when telegram is enabled")
+	}
+
+	if c.Channels.Telegram.Enabled && len(c.Channels.Telegram.AllowFrom) == 0 {
+		return errors.New("channels.telegram.allow_from is required when telegram is enabled")
+	}
+
+	if c.Channels.Serial.Enabled && c.Channels.Serial.Port == "" {
+		return errors.New("channels.serial.port is required when serial is enabled")
+	}
+
+	if c.Channels.ZMQCLI.Enabled {
+		if c.Channels.CLI.Enabled {
+			return errors.New("channels.cli and channels.zmqcli cannot both be enabled (zmqcli replaces the stdin CLI under the same logical channel name)")
+		}
+
+		if !c.Channels.ZMQCLI.AuthToken.IsSet() {
+			return errors.New("channels.zmqcli.auth_token (a `!secret` reference) is required when channels.zmqcli.enabled is true")
+		}
+
+		if c.Channels.ZMQCLI.Bind == "" {
+			return errors.New("channels.zmqcli.bind is required when channels.zmqcli.enabled is true")
 		}
 	}
 
@@ -1288,18 +1396,14 @@ func (c *Config) validateLLM() error {
 			return fmt.Errorf("llm.providers.%s.context_window must be a positive integer (tokens), got %d", name, entry.ContextWindow) // user-facing config error
 		}
 
-		hasKey := entry.APIKey != ""
-		hasFile := entry.APIKeyFile != ""
+		hasKey := entry.APIKey.IsSet()
 
-		if hasKey && hasFile {
-			return fmt.Errorf("llm.providers.%s.api_key and api_key_file are mutually exclusive", name) // user-facing config error
-		}
-		if entry.Provider == ProviderOpenAICodex && (hasKey || hasFile) {
-			return fmt.Errorf("llm.providers.%s: api_key and api_key_file are not supported for provider %q; run `ready login %s`", name, entry.Provider, name) // user-facing config error
+		if entry.Provider == ProviderOpenAICodex && hasKey {
+			return fmt.Errorf("llm.providers.%s: api_key is not supported for provider %q; run `ready login %s`", name, entry.Provider, name) // user-facing config error
 		}
 
-		if !hasKey && !hasFile && entry.Provider != ProviderOllama && entry.Provider != ProviderOpenAICodex {
-			return fmt.Errorf("llm.providers.%s.api_key or api_key_file is required for provider %q", name, entry.Provider) // user-facing config error
+		if !hasKey && entry.Provider != ProviderOllama && entry.Provider != ProviderOpenAICodex {
+			return fmt.Errorf("llm.providers.%s.api_key (a `!secret` reference) is required for provider %q", name, entry.Provider) // user-facing config error
 		}
 	}
 
@@ -1449,10 +1553,6 @@ func (c LLMConfig) ResolvedRecovery() LLMRecoveryConfig {
 // Errors here are ordinary validation failures (config.Validate's contract);
 // the non-https warning is deliberately not an error — see OAuthBootWarnings.
 func (c *Config) validateOAuth() error {
-	if c.OAuth.TokenStore != "" && c.OAuth.TokenStore != tokenStoreFile {
-		return fmt.Errorf("oauth.token_store %q is not supported (only %q is accepted; a keychain backend is deferred to a future change)", c.OAuth.TokenStore, tokenStoreFile) // user-facing config error
-	}
-
 	if c.OAuth.RedirectPort < 0 || c.OAuth.RedirectPort > 65535 {
 		return fmt.Errorf("oauth.redirect_port %d is out of range (must be between 1 and 65535)", c.OAuth.RedirectPort) // user-facing config error
 	}
@@ -1476,10 +1576,6 @@ func validateServerOAuth(name string, srv MCPServerConfig) error {
 
 	if !isValidGrant(oa.Grant) {
 		return fmt.Errorf("mcp_servers.%s.oauth.grant %q is invalid (must be auto, authorization_code, or client_credentials)", name, oa.Grant) // user-facing config error
-	}
-
-	if oa.ClientSecret != "" && oa.ClientSecretFile != "" {
-		return fmt.Errorf("mcp_servers.%s.oauth.client_secret and client_secret_file are mutually exclusive", name) // user-facing config error
 	}
 
 	if _, ok := srv.Headers["Authorization"]; ok {
@@ -1513,10 +1609,10 @@ func (c *Config) OAuthBootWarnings() []string {
 			continue
 		}
 
-		if !strings.HasPrefix(strings.ToLower(srv.URL), "https://") {
+		if srv.URL.Value != "" && !strings.HasPrefix(strings.ToLower(srv.URL.Value), "https://") {
 			warnings = append(warnings, fmt.Sprintf(
 				"mcp_servers.%s declares oauth on a non-https URL (%s): tokens and authorization codes will travel in plaintext",
-				name, srv.URL,
+				name, srv.URL.LogValue(),
 			))
 		}
 	}
@@ -1603,14 +1699,14 @@ func (c *Config) applyDefaults() {
 	// share the logical channel name "cli". When the operator does not set
 	// channels.zmqcli.enabled explicitly, the daemon enables the ZMQ CLI
 	// channel (the `ready chat` interface) and keeps the legacy stdin CLI off
-	// as soon as a shared secret is configured (auth_token or
-	// auth_token_file) — configuring the token is the opt-in signal, so a
+	// as soon as a shared-secret reference is configured (auth_token) —
+	// configuring the reference is the opt-in signal, so a
 	// minimal config (e.g. for `ready login`, which never touches channels)
 	// still boots without a ZMQ secret. An explicit channels.cli.enabled:
 	// true suppresses the default; an explicit channels.zmqcli.enabled:
 	// false is always honoured.
 	if !c.Channels.zmqCLIEnabledSet && !c.Channels.CLI.Enabled &&
-		(c.Channels.ZMQCLI.AuthToken != "" || c.Channels.ZMQCLI.AuthTokenFile != "") {
+		c.Channels.ZMQCLI.AuthToken.IsSet() {
 		c.Channels.ZMQCLI.Enabled = true
 	}
 
@@ -1649,8 +1745,8 @@ func (c *Config) applyDefaults() {
 
 	applyLogRotationDefaults(&c.Logging)
 
-	if c.MCPProfile == "" {
-		c.MCPProfile = profileNameDefault
+	if c.DefaultProfile == "" {
+		c.DefaultProfile = profileNameDefault
 	}
 
 	applyOAuthDefaults(&c.OAuth)
@@ -1668,10 +1764,6 @@ func (c *Config) applyDefaults() {
 
 // applyOAuthDefaults sets sensible defaults for the root OAuth block.
 func applyOAuthDefaults(o *OAuthConfig) {
-	if o.TokenStore == "" {
-		o.TokenStore = tokenStoreFile
-	}
-
 	if o.RedirectPort == 0 {
 		o.RedirectPort = 7601
 	}
@@ -1772,22 +1864,23 @@ func (c *Config) applyProfileDefaults() {
 		}
 	}
 
-	// When builtin_tools.profiles is entirely absent, default to allow-all
-	// under both built-in profiles — this preserves the pre-refactor
-	// unconditional exposure of wait/skills-*/read-skill-asset for
-	// operators who haven't yet opted into per-owner gating for this bucket.
-	// An operator who explicitly declares builtin_tools.profiles.<name>
-	// without a given tool gets the normal fail-closed WARN.
+	// When builtin_tools.profiles is entirely absent, synthesize default
+	// and edit owner rules that DENY config-manager while retaining the
+	// other builtins (mcp-profiles delta): editing the elected configuration
+	// is an explicit opt-in via a named profile's owner policy, never an
+	// implicit default. Explicit owner declarations keep the established
+	// semantics (empty allow = all owner tools, deny precedence, missing
+	// profile fail-closed).
 	if c.BuiltinTools.Profiles == nil {
 		c.BuiltinTools.Profiles = map[string]OwnerProfileConfig{
-			profileNameDefault: {},
-			profileNameEdit:    {},
+			profileNameDefault: {Deny: []string{configManagerToolKey}},
+			profileNameEdit:    {Deny: []string{configManagerToolKey}},
 		}
 	}
 }
 
 // ResolveProfile selects the active MCP profile by precedence
-// flagVal > envVal > c.MCPProfile (the config value, defaulted to "default" by
+// flagVal > envVal > c.DefaultProfile (the config value, defaulted to "default" by
 // applyDefaults). It returns the resolved name, its ProfileConfig, and an error
 // if the resolved name is not declared in the profiles map.
 func (c *Config) ResolveProfile(flagVal, envVal string) (string, ProfileConfig, error) {
@@ -1797,7 +1890,7 @@ func (c *Config) ResolveProfile(flagVal, envVal string) (string, ProfileConfig, 
 	}
 
 	if name == "" {
-		name = c.MCPProfile
+		name = c.DefaultProfile
 	}
 
 	if name == "" {

@@ -65,6 +65,20 @@ var deleteTextTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"deletionsMade": {"type": "integer"},
+	"deletedAtLines": {
+		"type": ["array", "null"],
+		"items": {"type": "integer"}
+	}
+},
+"required": ["deletionsMade", "deletedAtLines"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: deleteTextFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

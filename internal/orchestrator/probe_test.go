@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -414,8 +416,8 @@ func bootTestOrch(t *testing.T, authFailFirst bool) (*Orchestrator, *atomic.Int3
 		Default:  testRefP0,
 		Failover: []string{testRefP1},
 		Providers: map[string]config.LLMProviderConfig{
-			"p0": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: "k", BaseURL: srv0.URL},
-			"p1": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: "k", BaseURL: srv1.URL},
+			"p0": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: keyRef(t), BaseURL: srv0.URL},
+			"p1": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: keyRef(t), BaseURL: srv1.URL},
 		},
 	}
 
@@ -501,8 +503,8 @@ func TestBoot_AllFailNoError(t *testing.T) {
 		Default:  testRefP0,
 		Failover: []string{testRefP1},
 		Providers: map[string]config.LLMProviderConfig{
-			"p0": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: "k", BaseURL: srv0.URL},
-			"p1": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: "k", BaseURL: srv1.URL},
+			"p0": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: keyRef(t), BaseURL: srv0.URL},
+			"p1": {Provider: config.ProviderOpenCode, API: config.APIChatCompletions, APIKey: keyRef(t), BaseURL: srv1.URL},
 		},
 	}
 
@@ -533,4 +535,16 @@ func TestBoot_AllFailNoError(t *testing.T) {
 	if errors.Is(nil, llm.ErrChainExhausted) {
 		t.Fatal("unreachable sanity check")
 	}
+}
+
+// keyRef returns a `!secret_file` reference to a temporary key file, so the
+// orchestrator tests resolve their API key through the real reference path.
+func keyRef(t *testing.T) config.SecretRef {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(path, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return config.SecretRef{Kind: config.SecretRefFile, Path: path}
 }

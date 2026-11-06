@@ -30,6 +30,12 @@ type Credential struct {
 	Version int `json:"version"`
 	// ServerKey is the mcp_servers.<key> this credential belongs to.
 	ServerKey string `json:"server_key"`
+	// Generation is the monotonic cross-process record generation, bumped by
+	// every Save/Delete under the target's coordination lock. Interactive
+	// login snapshots it before waiting for a human and compares before
+	// commit; the daemon's token source re-checks it on every fetch so a
+	// replaced/forgotten record is observed rather than served stale.
+	Generation int64 `json:"generation,omitempty"`
 	// ResourceURL is the configured MCP server URL at login time. A mismatch
 	// after a config edit produces an explanatory warning instead of an
 	// inscrutable 401.

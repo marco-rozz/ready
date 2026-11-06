@@ -66,6 +66,52 @@ var diffTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"kind": {"type": "string", "enum": ["working", "staged", "refs"]},
+	"base": {"type": "string"},
+	"target": {"type": "string"},
+	"paths": {
+		"type": ["array", "null"],
+		"items": {"type": "string"}
+	},
+	"contextLines": {"type": "integer"},
+	"diff": {"type": "string"},
+	"bytes": {"type": "integer"},
+	"truncated": {"type": "boolean"},
+	"omittedBinaryFiles": {"type": "integer"},
+	"skippedLargeFiles": {"type": "integer"},
+	"outputMeta": {
+		"type": "object",
+		"properties": {
+			"bytes": {"type": "integer"},
+			"truncated": {"type": "boolean"},
+			"omittedBinaryFiles": {"type": "integer"},
+			"skippedLargeFiles": {"type": "integer"},
+			"maxBytes": {"type": "integer"}
+		},
+		"required": ["bytes", "truncated", "omittedBinaryFiles", "skippedLargeFiles", "maxBytes"],
+		"additionalProperties": false
+	}
+},
+"required": [
+	"repoPath",
+	"kind",
+	"contextLines",
+	"diff",
+	"bytes",
+	"truncated",
+	"omittedBinaryFiles",
+	"skippedLargeFiles",
+	"outputMeta"
+],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: diffFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -36,6 +36,19 @@ jobs:
           go-version-file: go.mod
       - run: go test ./... -race
 
+  installers:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: verify offline installer flow in isolated user homes
+        run: python scripts/test_install.py
+
   config-migrations:
     strategy:
       matrix:
@@ -48,6 +61,8 @@ jobs:
           go-version-file: go.mod
       - name: verify config file transactions on the host filesystem
         run: go test ./internal/config -run 'TestConfigVersion|TestMigration' -count=1
+      - name: verify initial skill copy and later synchronization on the host filesystem
+        run: go test ./internal/initwizard ./internal/skillssync -count=1
 
   cross-build:
     # Compiles the exact release matrix; asserts the arm6 binary is really

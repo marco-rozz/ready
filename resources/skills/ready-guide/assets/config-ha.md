@@ -1,5 +1,38 @@
 # Home Assistant: MCP servers, the digital twin, profiles, OAuth
 
+## What "add Home Assistant" means (decision rule)
+
+When the operator asks to add Home Assistant **without qualifying**, the
+expected proposal is the **digital twin**: enable the `home_assistant:`
+block over WebSocket. Concretely:
+
+```yaml
+home_assistant:
+  enabled: true
+  websocket:                          # NESTED under websocket — never flat
+    url: ws://homeassistant.local:8123/api/websocket
+    token: !secret home_assistant_token   # reference; value via the red /secrets area
+  profiles:
+    default:
+      allow: ["ha_state_query", "ha_command"]
+    admin:
+      allow: ["ha_state_query", "ha_command"]
+```
+
+- The twin is the contractual **read SSOT** with verified commands
+  (`ha_state_query` reads, `ha_command` writes with per-entity outcomes);
+  propose it by default and then run the per-profile interview below.
+  Both `websocket.url` and the MCP `url` are **secret-capable plain
+  fields**: a literal stays in clear; `url: !secret <name>` resolves at
+  boot and the value is collected by the red area like any secret. The
+  operator decides per instance — never force either form.
+- The HA **MCP server** is a separate, explicit step: propose it only when
+  the operator asks for it (its read tools are denied under `default`
+  anyway — the twin supersedes them).
+- There is NO `twin:` key and NO flat `home_assistant.url`: those shapes
+  are refused by the strict decoder, and the refusal names the offending
+  field.
+
 Two independent integrations exist, each with its own policy:
 
 1. **MCP servers** (`mcp_servers:`) — classic MCP tool clients; one entry
@@ -22,7 +55,8 @@ Behaviour worth knowing:
 
 - A server unreachable at boot is skipped with a WARN; the daemon continues
   with the other servers, and the skipped server's tools are absent for the
-  whole run — the tool slice is built once at boot and never mutated.
+  current runtime generation. A later runtime reload rebuilds the catalog
+  and can connect the server; an ordinary reconnect does not add missing tools.
 - Tool names as seen by the LLM carry the configured prefix
   (`<prefix>__<wire_name>`; absent prefix = server key, `""` = no prefix).
 - `headers` are applied only inside the configured server's own origin
@@ -41,29 +75,81 @@ Behaviour worth knowing:
 
 ### MCP OAuth (opt-in per server)
 
+**At add time — ask before staging.** When adding a NEW MCP server, ask
+whether the endpoint is OAuth-protected (enterprise/SaaS MCP endpoints
+usually are; a `401` from a bare server is the tell). If yes — or the
+operator says so without declaring it in config — stage the `oauth:` block
+in the same edit, and ALWAYS close the proposal with the follow-up login
+command (see `assets/config-manager.md`): `ready login <server-key>` (or
+`ready login mcp:<server-key>`, with the quoted `--agent-dir` for a
+non-default agent). The first login runs discovery, one-time Dynamic
+Client Registration when needed, and persists the credential; an `oauth:`
+block added while the daemon runs is activated by the post-save flow: the
+local TUI runs the login (browser) and reloads the runtime in-process, so the
+server's tools appear without a restart.
+
 ```yaml
 mcp_servers:
   acme:
     url: https://acme.example.com/mcp
     oauth:
       grant: auto          # auto | authorization_code | client_credentials
-      # client_id / client_secret / client_secret_file
+      # client_id: "registered-client-id"
+      # client_secret: !secret acme_client_secret  # or !secret_file /abs/path
 ```
 
 - `oauth` and `headers.Authorization` on the same server are mutually
   exclusive; `oauth` + `transport: sse` is a boot error.
 - There is no scopes key: the authorization server decides.
-- Credentials persist one JSON record per server (`0600` records in a
-  `0700` store) — the record anchors to the Install home unless an explicit
-  `oauth.path` says otherwise.
+- Credentials persist as one encrypted entry per server in the agent's
+  Secret store (`<agent-dir>/secrets.age`; `oauth.path` and
+  `oauth.token_store` are removed keys). A release that kept `oauth/*.json`
+  records needs a new `ready login`.
 - First-time auth happens through `ready login [mcp:]<server>` (browser);
   `--status` checks, `--forget` deletes.
 - **Runtime recovery without restart**: authorization failures do not tear
   the session down. Running `ready login <server>` while the daemon is up
   is enough — the next tool call or health ping picks up the fresh
-  credential.
+  credential. A server skipped at boot (no credential yet) exposes its tools
+  at the next in-process runtime reload (automatic after the TUI login) or
+  restart. For a
+  non-default agent use the printed command, which carries `--agent-dir`.
 - `grant: client_credentials` is autonomous (no stored credential needed);
   `authorization_code` requires a once-per-credential login.
+- **Credentials outlive the server section** (`mcp:<server-key>` in the
+  agent's Secret store): removing `mcp_servers.<key>` does NOT delete its
+  credential — the entry becomes orphaned, still visible in `ready
+  secrets list` under CREDENTIALS (but not in `ready login --status`,
+  which only lists targets present in the elected config). Re-adding a
+  section with the SAME key reuses the stored credential AND the client
+  registration — no new OAuth is asked, and an expired-but-refreshable
+  token refreshes at the first tool call or health ping. `ready login
+  --forget mcp:<key>` requires the target to exist in the elected config, so
+  to scrub an orphan: re-add the section, run the `--forget`, then re-remove
+  it. A rejected/expired refresh token is the only thing that reopens a
+  browser: the daemon surfaces it as login-required and the next `ready
+  login <server>` (with the section present) fixes it.
+- **No concurrent removal of the credential**: the config-manager only ever
+  writes config.yaml, never the Secret store, so a save cannot delete a
+  credential in the same edit — removing a section and scrapping its
+  credential are always two separate steps. The section's per-profile
+  tool gates need no separate cleanup: they live inside the section and
+  disappear with it.
+- **First OAuth-capable component**: when this is the first `oauth:` block
+  (or the first OAuth-capable twin/provider component) entering the
+  configuration, also stage the top-level `oauth:` section in the same
+  diff:
+
+  ```yaml
+  oauth:
+    redirect_port: 7601   # fixed loopback callback port for `ready login`;
+                          # frozen into the persisted client registration,
+                          # so keep it stable across logins (adjacent to
+                          # zmqcli's 7600)
+  ```
+
+  Requesting it explicitly keeps the operator aware of the port before
+  their first browser login; later servers share the section.
 
 ## The digital twin (home_assistant:)
 
@@ -72,7 +158,7 @@ home_assistant:
   enabled: true
   websocket:
     url: ws://homeassistant.local:8123/api/websocket
-    token: "<long-lived token>"     # or token_file
+    token: !secret home_assistant_token   # or !secret_file /abs/path
   stale_threshold_states: 60s       # soft-stale marker
   hard_stale_threshold: 300s        # refuse-to-serve gate (reads AND writes)
   outstanding_pings_threshold: 2    # unacked pings before force-reconnect
@@ -81,6 +167,14 @@ home_assistant:
     max_targets: 20                 # broader selectors are refused
     # domains: [light, cover]       # absent = everything except siren
 ```
+
+Store only the raw long-lived token, without a `Bearer ` prefix or quotes
+(`ready secrets set home_assistant_token` takes it from a hidden prompt; the
+value is stored exactly as entered, so a stray space or newline would be sent to
+HA as part of the token and cause `auth_invalid`). An external
+`!secret_file` has one trailing newline removed. After correcting the secret,
+restart `ready serve`: invalid authentication stops the twin's reconnect loop
+for that process.
 
 - Reads (`ha_state_query`): entities/areas filtered, `group_by: area`
   supported; every response carries freshness signals — `twin_connected`,
@@ -105,10 +199,52 @@ home_assistant:
   `session not ready`, `stale`) and is told to use another tool from its
   catalog or report the action as unavailable — never to blind-retry.
 
+## When enabling the twin: ask about tool access per profile
+
+Treat enabling `home_assistant.enabled` and choosing its tool permissions
+as one configuration discussion. Explain that `ha_state_query` reads home
+state and `ha_command` controls devices with effect verification; a working
+WebSocket connection alone does not make either tool available to a profile.
+
+Inspect the selected agent's configuration to identify the active profile
+and names declared by channels, top-level `profiles`, `builtin_tools`, MCP
+servers and `home_assistant`. Discuss `default` and `admin`, plus any other
+available or intended profiles such as `edit`; do not assume an `admin`
+name automatically inherits access from another owner.
+
+Ask one profile at a time whether the user wants no twin tools, read-only
+access (`ha_state_query`), or reads and device control (`ha_state_query`
+and `ha_command`). **Recommended starter decision** (apply unless the
+operator chooses otherwise): both `default` and `admin` get reads and
+device control — `allow: ["ha_state_query", "ha_command"]` under each —
+matching the twin block `ready init`-era configs ship with. Explain the
+choice, and wait for the user's answer before staging anything. Preserve existing
+permissions unless the user asks to change them; do not silently grant
+commands or copy one profile's decision to the others.
+
+Stage the agreed wire names under `home_assistant.profiles.<name>.allow`.
+**Allow and deny are mutually exclusive on one profile entry** — declare
+one list only; to disable access entirely use `deny: ["*"]`, and to allow
+everything except a few names use `deny:` alone (an absent allow means
+allow-everything-except-denied). Show the resulting access for every
+discussed profile before saving.
+Top-level `profiles.<name>` and `builtin_tools.profiles.<name>` do not grant
+twin tools; MCP server permissions are also independent.
+
+When adding the first explicit `home_assistant.profiles` block, preserve
+access the user wants to retain: implicit defaults exposing both tools to
+`default` and `edit` disappear once that block exists. A profile omitted from
+the explicit map gets zero twin tools, including `admin`. Explain any resulting
+loss of access in the diff. Follow `assets/config-manager.md` for saving,
+always report whether the changes are saved or awaiting confirmation, and
+remind the user that activation is automatic (in-process runtime reload; no
+`ready serve` restart).
+
 ## MCP profiles (tool gating)
 
-Active profile precedence: `--profile` flag > `READY_MCP_PROFILE` env >
-`mcp_profile:` config > built-in `default`. Switching needs a restart.
+Active profile precedence: `--profile` flag > `READY_DEFAULT_PROFILE` env >
+`default_profile:` config > built-in `default`. A flag/env override needs a
+restart to change; a saved `default_profile` applies on the in-process reload.
 
 Ownership, not one global list: each owner declares its own gate against
 **wire names** (unprefixed):
@@ -120,8 +256,35 @@ Ownership, not one global list: each owner declares its own gate against
   (`wait`, `skills-load`, `skills-unload`, `skills-read-asset`,
   `skills-list-assets`)
 
-Rules: `*` is the only wildcard (it crosses `/`), deny wins over allow,
-empty allow = allow-everything. Fail-closed everywhere: an owner that does
+### Adding an owner: run the per-profile interview
+
+Every time an MCP server is added — and whenever any other `profiles`
+owner is touched (twin, `builtin_tools`) — ask, for EVERY profile already
+defined in the configuration (`default`, `admin`, …), one profile at a
+time, which of that owner's tools the profile may use (`allow:`) and
+which it must never see (`deny:`). Offer a recommended starter access per
+profile (think of who uses that channel: an admin chat may need write
+tools; a wall-panel Telegram chat may need nothing) and stage the agreed
+gate together with the server block in the same diff. An owner that does
+not declare the active profile contributes zero tools (fail-closed), so a
+server added without this interview silently exposes nothing.
+
+### Pattern syntax (as implemented — glob, NOT regex)
+
+Patterns live in code as `matchGlob` (`internal/profile/profile.go`) and
+are deliberately glob-style, not regular expressions:
+
+- `*` is the ONLY metacharacter: it matches any (possibly empty) sequence
+  of characters INCLUDING `/` — e.g. `light/*` matches `light/turn_on` and
+  `light/toggle`; `*/turn_on` matches `light/turn_on`.
+- There is no `?`, no `[...]`, no alternation, no anchoring: every other
+  character must match literally. `light/turn_on?` matches only a tool
+  literally named `light/turn_on?`.
+- Matching is case-sensitive and against the owner's UNPREFIXED wire name
+  (`light/turn_on`, never `home_assistant__light/turn_on`), so patterns
+  stay portable across `tool_prefix` changes.
+
+Fail-closed everywhere: an owner that does
 not declare the active profile contributes zero tools plus a boot WARN —
 except that `builtin_tools` and the twin have built-in defaults applying
 when their **entire `profiles` block is absent** (MCP servers have no such

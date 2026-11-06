@@ -65,6 +65,19 @@ var insertTextTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"insertedAtLine": {"type": "integer"},
+	"insertedLineCount": {"type": "integer"},
+	"textAboveMatchedAtLine": {"type": "integer"},
+	"textBelowMatchedAtLine": {"type": "integer"}
+},
+"required": ["insertedAtLine", "insertedLineCount"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: insertTextFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

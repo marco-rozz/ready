@@ -60,6 +60,65 @@ var fileHistoryTool = spec.Tool{
 "required": ["repoPath", "path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"path": {"type": "string"},
+	"revision": {"type": "string"},
+	"maxCommits": {"type": "integer"},
+	"maxWalk": {"type": "integer"},
+	"firstParent": {"type": "boolean"},
+	"commits": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"commit": {
+					"type": "object",
+					"properties": {
+						"hash": {"type": "string"},
+						"shortHash": {"type": "string"},
+						"authorName": {"type": "string"},
+						"authorEmail": {"type": "string"},
+						"authorWhen": {"type": "string", "format": "date-time"},
+						"subject": {"type": "string"},
+						"body": {"type": "string"}
+					},
+					"required": ["hash", "shortHash", "authorName", "authorEmail", "authorWhen", "subject"],
+					"additionalProperties": false
+				},
+				"path": {"type": "string"},
+				"status": {"type": "string"}
+			},
+			"required": ["commit", "path", "status"],
+			"additionalProperties": false
+		}
+	},
+	"count": {"type": "integer"},
+	"walked": {"type": "integer"},
+	"truncated": {"type": "boolean"},
+	"renameFollowing": {"type": "boolean"},
+	"note": {"type": "string"}
+},
+"required": [
+	"repoPath",
+	"path",
+	"revision",
+	"maxCommits",
+	"maxWalk",
+	"firstParent",
+	"commits",
+	"count",
+	"walked",
+	"truncated",
+	"renameFollowing"
+],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: fileHistoryFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

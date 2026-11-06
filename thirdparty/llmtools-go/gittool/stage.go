@@ -40,6 +40,22 @@ var addTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"all": {"type": "boolean"},
+	"paths": {
+		"type": ["array", "null"],
+		"items": {"type": "string"}
+	}
+},
+"required": ["repoPath", "all"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: addFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

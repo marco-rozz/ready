@@ -128,6 +128,117 @@ var applyUnifiedDiffTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"ok": {"type": "boolean"},
+	"dryRun": {"type": "boolean"},
+	"status": {
+		"type": "string",
+		"enum": ["applicable", "applied", "already_applied", "needs_info", "conflict", "error"]
+	},
+	"message": {"type": "string"},
+	"diagnostics": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"level": {
+					"type": "string",
+					"enum": ["info", "warning", "error"]
+				},
+				"code": {"type": "string"},
+				"message": {"type": "string"}
+			},
+			"required": ["level", "message"],
+			"additionalProperties": false
+		}
+	},
+	"summary": {
+		"type": "object",
+		"properties": {
+			"files": {"type": "integer"},
+			"hunks": {"type": "integer"},
+			"appliedHunks": {"type": "integer"},
+			"alreadyAppliedHunks": {"type": "integer"},
+			"addedLines": {"type": "integer"},
+			"deletedLines": {"type": "integer"}
+		},
+		"required": ["files", "hunks", "appliedHunks", "alreadyAppliedHunks", "addedLines", "deletedLines"],
+		"additionalProperties": false
+	},
+	"fileTargets": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"fileKey": {"type": "string"},
+				"oldPath": {"type": "string"},
+				"newPath": {"type": "string"},
+				"targetPath": {"type": "string"}
+			},
+			"required": ["targetPath"],
+			"additionalProperties": false
+		}
+	},
+	"files": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"ok": {"type": "boolean"},
+				"fileKey": {"type": "string"},
+				"oldPath": {"type": "string"},
+				"newPath": {"type": "string"},
+				"targetPath": {"type": "string"},
+				"resolvedPath": {"type": "string"},
+				"status": {
+					"type": "string",
+					"enum": ["applicable", "applied", "already_applied", "needs_info", "conflict", "error"]
+				},
+				"message": {"type": "string"},
+				"candidatePaths": {
+					"type": ["array", "null"],
+					"items": {"type": "string"}
+				},
+				"diagnostics": {
+					"type": ["array", "null"],
+					"items": {
+						"type": "object",
+						"properties": {
+							"level": {"type": "string", "enum": ["info", "warning", "error"]},
+							"code": {"type": "string"},
+							"message": {"type": "string"}
+						},
+						"required": ["level", "message"],
+						"additionalProperties": false
+					}
+				},
+				"hunks": {"type": "integer"},
+				"appliedHunks": {"type": "integer"},
+				"alreadyAppliedHunks": {"type": "integer"},
+				"addedLines": {"type": "integer"},
+				"deletedLines": {"type": "integer"}
+			},
+			"required": [
+				"ok",
+				"fileKey",
+				"status",
+				"hunks",
+				"appliedHunks",
+				"alreadyAppliedHunks",
+				"addedLines",
+				"deletedLines"
+			],
+			"additionalProperties": false
+		}
+	}
+},
+"required": ["ok", "dryRun", "status", "summary"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: applyUnifiedDiffFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

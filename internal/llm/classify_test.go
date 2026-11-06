@@ -193,4 +193,7 @@ func TestIsRequestShapeError(t *testing.T) {
 	if IsRequestShapeError(nil) {
 		t.Error("expected nil error to not match")
 	}
+	if IsRequestShapeError(errors.New("upstream returned 4000 tokens of context")) {
+		t.Error("expected a longer number containing 400 to not match")
+	}
 }

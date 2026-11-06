@@ -30,9 +30,9 @@ func TestBuildHandler_NoUsableCredentialYieldsLoginRequired(t *testing.T) {
 }
 
 func TestBuildHandler_UsableCredentialYieldsAuthorizationCodeHandler(t *testing.T) {
-	store, err := NewFileStore(context.Background(), t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := NewCredential(testServerKey)
@@ -112,9 +112,9 @@ func TestBuildHandler_UnresolvedGrantFails(t *testing.T) {
 }
 
 func TestBuildHandler_UsableCredentialRequiresRegisteredClient(t *testing.T) {
-	store, err := NewFileStore(context.Background(), t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := NewCredential(testServerKey)

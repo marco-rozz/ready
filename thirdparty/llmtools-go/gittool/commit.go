@@ -52,6 +52,31 @@ var commitTool = spec.Tool{
 "required": ["repoPath", "message"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"hash": {"type": "string"},
+	"shortHash": {"type": "string"},
+	"authorName": {"type": "string"},
+	"authorEmail": {"type": "string"},
+	"when": {"type": "string", "format": "date-time"},
+	"all": {"type": "boolean"}
+},
+"required": [
+	"repoPath",
+	"hash",
+	"shortHash",
+	"authorName",
+	"authorEmail",
+	"when",
+	"all"
+],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: commitFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

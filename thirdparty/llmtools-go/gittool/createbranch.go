@@ -47,6 +47,22 @@ var createBranchTool = spec.Tool{
 "required": ["repoPath", "name"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"name": {"type": "string"},
+	"startPoint": {"type": "string"},
+	"hash": {"type": "string"},
+	"checkedOut": {"type": "boolean"},
+	"currentHead": {"type": "string"}
+},
+"required": ["repoPath", "name", "startPoint", "hash", "checkedOut"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: createBranchFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

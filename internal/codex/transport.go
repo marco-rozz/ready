@@ -51,6 +51,8 @@ func (t *authTransport) roundTrip(req *http.Request, replay bool) (*http.Respons
 		return nil, fmt.Errorf("codex transport request failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusUnauthorized || replay {
+		wrapIfSSE(resp)
+
 		return resp, nil
 	}
 	_ = resp.Body.Close()

@@ -188,6 +188,35 @@ func TestVerifyAuthToken_SwappedSecretFails(t *testing.T) {
 	}
 }
 
+func TestReplaceSecretAffectsNewChallengesAndKeepsExistingChallengeStable(t *testing.T) {
+	store, _ := newTestStore(t, "old", time.Minute)
+	identity := []byte("peer")
+	nonce, err := store.IssueChallenge(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldMAC := hmac.New(sha256.New, []byte("old"))
+	nonceBytes, _ := hex.DecodeString(nonce)
+	_, _ = oldMAC.Write(nonceBytes)
+	oldClaim := hex.EncodeToString(oldMAC.Sum(nil))
+	store.ReplaceSecret("new")
+	verifyErr := store.VerifyAuthToken(identity, oldClaim)
+	if verifyErr != nil {
+		t.Fatalf("existing challenge must retain old secret: %v", verifyErr)
+	}
+
+	nonce, err = store.IssueChallenge(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newMAC := hmac.New(sha256.New, []byte("new"))
+	nonceBytes, _ = hex.DecodeString(nonce)
+	_, _ = newMAC.Write(nonceBytes)
+	if err := store.VerifyAuthToken(identity, hex.EncodeToString(newMAC.Sum(nil))); err != nil {
+		t.Fatalf("new challenge must use replacement secret: %v", err)
+	}
+}
+
 // TestPendingChallengesOverflow ensures the cap is enforced and a WARN log is
 // emitted on eviction.
 func TestPendingChallengesOverflow(t *testing.T) {

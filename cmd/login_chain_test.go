@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-// The chain: without a --config flag, login elects the config serve would
-// (local ./.ready/config.yaml preferred over the global candidate) and
-// announces it as its first output line — the login↔daemon config mismatch
-// is visible at enumeration.
-func TestLogin_ElectsChainWithoutConfig(t *testing.T) {
+// The selection: without --agent-dir, login selects the same directory serve
+// would (unconditionally ~/.ready, independent of cwd) and announces it as
+// its first output line — the login↔daemon directory mismatch is visible at
+// enumeration.
+func TestLogin_SelectsDefaultAgentDirWithoutFlag(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -21,9 +21,19 @@ func TestLogin_ElectsChainWithoutConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A cwd-local candidate must be ignored entirely: selection is
+	// cwd-independent, so a stray ./.ready stays unread.
 	localPath := filepath.Join(wd, ".ready", "config.yaml")
-	writeFile(t, localPath, minimalOAuthConfigYAML(t.TempDir()))
+	writeFile(t, localPath, minimalOAuthConfigYAML())
 	t.Cleanup(func() { osRemoveAll(t, filepath.Join(wd, ".ready")) })
+
+	defaultDir := filepath.Join(home, ".ready")
+	defaultPath := filepath.Join(defaultDir, "config.yaml")
+	writeFile(t, defaultPath, minimalOAuthConfigYAML())
+	if physical, evalErr := filepath.EvalSymlinks(defaultDir); evalErr == nil {
+		defaultDir = filepath.Clean(physical)
+	}
+	t.Cleanup(func() { osRemoveAll(t, defaultDir) })
 
 	var stdout, stderr bytes.Buffer
 	cmd := newTestLoginCommand(&stdout, &stderr)
@@ -31,34 +41,26 @@ func TestLogin_ElectsChainWithoutConfig(t *testing.T) {
 	_ = cmd.Run(context.Background(), []string{loginLabel, flagStatus, unknownTargetForChain})
 
 	firstLine, _, _ := strings.Cut(stdout.String(), "\n")
-	// Elect returns the local candidate in its literal cwd-relative form.
-	localForm := "./" + configLocalRel
-	if firstLine != "using config "+localForm {
-		t.Errorf("first line = %q, want %q (the local candidate of the chain)", firstLine, "using config "+localForm)
+	if firstLine != "using agent directory "+defaultDir {
+		t.Errorf("first line = %q, want %q (the default agent directory)", firstLine, "using agent directory "+defaultDir)
 	}
 }
 
-// A target missing from the elected config fails naming the elected config
-// path — the wrong-chain election is diagnosable from the message alone.
-func TestLogin_UnknownTargetNamesElectedConfig(t *testing.T) {
-	configPath := writeTempConfig(t, minimalOAuthConfigYAML(t.TempDir()))
+// A target missing from the selected config fails naming the selected agent
+// directory — the wrong-directory selection is diagnosable from the message
+// alone.
+func TestLogin_UnknownTargetNamesSelectedAgentDir(t *testing.T) {
+	agentDir := writeTempAgentDir(t, minimalOAuthConfigYAML())
 
 	var stdout, stderr bytes.Buffer
 	cmd := newTestLoginCommand(&stdout, &stderr)
 
-	_ = cmd.Run(context.Background(), []string{loginLabel, flagConfig, configPath, flagStatus, unknownTargetForChain})
+	_ = cmd.Run(context.Background(), []string{loginLabel, flagAgentDir, agentDir, flagStatus, unknownTargetForChain})
 
-	if !strings.Contains(stderr.String(), "elected config") {
-		t.Errorf("stderr = %q, want the elected config path named", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), configPath) {
-		t.Errorf("stderr = %q, want %q in the failure", stderr.String(), configPath)
+	if !strings.Contains(stderr.String(), "unknown") {
+		t.Errorf("stderr = %q, want the unknown-target failure", stderr.String())
 	}
 }
-
-// configLocalRel mirrors config.LocalConfigRel (dot-prefixed literal the
-// chain returns for a local election).
-const configLocalRel = ".ready/config.yaml"
 
 // writeFile is shared with the chain tests; osRemoveAll keeps the t.Cleanup
 // calls readable.
@@ -70,7 +72,7 @@ func osRemoveAll(t *testing.T, dir string) {
 	}
 }
 
-// writeFile creates the file (with parents) for the chain election tests.
+// writeFile creates the file (with parents) for the exit tests.
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 

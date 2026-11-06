@@ -57,6 +57,24 @@ var runScriptToolSpec = spec.Tool{
 "required": ["path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"path": {"type": "string"},
+	"exitCode": {"type": "integer"},
+	"stdout": {"type": "string"},
+	"stderr": {"type": "string"},
+	"timedOut": {"type": "boolean"},
+	"durationMS": {"type": "integer"},
+	"stdoutTruncated": {"type": "boolean"},
+	"stderrTruncated": {"type": "boolean"}
+},
+"required": ["path", "exitCode"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: runScriptFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -1,8 +1,47 @@
-config_version: 1 # Configuration schema, independent of the READY release version.
+config_version: 2 # Configuration schema, independent of the READY release version.
+
+# ─────────────────────────────────────────────────────────────────────
+# Agent identity and secrets.
+#
+# Recognized sensitive fields hold only references. Keep values out of
+# comments, URLs and other text too: arbitrary text is not scrubbed. Every sensitive
+# field (provider api_key, the Telegram token, the ZMQ shared secret, the Home
+# Assistant token, an MCP oauth client_secret and every MCP header value)
+# takes one of two forms, and a literal is a configuration error:
+#
+#   api_key: !secret openai_api_key      # a name in the agent's encrypted store
+#   api_key: !secret_file /run/key       # an absolute path outside the agent dir
+#
+# Values are entered in the admin chat's secret editor (it opens by itself) or
+# with `ready secrets set <name>`; `ready secrets list` shows what is set and
+# what is pending. Names are 1-64 characters of [a-z0-9_]. The store is
+# <agent-dir>/secrets.age, encrypted with the key in <agent-dir>/secrets.key.
+#
+# agent.id is a required, immutable UUID (it also names the vault entry when
+# the key lives in the OS vault); `ready init` writes it. agent.name is a free
+# label shown in the chat UI (the host name is used when absent).
+agent:
+  id: 00000000-0000-7000-8000-000000000000   # `ready init` generates a real one
+  name: "example host"
+
+# Where the Store key lives (all optional; default agent_dir):
+#   agent_dir — <agent-dir>/secrets.key. The encryption protects a store that
+#               travels WITHOUT its key; it does not protect against a process
+#               running as you.
+#   os_vault  — the macOS Keychain or Windows Credential Manager (not available
+#               on Linux; unattended service boots cannot reach a user vault).
+#   file      — an absolute file READY only reads, e.g. a systemd credential:
+#                 LoadCredentialEncrypted=ready-store-key:/etc/ready/store-key.cred
+#               with store_key_file: /run/credentials/ready.service/ready-store-key
+# `ready secrets move-key --to …` changes it safely; `export-key`/`import-key`
+# carry it between machines.
+# secrets:
+#   store_key: agent_dir
+#   # store_key_file: /run/credentials/ready.service/ready-store-key   (only with `file`)
 
 # ─────────────────────────────────────────────────────────────────────
 # LLM provider registry: named provider connections + model references,
-# with optional boot-time failover.
+# with optional runtime failover and background recovery.
 #
 # Registry shape (one credential/endpoint per provider connection;
 # a model is one <provider>::<model> reference):
@@ -27,7 +66,8 @@ config_version: 1 # Configuration schema, independent of the READY release versi
 #                         x-opencode-session (a process-wide UUID, one "conversation"
 #                         per daemon run) and a non-generic User-Agent — no proxy
 #                         needed. Plain Zen ignores them.
-#                         - chat_completions: OpenAI Chat Completions (default for opencode)
+#                         - chat_completions: OpenAI Chat Completions (OpenAI-format request;
+#                           there is no default api — set it explicitly)
 #                         - anthropic: Anthropic Messages (supported via opencode)
 #                         - google: Google Gemini native format (generateContent),
 #                           supported via opencode for the Gemini model family
@@ -39,12 +79,15 @@ config_version: 1 # Configuration schema, independent of the READY release versi
 #                           construction-path notes in the repo documentation.
 #                           Observable behaviour (tool calling, formatter pipeline,
 #                           session history) is equivalent to every other protocol.
-#   api_key             — inline credential (Bearer), applies to every model on this provider
-#   api_key_file        — path to file containing the credential (read & trimmed at boot).
-#                         Mutually exclusive with api_key. Required for
-#                         openrouter/opencode; forbidden for openai-codex.
+#   api_key             — reference to the credential (Bearer), applies to every model on this
+#                         provider: `!secret <name>` or `!secret_file /abs/path`. Required for
+#                         openrouter/opencode; forbidden for openai-codex (use `ready login`).
 #   base_url            — override the provider's default endpoint
 #                         - ollama default:     http://localhost:11434
+#                           Direct Ollama Cloud: https://ollama.com with an API key.
+#                           Use the host without /api; the client appends it.
+#                           ready init asks local/cloud and saves the cloud key
+#                           in a private file without an added newline.
 #                         - openrouter default: https://openrouter.ai/api/v1
 #                         - opencode default:   https://opencode.ai/zen/v1
 #                         - openai-codex default: https://chatgpt.com/backend-api
@@ -162,6 +205,10 @@ llm:
   # component (with its own base URL and stream-safe adapter).
   # One endpoint used through multiple wire APIs needs MULTIPLE named
   # provider instances (same base_url / api_key, different api).
+  # The protocol can also differ per MODEL on the same gateway: a model is
+  # served only on the api(s) its gateway exposes. Choose it per model (never
+  # from the model name) and confirm with the boot log (`verified: true`).
+  # See resources/skills/ready-guide/assets/config-llm.md, "Protocol per model".
   providers:
     ollama-gemma:
       provider: "ollama"
@@ -188,30 +235,30 @@ llm:
     # openrouter-gemma:
     #   provider: "openrouter"
     #   api: "chat_completions"
-    #   api_key: "sk-or-v1-..."
+    #   api_key: !secret openrouter_gemma_api_key
     # opencode-free:
     #   provider: "opencode"
     #   api: "chat_completions"
-    #   api_key: "oc-..."
+    #   api_key: !secret opencode_free_api_key
     # opencode-claude:
     #   provider: "opencode"
     #   api: "anthropic"
-    #   api_key_file: "/etc/ready/opencode.token"    # read from file at boot
+    #   api_key: !secret_file /etc/ready/opencode.token    # external file, read at boot
     # opencode-gemini:
     #   provider: "opencode"
     #   api: "google"                              # Google native generateContent format
-    #   api_key: "oc-..."
+    #   api_key: !secret opencode_gemini_api_key
     #   base_url: "https://opencode.ai/zen"        # gateway ROOT (SDK adds v1beta/...)
     #                                              # — NOT .../zen/v1 used elsewhere
     # opencode-gpt:
     #   provider: "opencode"
     #   api: "responses"                            # OpenAI Responses API
-    #   api_key: "oc-..."                          # same Bearer convention as the other opencode protocols
+    #   api_key: !secret opencode_gpt_api_key      # same Bearer convention as the other opencode protocols
     #   # base_url defaults to https://opencode.ai/zen/v1, same as chat_completions/anthropic
     # ChatGPT subscription examples (experimental). Authenticate each named
     # instance independently; never place a Platform API key here:
-    #   ready login llm:codex-work --config config.yaml
-    #   ready login llm:codex-personal --config config.yaml --device-code
+    #   ready login llm:codex-work --agent-dir /path/to/agent
+    #   ready login llm:codex-personal --agent-dir /path/to/agent --device-code
     # codex-work:
     #   provider: "openai-codex"
     #   api: "responses"
@@ -233,7 +280,7 @@ channels:
   # chat` subcommand). Either `channels.cli.enabled` OR `channels.zmqcli.enabled`
   # may be true at a time, not both — they share the logical channel name "cli".
   # DEFAULT BEHAVIOUR: as soon as a shared secret is configured below
-  # (auth_token or auth_token_file) and neither channel sets `enabled`
+  # (an `auth_token` reference) and neither channel sets `enabled`
   # explicitly, zmqcli turns on by default and the stdin cli stays off.
   # An explicit `enabled: false` always wins; a config with no ZMQ secret
   # and no enabled key leaves both CLI channels off (`ready serve` then needs
@@ -248,19 +295,16 @@ channels:
     # forwarding must allow the chosen port, and the HMAC secret below is
     # what protects the endpoint — never expose it without one.
     bind: tcp://127.0.0.1:7600
-    # Shared secret used to derive HMAC-SHA256 over the per-connection nonce.
-    # REQUIRED to use zmqcli (set exactly one of the two keys): without a secret
-    # and without an explicit `enabled`, zmqcli stays off. An explicit
-    # `enabled: true` with no secret is rejected at boot. Generate with:
-    # openssl rand -hex 32
-    # PREFERRED for security: comment the auth_token line and use
-    # auth_token_file instead, so the secret never lives in this YAML (which
-    # gets backed up and copied around). The file's trimmed content is the
-    # secret; create it with e.g.
-    #   openssl rand -hex 32 > /etc/ready/zmqcli.token && chmod 400 /etc/ready/zmqcli.token
-    # Exactly one of auth_token / auth_token_file must be set when enabled.
-    # auth_token: "<output of openssl rand -hex 32>"
-    # auth_token_file: /etc/ready/zmqcli.token
+    # Shared secret used to derive HMAC-SHA256 over the per-connection nonce,
+    # as a reference (never a literal). The daemon GENERATES the value (64 hex
+    # characters) the first time it boots with the reference still empty and
+    # logs how to read it: `ready chat` on the same machine reads it by itself;
+    # for a chat client on another host copy it with
+    #   ready secrets reveal zmqcli_auth_token --to-file <path>
+    # A value shorter than 32 characters is refused. Rotating it
+    # (`ready secrets set zmqcli_auth_token`) is adopted by the next handshake.
+    # An explicit `enabled: true` with no reference is rejected at boot.
+    # auth_token: !secret zmqcli_auth_token
     # Idle-Connection watchdog (not the per-reply timeout — that's the chat
     # client's --reply-timeout). Only reaps a Connection whose client crashed
     # without sending session_end. Closing a Connection never ends the
@@ -286,8 +330,15 @@ channels:
     # clients) are exempt and remain covered by connection_idle_timeout only.
     # Default 45s.
     # liveness_timeout: 45s
+    # `ready init` writes these two as the starter defaults: the
+    # humanizer-formatter skill shapes the answers for a terminal audience
+    # (inline reinforcement; NEVER the plain `humanizer` editor skill, which
+    # as a formatter makes the model emit its draft + anti-AI pass in the
+    # reply) and home-topology is preloaded into every session on
+    # this channel. A skill must NOT serve as both formatter_skill and
+    # bootstrap (boot error).
     # bootstrap: ["home-topology"]
-    # formatter_skill: ""
+    # formatter_skill: humanizer-formatter
   serial:
     enabled: false
     port: /dev/tty.usbserial
@@ -299,11 +350,13 @@ channels:
     # formatter_skill: petscii-formatter   # must NOT be in bootstrap if set
   telegram:
     enabled: false
-    token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+    token: !secret telegram_token
     allow_from:
       - "123456789"
-    bootstrap: ["home-topology"]
-    formatter_skill: telegram-formatter   # post-step LLM reformat (must NOT be in bootstrap)
+    # Recommended starter defaults for this channel (also applied by the
+    # ready-guide when the agent configures Telegram in chat):
+    bootstrap: ["home-topology", "humanizer-formatter"]
+    formatter_skill: telegram-formatter   # channel formatter (must NOT also be in bootstrap)
     # formatter_post_step: false          # default. Enables inline reinforcement:
     #   1) SKILL.md is wrapped in <formatter_skill>...</formatter_skill> at prompt
     #      position 1 (not put in the bootstrap shell).
@@ -331,6 +384,9 @@ mcp_servers:
   # "home_assistant__light/turn_on", "home_assistant__climate/set_temperature", etc.
   # The wire name sent to HA remains unchanged ("light/turn_on").
   home_assistant:
+    # The URL is a secret-capable plain field: a literal is kept in clear,
+    # `url: !secret <name>` resolves from the Secret store at boot (dynamic
+    # per instance — for deployments that embed a token in the query string).
     url: http://homeassistant.local:9583/private_XXXXXXX
     #url: http://192.168.100.10:9583/private_XXXXXXX
     transport: streamable_http
@@ -361,7 +417,7 @@ mcp_servers:
   #   url: http://homeassistant.local:8123/api/mcp
   #   transport: streamable_http
   #   headers:
-  #     Authorization: "Bearer <token>"
+  #     Authorization: !secret mcp_home_assistant_authorization
   #   timeout: 30s
   #   reconnect:
   #     max_retries: 0
@@ -382,7 +438,7 @@ mcp_servers:
   # media_player:
   #   url: http://media.local:8000/mcp
   #   headers:
-  #     Authorization: "Bearer <token2>"
+  #     Authorization: !secret mcp_second_server_authorization
   #   # tool_prefix: "media"    # default: use "media_player" (the map key)
   #   reconnect:
   #     max_retries: 0
@@ -402,8 +458,8 @@ mcp_servers:
   # `scopes` field: scopes are determined by the authorization server, not by
   # configuration.
   #
-  # Authenticate once out of band with `ready login example_mcp`
-  # (the only place a browser is opened) before starting `ready serve`; a
+  # Authenticate out of band with `ready login example_mcp`, or use the
+  # loopback admin TUI post-save OAuth flow; a
   # server with no usable credential at boot is skipped with an actionable
   # WARN naming the exact command, and a daemon already running recovers a
   # credential written after boot on its own — see the OAuth section
@@ -421,9 +477,8 @@ mcp_servers:
   #                                 # REQUIRED for client_credentials. Omit for a server that
   #                                 # supports Dynamic Client Registration — `ready login`
   #                                 # registers once and persists the result.
-  #     # client_secret:            # REQUIRED for client_credentials. Mutually exclusive with
-  #                                 # client_secret_file.
-  #     # client_secret_file: /etc/ready/example_mcp.secret
+  #     # client_secret: !secret mcp_example_client_secret   # REQUIRED for client_credentials
+  #     #                          # (or `!secret_file /abs/path`)
   #   reconnect:
   #     max_retries: 0
   #     initial_backoff: 1s
@@ -440,17 +495,10 @@ mcp_servers:
 # is available for headless Codex providers.
 # Omit entirely to keep the defaults shown here.
 # oauth:
-#   token_store: file        # the only accepted value today; "keychain" is
-#                             # rejected explicitly rather than silently
-#                             # falling back to disk (an OS-keychain backend
-#                             # is deferred to a future change)
-#   path: oauth/             # default <Install home>/oauth/ (a credential is
-#                             # per-user identity, not deployment data — the
-#                             # one deliberate carve-out of the runtime-home
-#                             # rule). An explicit relative oauth.path
-#                             # resolves against the runtime home, an
-#                             # absolute one as-is; one 0600 JSON record per
-#                             # server, in a 0700 dir.
+#   # NOTE: oauth.token_store is a REMOVED key — OAuth Credentials live in the
+#   # agent's encrypted Secret store (secrets.age); `ready login` writes them.
+#   # NOTE: oauth.path is a REMOVED key (rejected at load). <agent-dir>/oauth/
+#   # only holds the per-target coordination locks (0700, private to the agent).
 #   redirect_port: 7601      # fixed loopback callback port for `ready login`;
 #                             # frozen into the persisted client registration,
 #                             # so keep it stable across logins (adjacent to
@@ -475,9 +523,7 @@ mcp_servers:
 #   enabled: false
 #   websocket:
 #     url: ws://homeassistant.local:8123/api/websocket
-#     # Exactly one of token / token_file must be set.
-#     token: "<long-lived-access-token>"         # never commit real tokens
-#     # token_file: /etc/ready/ha_token           # alternative: token in a file
+#     token: !secret home_assistant_token         # or `!secret_file /abs/path`
 #   monitoring:
 #     sync_timeout: 15s       # how long to wait at boot for initial sync
 #     ping_interval: 30s      # WS keep-alive interval
@@ -517,7 +563,7 @@ mcp_servers:
 
 # MCP profiles select, at boot, which tools are exposed to the agent and which
 # skills are injected into the system prompt. The active profile is resolved
-# with precedence: --profile flag > READY_MCP_PROFILE env > mcp_profile
+# with precedence: --profile flag > READY_DEFAULT_PROFILE env > default_profile
 # (below) > the built-in "default". Switching profiles requires a daemon
 # restart.
 #
@@ -549,7 +595,7 @@ mcp_servers:
 # does today. The flag never changes gating itself: which tools run, deny
 # precedence, wire-name matching, and fail-closed semantics are untouched.
 #
-# mcp_profile: default
+# default_profile: default
 #
 # profiles:
 #   default:
@@ -560,38 +606,53 @@ mcp_servers:
 #     disclose_denied_tools: true
 
 # builtin_tools gates READY's own internal tools (wait,
-# skills-load/unload, read-skill-asset, list-skill-assets, and future
-# internal packages such as the alert engine) — same shape and fail-closed
-# semantics as any other policy owner. If omitted entirely, a built-in
-# default allows everything under both default and edit (preserving
-# pre-refactor unconditional exposure).
+# skills-load/unload, read-skill-asset, list-skill-assets, config-manager) —
+# same shape and fail-closed semantics as any other policy owner. If omitted
+# entirely, a code-owned default DENIES config-manager under both default and
+# edit while allowing the other internal tools: editing the elected
+# configuration is an explicit opt-in, never an implicit one. Explicit owner
+# declarations keep the established semantics (allow and deny are mutually
+# exclusive on one entry: an entry is an allow-list or a deny-list — an
+# absent allow with a deny list means all owner tools except the denied
+# ones; missing active profile = zero tools + WARN); profiles never
+# inherit another profile's owner rules, so an admin profile must declare its
+# own builtin policy.
 # builtin_tools:
 #   profiles:
 #     default:
-#       allow: ["*"]
+#       deny: ["config-manager"]
 #     edit:
+#       deny: ["config-manager"]
+#     # admin deliberately exposes configuration editing; every other owner
+#     # needs its own admin block or stays fail-closed:
+#     admin:
 #       allow: ["*"]
 
-# A run always uses its own writable runtime skill copy at <runtime home>/
-# skills/ (the runtime home is the directory holding the elected config —
-# see the config resolution chain section below). Relative paths resolve
-# against the runtime home, absolute ones as-is.
+# A run always uses its own writable runtime skill copy at <agent-dir>/
+# skills/ (the agent directory is the selected --agent-dir, default ~/.ready).
+# Relative paths resolve against the agent directory, absolute ones as-is;
+# every configured writable destination must stay inside the agent directory
+# after link resolution.
 skills:
-  path: skills/             # default: <runtime home>/skills/
+  path: skills/             # default: <agent-dir>/skills/
   hot_reload: true
-  # sync: auto               # skill library sync policy (default auto):
+  # sync: auto               # init prepares the first copy; serve applies later updates.
+                              # Skill library sync policy (default auto):
                               #   auto   — apply shipped fixes to untouched files
                               #   notify — only report pending updates
                               #   off    — skip the sync entirely
                               # Any other value fails boot.
   # library_path:            # the shipped library the runtime copy is synced
-                              # from at boot (one file per file: operator edits
-                              # are never overwritten). Default:
-                              # <Install home>/library/skills/. Absolute paths
-                              # as-is; relative resolved against the runtime
-                              # home. The installer owns the library and
-                              # replaces it on every install; the daemon
-                              # never writes into it.
+                              # from at boot (per file: operator edits are
+                              # never overwritten). Default (program storage):
+                              # ~/.local/share/ready/library/skills on Unix,
+                              # %USERPROFILE%\.local\share\ready\library\skills
+                              # on Windows. Absolute paths as-is; a relative
+                              # override resolves against the agent directory
+                              # (a read-only development source — never an
+                              # agent's runtime copy or the destination). The
+                              # installer owns the library and replaces it on
+                              # every install; the daemon never writes into it.
 
 # ── Conversation Sessions (one append-only JSONL file per Session) ──────────
 # A Conversation address (cli, telegram-<chat_id>) owns one current Session
@@ -610,25 +671,23 @@ skills:
 # Session commands (every channel, never reaching the model, FIFO behind the
 # Turn in flight): /new (start a new Session; "Session already new." when the
 # current one has no Turn) and /compact [instructions] (compact now).
-# ── How READY. finds its config (the resolution chain) ─────────────────────
-# Exactly one config file is elected, in strict order:
-#   1. the explicit --config flag (no fallback — a missing flagged file fails
-#      the run naming that path);
-#   2. ./.ready/config.yaml relative to the working directory;
-#   3. ~/.ready/config.yaml (the Install home) on Linux/macOS,
-#      %USERPROFILE%\.ready\config.yaml on Windows.
-# No settings are merged across sources. The **runtime home** — the directory
-# containing the elected config — is the root of every runtime path:
-# sessions/, skills/, the log segments under logging.file_path (as indicated
-# below), so a deployment-local run keeps its data next to its config and a
-# global-config run lives entirely inside the Install home. `ready serve` and
-# `ready login` both announce the elected config at start.
-# Note: the Install home's oauth/ default above is the exception — it never
-# follows a deployment config (per-user identity stays in the Install home).
+# ── How READY. selects its agent directory ────────────────────────────────
+# serve and every login mode accept --agent-dir <directory> and read exactly
+# <agent-dir>/config.yaml — the sole accepted filename. Without the flag the
+# default is ~/.ready (%USERPROFILE%\.ready on Windows), ALWAYS, independent
+# of the working directory. No cwd discovery, no merging, no fallback: an
+# explicitly selected directory must exist and hold config.yaml, otherwise
+# the run fails naming that path (no auto-initialisation).
+# The agent directory is the root of every runtime path: sessions/, the
+# runtime skills copy, the log segments under logging.file_path, and — fixed
+# with no override — the OAuth credential store at <agent-dir>/oauth.
+# Configured writable paths must stay inside the agent directory after
+# resolving symlinks/junctions; `ready serve` and `ready login` announce the
+# directory at start, and `ready chat` shows it (daemon-reported) at startup.
 
 # ── Conversation Sessions (one append-only JSONL file per Session) ──────────
 sessions:
-  path: sessions/              # default: <runtime home>/sessions/
+  path: sessions/              # default: <agent-dir>/sessions/
   # reset: rule-based Session resets — never decided by a model, never run by
   # a timer. mode: never | daily | idle | daily+idle.
   #   daily: a Session whose last Turn precedes the latest daily_at boundary
@@ -680,6 +739,9 @@ compaction:
   timeout: 180s
 
 logging:
+  # ready init writes level: info, format: json and file_path: logs/ready.log,
+  # with daily/10MB rotation, seven local calendar days and a 100MB total cap.
+  # This reference keeps console output for readability; all values remain editable.
   level: info          # trace | debug | info (default) | warn | error — level of the log file and,
                        # unless console_level is set, of the console (stderr) log.
                        # READY_LOG_LEVEL overrides BOTH sinks (no legacy alias is recognised).
@@ -688,7 +750,8 @@ logging:
                          # records and log-file failure/recovery notices still appear on stderr
   format: console      # console (default, human-readable; colours only when stderr is a terminal) | json
   # file_path: ""      # optional: JSON log file, written as a rotating series of dated SEGMENTS in the
-                       # directory of file_path (created 0700 if missing), never at the literal path:
+                       # directory of file_path (created 0700 if missing; must stay inside the agent
+                       # directory after link resolution), never at the literal path:
                        #   logs/ready.log → ready-2026-09-30.log, ready-2026-09-30.1.log, ...
                        # A directory is accepted too: "logs/" (trailing slash, or an existing
                        # directory) means "logs/ready.log".

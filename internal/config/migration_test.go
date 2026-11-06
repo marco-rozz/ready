@@ -18,6 +18,8 @@ import (
 )
 
 const migrationFixture = `config_version: 1
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: local::test
   providers:
@@ -90,8 +92,8 @@ func TestConfigVersionRejectsInvalidDocuments(t *testing.T) {
 	for _, input := range []string{
 		"llm: {}", "config_version: null", "config_version: '1'", "config_version: 1.1",
 		"config_version: true", "config_version: 0", "config_version: -1",
-		"config_version: 9999999999999999999999999999999999999", "config_version: 1\nconfig_version: 1",
-		"[1, 2]", "config_version: 1\n---\nconfig_version: 1", "config_version: [",
+		"config_version: 9999999999999999999999999999999999999", "config_version: 1\nagent:\n  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001\nconfig_version: 1",
+		"[1, 2]", "config_version: 1\nagent:\n  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001\n---\nconfig_version: 1", "config_version: [",
 	} {
 		t.Run(input, func(t *testing.T) {
 			path := migrationSource(t, input)
@@ -123,7 +125,8 @@ func TestConfigVersionRejectsInvalidDocuments(t *testing.T) {
 }
 
 func TestConfigVersionNoOpIsReadOnly(t *testing.T) {
-	path := migrationSource(t, migrationFixture)
+	current := currentSchemaFixture()
+	path := migrationSource(t, current)
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +143,7 @@ func TestConfigVersionNoOpIsReadOnly(t *testing.T) {
 	}
 	for range 2 {
 		cfg, report, prepErr := r.Prepare(context.Background(), path, nil)
-		if prepErr != nil || cfg.ConfigVersion != 1 || report.Committed {
+		if prepErr != nil || cfg.ConfigVersion != TargetConfigVersion || report.Committed {
 			t.Fatalf("prepare = %v, %+v", prepErr, report)
 		}
 	}
@@ -155,7 +158,7 @@ func TestConfigVersionNoOpIsReadOnly(t *testing.T) {
 	if len(entries) != 1 || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
 		t.Fatal("current-schema read changed filesystem")
 	}
-	if string(sourceBytes(t, path)) != migrationFixture {
+	if string(sourceBytes(t, path)) != current {
 		t.Fatal("rewritten current config")
 	}
 }
@@ -176,7 +179,7 @@ func TestMigrationRegistryRequiresCompleteChain(t *testing.T) {
 			t.Fatalf("target %d error = %v", tc.target, err)
 		}
 	}
-	if r, err := ProductionMigrations(); err != nil || len(r.steps) != 0 {
+	if r, err := ProductionMigrations(); err != nil || len(r.steps) != 1 {
 		t.Fatalf("production registry = %+v, %v", r, err)
 	}
 }
@@ -185,7 +188,7 @@ func TestConfigVersionShippedExample(t *testing.T) {
 	path := filepath.Join("..", "..", "config.example.yaml")
 	data := sourceBytes(t, path)
 	_, version, err := parseVersion(data, path)
-	if err != nil || version != TargetConfigVersion || !bytes.HasPrefix(data, []byte("config_version: 1")) {
+	if err != nil || version != TargetConfigVersion || !bytes.HasPrefix(data, []byte("config_version: 2")) {
 		t.Fatalf("shipped example version = %d, %v", version, err)
 	}
 }
@@ -454,12 +457,13 @@ func TestMigrationConcurrentWritersAndLockCancellation(t *testing.T) {
 }
 
 func TestMigrationRejectsLinkedSource(t *testing.T) {
-	for _, kind := range []string{"symlink", "hardlink"} {
+	const kindSymlink = "symlink"
+	for _, kind := range []string{kindSymlink, "hardlink"} {
 		t.Run(kind, func(t *testing.T) {
 			path := migrationSource(t, migrationFixture)
 			linked := filepath.Join(filepath.Dir(path), "linked.yaml")
 			link := os.Link
-			if kind == "symlink" {
+			if kind == kindSymlink {
 				link = os.Symlink
 			}
 			if err := link(path, linked); err != nil {
@@ -472,8 +476,20 @@ func TestMigrationRejectsLinkedSource(t *testing.T) {
 			if string(sourceBytes(t, path)) != migrationFixture {
 				t.Fatal("linked source modified")
 			}
-			if _, err = Load(context.Background(), linked); err != nil {
-				t.Fatalf("current linked read: %v", err)
+			// A symlink config leaf is rejected at Load itself; a hard
+			// link is an indistinguishable regular file and stays readable.
+			if err := os.WriteFile(path, []byte(currentSchemaFixture()), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == kindSymlink {
+				if _, lerr := Load(context.Background(), linked); lerr == nil || !strings.Contains(lerr.Error(), "regular file") {
+					t.Fatalf("symlinked config must be rejected at Load, got %v", lerr)
+				}
+
+				return
+			}
+			if _, lerr := Load(context.Background(), linked); lerr != nil {
+				t.Fatalf("hard-linked config must stay readable: %v", lerr)
 			}
 		})
 	}
@@ -507,17 +523,17 @@ func TestMigrationBackupRetentionIsScoped(t *testing.T) {
 
 func TestMigrationDoesNotPersistSecretOrValidatorOverrides(t *testing.T) {
 	secret := strings.Repeat("s", 40)
-	path := migrationSource(t, strings.ReplaceAll(migrationFixture, "  cli:\n    enabled: true", "  zmqcli:\n    enabled: true\n    auth_token_file: token"))
-	tokenPath := filepath.Join(filepath.Dir(path), "token")
+	path := migrationSource(t, strings.ReplaceAll(migrationFixture, "  cli:\n    enabled: true", "  zmqcli:\n    enabled: true\n    auth_token: !secret_file /placeholder/token"))
+	tokenPath := filepath.Join(t.TempDir(), "token") // outside the agent directory
 	if err := os.WriteFile(tokenPath, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	input := strings.ReplaceAll(string(sourceBytes(t, path)), "auth_token_file: token", "auth_token_file: "+filepath.ToSlash(tokenPath))
+	input := strings.ReplaceAll(string(sourceBytes(t, path)), "/placeholder/token", filepath.ToSlash(tokenPath))
 	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err := migrationRegistry(t, testMigration{version: 2}).Prepare(context.Background(), path, func(cfg *Config) error {
-		cfg.MCPProfile = "runtime-only"
+		cfg.DefaultProfile = "runtime-only"
 
 		return nil
 	})
@@ -528,4 +544,9 @@ func TestMigrationDoesNotPersistSecretOrValidatorOverrides(t *testing.T) {
 	if bytes.Contains(output, []byte(secret)) || bytes.Contains(output, []byte("runtime-only")) || !bytes.Contains(output, []byte(filepath.ToSlash(tokenPath))) {
 		t.Fatal("runtime values materialized")
 	}
+}
+
+// currentSchemaFixture is migrationFixture at the binary's target version.
+func currentSchemaFixture() string {
+	return strings.Replace(migrationFixture, "config_version: 1", fmt.Sprintf("config_version: %d", TargetConfigVersion), 1)
 }

@@ -112,7 +112,7 @@ func TestReconnectConfigFromConfig_RespectsUserValues(t *testing.T) {
 func TestReconnect_ContextCancelAborts(t *testing.T) {
 	rc := newTestReconnectingClient(&ReconnectingClient{
 		serverCfg: &config.MCPServerConfig{
-			URL: "http://127.0.0.1:1/does-not-exist",
+			URL: config.SecretString{Value: "http://127.0.0.1:1/does-not-exist"},
 		},
 		clientCfg: ClientConfig{Timeout: 50 * time.Millisecond},
 		reconnectCf: ReconnectConfig{
@@ -140,7 +140,7 @@ func TestReconnect_ContextCancelAborts(t *testing.T) {
 func TestReconnect_MaxRetriesExhausted(t *testing.T) {
 	rc := newTestReconnectingClient(&ReconnectingClient{
 		serverCfg: &config.MCPServerConfig{
-			URL: "http://127.0.0.1:1/does-not-exist",
+			URL: config.SecretString{Value: "http://127.0.0.1:1/does-not-exist"},
 		},
 		clientCfg: ClientConfig{Timeout: 50 * time.Millisecond},
 		reconnectCf: ReconnectConfig{

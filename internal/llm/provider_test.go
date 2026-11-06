@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/marco-rozz/ready/internal/codexauth"
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/secretstore"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
@@ -82,29 +85,6 @@ const (
 	jsonValResponseObject  = "response"
 	jsonValCompletedStatus = "completed"
 )
-
-func TestResolve_ConfigError_NoFallthrough(t *testing.T) {
-	// Invalid config with a valid failover → should return config error, never connect.
-	registry := &config.LLMConfig{
-		Default:  testModelBad + "::" + testModelName,
-		Failover: []string{testModelGood + "::" + testModelName},
-		Providers: map[string]config.LLMProviderConfig{
-			testModelBad: {
-				Provider:   config.ProviderOpenRouter,
-				APIKey:     "inline",
-				APIKeyFile: "file", // both → config error
-			},
-			testModelGood: {
-				Provider: config.ProviderOllama,
-			},
-		},
-	}
-
-	_, err := BuildForReference(context.Background(), registry, registry.Default)
-	if err == nil {
-		t.Fatal("expected config error for both api_key and api_key_file")
-	}
-}
 
 func TestResolve_OllamaSuccess(t *testing.T) {
 	registry := &config.LLMConfig{
@@ -175,7 +155,7 @@ func TestResolve_OpenRouterSuccess(t *testing.T) {
 		Providers: map[string]config.LLMProviderConfig{
 			"or": {
 				Provider: config.ProviderOpenRouter,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  probeSrv.URL,
 			},
 		},
@@ -193,10 +173,8 @@ func TestResolve_OpenRouterSuccess(t *testing.T) {
 
 func TestBuildForReference_OpenAICodexUsesNamedCredential(t *testing.T) {
 	oauthPath := t.TempDir()
-	store, err := codexauth.NewFileStore(context.Background(), oauthPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	secrets := testSecretStore(t, oauthPath)
+	store := codexauth.NewSecretStore(secrets, oauthPath)
 	cred := codexauth.NewCredential("work")
 	cred.AccessToken = "header.payload.signature"
 	cred.RefreshToken = "refresh-secret"
@@ -209,6 +187,7 @@ func TestBuildForReference_OpenAICodexUsesNamedCredential(t *testing.T) {
 
 	registry := &config.LLMConfig{
 		OAuthPath: oauthPath,
+		Secrets:   config.NewSecretSource(secrets),
 		Default:   "work::gpt-5-codex",
 		Providers: map[string]config.LLMProviderConfig{
 			"work": {
@@ -234,8 +213,10 @@ func TestBuildForReference_OpenAICodexUsesNamedCredential(t *testing.T) {
 }
 
 func TestBuildForReference_OpenAICodexMissingCredentialIsCandidateFailure(t *testing.T) {
+	oauthPath := t.TempDir()
 	registry := &config.LLMConfig{
-		OAuthPath: t.TempDir(),
+		OAuthPath: oauthPath,
+		Secrets:   config.NewSecretSource(testSecretStore(t, oauthPath)),
 		Default:   "personal::gpt-5-codex",
 		Providers: map[string]config.LLMProviderConfig{
 			"personal": {Provider: config.ProviderOpenAICodex, API: config.APIResponses},
@@ -311,7 +292,7 @@ func TestOpenCode_ChatCompletions_RequestShape(t *testing.T) {
 			testModelZen: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIChatCompletions,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -424,7 +405,7 @@ func TestOpenRouter_StreamSafe_NoPanic(t *testing.T) {
 		Providers: map[string]config.LLMProviderConfig{
 			"or": {
 				Provider: config.ProviderOpenRouter,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -534,7 +515,7 @@ func TestOpenCode_Google_RequestShape(t *testing.T) {
 			testModelGoogle: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIGoogle,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -629,7 +610,7 @@ func TestOpenCode_Anthropic_RequestShape(t *testing.T) {
 			testModelClaude: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIAnthropic,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -734,7 +715,7 @@ func TestOpenCode_Responses_RequestShape(t *testing.T) {
 			testModelResponses: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIResponses,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -1037,13 +1018,13 @@ func TestPreflightCatalog_TransportRefused(t *testing.T) {
 			"unreachable": {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIChatCompletions,
-				APIKey:   "key",
+				APIKey:   testKeyFile(t, "key"),
 				BaseURL:  testUnreachableBaseURL, // unreachable
 			},
 			testModelReachable: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIChatCompletions,
-				APIKey:   "key",
+				APIKey:   testKeyFile(t, "key"),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -1063,21 +1044,6 @@ func TestPreflightCatalog_TransportRefused(t *testing.T) {
 	}
 }
 
-// TestOpenCodeAPIKeyFileResolved verifies that api_key_file is read and trimmed.
-func TestOpenCodeAPIKeyFileResolved(t *testing.T) {
-	// This test verifies the ResolvedAPIKey method on LLMProviderConfig.
-	entry := config.LLMProviderConfig{
-		APIKey: "inline-key",
-	}
-	key, err := entry.ResolvedAPIKey(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if key != "inline-key" {
-		t.Errorf("expected 'inline-key', got %q", key)
-	}
-}
-
 // TestOpenCodeDefaultBaseURL verifies the default base_url is applied.
 func TestOpenCodeDefaultBaseURL(t *testing.T) {
 	// This is a unit test verifying the default.
@@ -1088,7 +1054,7 @@ func TestOpenCodeDefaultBaseURL(t *testing.T) {
 			testModelZen: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIChatCompletions,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 			},
 		},
 	}
@@ -1418,7 +1384,7 @@ func TestPreflightCatalog_ModelIDAbsent(t *testing.T) {
 			testModelBad: {
 				Provider: config.ProviderOpenCode,
 				API:      config.APIChatCompletions,
-				APIKey:   testAPIKey,
+				APIKey:   testKeyFile(t, testAPIKey),
 				BaseURL:  srv.URL,
 			},
 		},
@@ -1427,4 +1393,32 @@ func TestPreflightCatalog_ModelIDAbsent(t *testing.T) {
 	if err := PreflightCatalog(context.Background(), registry, registry.Default, zerolog.Nop()); err == nil {
 		t.Fatal("expected preflight rejection when the model-id is absent from the catalog")
 	}
+}
+
+// testKeyFile returns a `!secret_file` reference to a temporary file holding
+// value, so tests resolve their API key through the real reference path.
+func testKeyFile(t *testing.T, value string) config.SecretRef {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return config.SecretRef{Kind: config.SecretRefFile, Path: path}
+}
+
+// testSecretStore opens a Secret store under dir for credential-backed tests.
+func testSecretStore(t *testing.T, dir string) *secretstore.Store {
+	t.Helper()
+	secrets, err := secretstore.New(secretstore.Options{
+		Dir:     dir,
+		Key:     secretstore.KeySpec{Location: secretstore.KeyAgentDir},
+		AgentID: "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+		Log:     zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return secrets
 }

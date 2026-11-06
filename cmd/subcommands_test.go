@@ -50,7 +50,7 @@ func TestNoSubcommandHardError(t *testing.T) {
 		t.Error("expected non-nil error for no-subcommand invocation")
 	}
 
-	want := "missing subcommand: use 'serve', 'chat' or 'login'\n"
+	want := "missing subcommand: use 'serve', 'chat', 'login', 'init' or 'secrets'\n"
 	if got := stderr.String(); got != want {
 		t.Errorf("stderr: got %q, want %q", got, want)
 	}
@@ -201,11 +201,11 @@ func TestServeFailsOnMissingConfig(t *testing.T) {
 	var stderr bytes.Buffer
 
 	tmp := t.TempDir()
-	missing := filepath.Join(tmp, "does-not-exist.yaml")
+	missing := filepath.Join(tmp, "does-not-exist")
 
 	code, runErr := run(
 		context.Background(),
-		[]string{homeAgent, "serve", "--config", missing},
+		[]string{homeAgent, "serve", "--agent-dir", missing},
 		&stderr,
 	)
 
@@ -217,11 +217,11 @@ func TestServeFailsOnMissingConfig(t *testing.T) {
 		t.Error("expected non-nil error from run() when config is missing")
 	}
 
-	// Serve returns a wrapped fmt.Errorf("failed to load config: %w", err);
-	// urfave then surfaces it via the chain. We only need to see that the
-	// error mentions config loading so operators have a chance of diagnosing.
+	// Serve returns a wrapped selection error; urfave then surfaces it via
+	// the chain. We only need to see that the error names the missing agent
+	// directory so operators have a chance of diagnosing.
 	combined := stderr.String() + " " + errString(runErr)
-	if !strings.Contains(combined, "config") {
+	if !strings.Contains(combined, "agent directory") {
 		t.Errorf("expected error mentioning config; stderr=%q err=%v", stderr.String(), runErr)
 	}
 }

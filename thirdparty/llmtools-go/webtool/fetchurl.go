@@ -69,6 +69,9 @@ var fetchURLTool = spec.Tool{
 "required": ["url"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.ToolOutputUnionListSchema(),
+
 	GoImpl: spec.GoToolImpl{FuncID: fetchURLFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

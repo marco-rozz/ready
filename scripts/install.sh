@@ -4,54 +4,50 @@
 #   curl -fsSL https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.sh | bash
 #
 # Options cannot be passed to a piped shell directly — use the forms:
-#   curl -fsSL <url> | bash -s -- --path           (apply the PATH export)
+#   curl -fsSL <url> | bash -s -- --no-modify-path
 #   curl -fsSL <url> | bash -s -- --uninstall
 #
 # The whole script is one main() invocation on the last line so a truncated
 # `curl | bash` executes nothing (every step lives inside main).
 #
+# Per-user only (per-user-install-agent-isolation): program body at
+# $HOME/.local/share/ready/bin/ready published by the relative launcher
+# $HOME/.local/bin/ready → ../share/ready/bin/ready; the shipped skill
+# library at $HOME/.local/share/ready/library/skills; the default agent
+# directory $HOME/.ready is created by ready init. The reference config lives
+# in program storage. No prefix,
+# global or custom-path installation exists; root execution is refused.
+#
 # Steps: detect platform (closed table) → select the release URL prefix
 # (releases/latest/download or releases/download/$VERSION — no API call, no
-# JSON) → download the archive + checksums.txt and verify SHA256 → extract to
-# a mktemp dir → place (binary first: staged as .ready.new and atomically
-# moved; config copy-if-missing 0600; library replaced by a rename-aside
-# swap) → PATH (print-only by default; --path edits the rc file, idempotently)
-# → final message. The installer never touches a runtime skill copy and never
-# stops or starts a daemon: every upgrade ends by asking the operator to
-# restart `ready serve`.
+# JSON) → download the archive + checksums.txt and verify SHA256 → extract
+# and validate bundle members → place (program first: staged on the
+# destination filesystem and atomically moved; launcher target-first;
+# library rename-aside swap; reference config) → PATH
+# (shell-aware, marker-bounded, skipped with --no-modify-path) → final
+# message. The installer never touches a runtime skill copy and never stops
+# or starts a daemon: an upgrade of an existing agent asks the operator to restart
+# `ready serve`.
 
 set -eu
 
 REPO_SLUG="marco-rozz/ready"
 ASSET_BASE_DOWNLOAD="https://github.com/${REPO_SLUG}/releases/download"
 ASSET_BASE_LATEST="https://github.com/${REPO_SLUG}/releases/latest/download"
-RAW_BASE="https://raw.githubusercontent.com/${REPO_SLUG}/main"
 
 BIN_NAME="ready"
-UNINSTALL_BIN_NAME="uninstall"
 
 main() {
-    # ── option parsing (unknown options abort before any side effect) ─────
-    PREFIX_OPT=""
-    GLOBAL=0
-    EDIT_PATH=0
+    # ── option parsing (unknown/removed options abort before any side effect) ──
+    NO_MODIFY_PATH=0
     DO_UNINSTALL=0
     PURGE=0
     ASSUME_YES=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --prefix)
-                [ $# -ge 2 ] || die "--prefix requires a directory argument"
-                PREFIX_OPT="$2"
-                shift 2
-                ;;
-            --global)
-                GLOBAL=1
-                shift
-                ;;
-            --path)
-                EDIT_PATH=1
+            --no-modify-path)
+                NO_MODIFY_PATH=1
                 shift
                 ;;
             --uninstall)
@@ -70,8 +66,11 @@ main() {
                 usage
                 exit 0
                 ;;
+            --prefix|--global|--path)
+                die "$1 was removed: READY installs per-user only into \$HOME/.local — see --help"
+                ;;
             --*)
-                die "unknown option: $1 (supported: --prefix <dir>, --global, --path, --uninstall, --purge, --yes)"
+                die "unknown option: $1 (supported: --no-modify-path, --uninstall, --purge, --yes)"
                 ;;
             *)
                 die "unexpected argument: $1"
@@ -79,18 +78,17 @@ main() {
         esac
     done
 
-    [ "$GLOBAL" = 1 ] || [ -z "$PREFIX_OPT" ] || die "--prefix and --global are mutually exclusive"
     [ "$PURGE" = 0 ] || [ "$DO_UNINSTALL" = 1 ] || die "--purge is only meaningful together with --uninstall"
+
+    # Per-user policy: root (uid 0) is refused for EVERY mutating mode —
+    # install, uninstall and purge (there is no --global exception).
+    if [ "$(id -u)" = 0 ]; then
+        die "refusing to run as root: READY installs per-user into your home directory only"
+    fi
 
     if [ "$DO_UNINSTALL" = 1 ]; then
         do_uninstall
         return 0
-    fi
-
-    # Running as root without --global would leave a root-owned ~/.ready in
-    # the user's home — abort before any write.
-    if [ "$(id -u)" = 0 ] && [ "$GLOBAL" != 1 ]; then
-        die "refusing to run as root without --global (it would create a root-owned install home in the user's home directory)"
     fi
 
     # ── step 1: detect the host platform (closed table) ───────────────────
@@ -101,14 +99,12 @@ main() {
 
     # ── step 2: select the release URL prefix ─────────────────────────────
     URL_PREFIX="$ASSET_BASE_LATEST"
-    ASSET_VERSION_SUFFIX=""
     if [ -n "${VERSION:-}" ]; then
         case "$VERSION" in
-            v*) VERSION_TAG="$VERSION" ;;
+            v*) ;;
             *) die "VERSION must be a tag name (v…), got: $VERSION" ;;
         esac
         URL_PREFIX="$ASSET_BASE_DOWNLOAD/$VERSION"
-        ASSET_VERSION_SUFFIX="/$VERSION_TAG/"
     fi
 
     # ── step 3: download + SHA256 verify ──────────────────────────────────
@@ -126,53 +122,72 @@ main() {
     download "$URL_PREFIX/checksums.txt" "$TMP_DIR/checksums.txt"
     verify_checksum "$TMP_DIR/$ARCHIVE_NAME$ARCHIVE_EXT" "$TMP_DIR/checksums.txt" "$ARCHIVE_NAME$ARCHIVE_EXT"
 
-    # ── step 4: extract ───────────────────────────────────────────────────
+    # ── step 4: extract and validate bundle members ───────────────────────
     EXTRACT_DIR="$TMP_DIR/extract"
     mkdir "$EXTRACT_DIR"
     extract "$TMP_DIR/$ARCHIVE_NAME$ARCHIVE_EXT" "$EXTRACT_DIR"
     [ -f "$EXTRACT_DIR/$REMOTE_FILE" ] || die "the archive is missing $REMOTE_FILE (a corrupted or unrelated release?)"
+    [ -d "$EXTRACT_DIR/skills" ] || die "the archive is missing the skills library (a corrupted or unrelated release?)"
+    [ -f "$EXTRACT_DIR/config.example.yaml" ] || die "the archive is missing config.example.yaml (a corrupted or unrelated release?)"
 
-    # ── step 5: place (binary first — a later step failing leaves the earlier ones) ──
-    INSTALL_HOME="$(install_home)"
-    BIN_DIR="$(bin_dir)"
+    # ── step 5: place (program → library → reference config → PATH) ─────────
+    USER_HOME="${HOME:-}"
+    [ -n "$USER_HOME" ] || die "cannot resolve the user home directory (HOME is empty)"
 
-    mkdir -p "$BIN_DIR"
-    if [ "$GLOBAL" = 1 ]; then
-        sudo install -m 0755 "$EXTRACT_DIR/$REMOTE_FILE" "$BIN_DIR/.$BIN_NAME.new"
-        sudo mv -f "$BIN_DIR/.$BIN_NAME.new" "$BIN_DIR/$BIN_NAME"
-    else
-        # Stage in the same directory (same filesystem), chmod, atomic
-        # rename: the running daemon keeps executing the old inode on unix.
-        mv "$EXTRACT_DIR/$REMOTE_FILE" "$BIN_DIR/.$BIN_NAME.new"
-        chmod 755 "$BIN_DIR/.$BIN_NAME.new"
-        mv -f "$BIN_DIR/.$BIN_NAME.new" "$BIN_DIR/$BIN_NAME"
-    fi
+    SHARE_DIR="$USER_HOME/.local/share/ready"
+    BODY_DIR="$SHARE_DIR/bin"
+    BODY="$BODY_DIR/$BIN_NAME"
+    LAUNCHER_DIR="$USER_HOME/.local/bin"
+    LAUNCHER="$LAUNCHER_DIR/$BIN_NAME"
+    LIBRARY_DIR="$SHARE_DIR/library/skills"
+    AGENT_DIR="$USER_HOME/.ready"
 
-    # The installed config: copy-if-missing, never replacing the operator's.
-    if [ ! -f "$INSTALL_HOME/config.yaml" ]; then
-        mkdir -p "$INSTALL_HOME"
-        chmod 700 "$INSTALL_HOME" 2>/dev/null || true
-        cp "$EXTRACT_DIR/config.example.yaml" "$INSTALL_HOME/config.yaml"
-        chmod 600 "$INSTALL_HOME/config.yaml"
-        KEPT_CONFIG=0
-    else
-        KEPT_CONFIG=1
-    fi
+    # Program body: stage in the destination directory (same filesystem) and
+    # atomically rename over — the running daemon keeps executing the old
+    # inode on unix.
+    mkdir -p "$BODY_DIR"
+    mv "$EXTRACT_DIR/$REMOTE_FILE" "$BODY_DIR/.$BIN_NAME.new"
+    chmod 755 "$BODY_DIR/.$BIN_NAME.new"
+    mv -f "$BODY_DIR/.$BIN_NAME.new" "$BODY"
 
-    replace_library "$EXTRACT_DIR/skills" "$INSTALL_HOME/library/skills"
+    # Launcher: relative target, created target-first. A foreign occupant at
+    # the publication name is refused, never overwritten.
+    publish_launcher
+
+    # Library: installer-owned, replaced by a rename-aside swap; runtime
+    # skill copies are never touched (the daemon syncs them per file at
+    # boot). A failed publication restores the previous library.
+    replace_library "$EXTRACT_DIR/skills" "$LIBRARY_DIR"
+
+    # The example is installer-owned program content. Only ready init creates
+    # an agent configuration; installation must not pre-empt its first-run wizard.
+    cp "$EXTRACT_DIR/config.example.yaml" "$SHARE_DIR/.config.example.yaml.new"
+    chmod 644 "$SHARE_DIR/.config.example.yaml.new"
+    mv -f "$SHARE_DIR/.config.example.yaml.new" "$SHARE_DIR/config.example.yaml"
 
     # ── step 6: PATH ──────────────────────────────────────────────────────
-    handle_path
+    if [ "$NO_MODIFY_PATH" = 1 ]; then
+        PATH_OUTCOME="skipped (--no-modify-path)"
+        print_manual_path
+    else
+        handle_path
+    fi
 
     # ── step 7: final message ─────────────────────────────────────────────
     printf 'Installed %s\n' "$(installed_version)"
-    if [ "$KEPT_CONFIG" = 1 ]; then
-        printf 'kept the existing config at %s/config.yaml — edit it if needed\n' "$INSTALL_HOME"
+    printf 'program: %s (launcher: %s)\n' "$BODY" "$LAUNCHER"
+    printf 'shipped skill library: %s (installer-owned; each agent keeps its own runtime copy)\n' "$LIBRARY_DIR"
+    printf 'reference configuration: %s/config.example.yaml\n' "$SHARE_DIR"
+    printf 'PATH: %s\n' "$PATH_OUTCOME"
+    if [ -f "$AGENT_DIR/config.yaml" ]; then
+        printf 'kept the existing config at %s/config.yaml\n' "$AGENT_DIR"
+        printf 'For offline configuration changes, run: ready init\n'
+        printf 'restart ready serve to use the new version\n'
     else
-        printf 'created %s/config.yaml — edit it (provider endpoints, tokens) before first use\n' "$INSTALL_HOME"
+        printf 'No agent configuration was created by the installer.\n'
+        printf 'Next: open a new terminal (apply the PATH instructions above if needed), then run:\n  ready init\n'
+        printf 'The wizard will create %s/config.yaml and print your server and chat commands.\n' "$AGENT_DIR"
     fi
-    printf 'shipped skill library at %s/library/skills (replaced on every install; the runtime copy at %s/skills is synced per file by the daemon)\n' "$INSTALL_HOME" "$INSTALL_HOME"
-    printf 'restart ready serve to use the new version\n'
 }
 
 usage() {
@@ -180,19 +195,20 @@ usage() {
 ready installer
 
 Options:
-  --prefix <dir>  install the binary into <dir> (default: $HOME/.ready/bin)
-  --global        install into /usr/local/bin using sudo (mutually exclusive
-                  with --prefix)
-  --path          add the bin directory to your shell's rc file (default is
-                  print-only)
-  --uninstall     remove the binary (and the PATH block it added)
-  --purge         together with --uninstall: also delete the install home
-                  (config, transcripts, credentials, skills) — asks for
-                  confirmation unless --yes is given
-  --yes           do not ask for confirmation
+  --no-modify-path  do not edit the shell's startup PATH (manual
+                    instructions are printed either way)
+  --uninstall       remove the program and the shipped skill library
+                    (PATH and agent data are never touched)
+  --purge           together with --uninstall: also delete the default
+                    agent directory $HOME/.ready (config, transcripts,
+                    OAuth credentials, runtime skills) — asks for
+                    confirmation unless --yes is given; refuses an active
+                    daemon/login; explicit --agent-dir directories are
+                    never touched
+  --yes             do not ask for confirmation
 
 Environment:
-  VERSION=v1.2.3  pin the release tag instead of the latest stable
+  VERSION=v1.2.3    pin the release tag instead of the latest stable
 EOF
 }
 
@@ -241,7 +257,9 @@ detect_platform() {
             GLIBC_LOADER=""
             REMOTE_FILE="$BIN_NAME"
             # uname -m lies under Rosetta: ask the hardware, not the shell.
-            if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+            # Absolute path first: a reduced PATH (cron, launchd, env -i)
+            # may lack /usr/sbin and would silently select amd64.
+            if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
                 ASSET_ARCH="arm64"
             else
                 ASSET_ARCH="amd64"
@@ -253,24 +271,8 @@ detect_platform() {
     esac
 }
 
-install_home() {
-    USER_HOME="${HOME:-}"
-    [ -n "$USER_HOME" ] || die "cannot resolve the user home directory (HOME is empty)"
-    printf '%s/.ready' "$USER_HOME"
-}
-
-bin_dir() {
-    if [ "$GLOBAL" = 1 ]; then
-        printf '/usr/local/bin'
-    elif [ -n "$PREFIX_OPT" ]; then
-        printf '%s' "$PREFIX_OPT"
-    else
-        printf '%s/bin' "$(install_home)"
-    fi
-}
-
 installed_version() {
-    "$BIN_DIR/$BIN_NAME" --version 2>/dev/null || printf '%s (version check unavailable)' "$BIN_NAME"
+    "$BODY" --version 2>/dev/null || printf '%s (version check unavailable)' "$BIN_NAME"
 }
 
 # ── download (curl preferred, wget fallback; TLS pinned) ────────────────────
@@ -316,130 +318,266 @@ extract() {
         *.tar.gz|*.tgz|*.tar)
             tar -xzf "$archive" -C "$dst"
             ;;
-        *.zip)
-            if command -v unzip >/dev/null 2>&1; then
-                unzip -qo "$archive" -d "$dst" || die "could not extract the release archive"
-            else
-                die "unzip is not available to extract a windows archive"
-            fi
-            ;;
         *)
             die "unknown archive type: $archive"
             ;;
     esac
 }
 
-# ── library replacement (installer-owned, replaced wholesale) ───────────────
-# The swap is pure renames: the microsecond window in which library/skills is
-# absent is harmless — the daemon reads the library only as the
-# injected-skill fallback. No hashing in the script; the daemon's boot sync
-# reconciles every runtime copy per file.
+# ── launcher publication (target first, foreign occupants refused) ──────────
+# The launcher is a relative symlink ../share/ready/bin/ready living in
+# $HOME/.local/bin. Publication is atomic (tmp symlink + mv -f) and refuses
+# a foreign occupant at the name.
+publish_launcher() {
+    mkdir -p "$LAUNCHER_DIR"
+
+    if [ -L "$LAUNCHER" ]; then
+        # Ours or dangling ours: recreate target-first (a prior body move may
+        # have left the link dangling).
+        current_target="$(readlink "$LAUNCHER" || true)"
+        if [ "$current_target" != "../share/ready/bin/ready" ]; then
+            die "refusing to replace $LAUNCHER (it is a symlink to \"$current_target\", not READY's launcher)"
+        fi
+    elif [ -e "$LAUNCHER" ]; then
+        die "refusing to replace $LAUNCHER (a non-READY file, link or directory occupies the launcher name — move it away and retry)"
+    fi
+
+    rm -f "$LAUNCHER_DIR/.$BIN_NAME.new-launch"
+    ln -s "../share/ready/bin/ready" "$LAUNCHER_DIR/.$BIN_NAME.new-launch"
+    mv -f "$LAUNCHER_DIR/.$BIN_NAME.new-launch" "$LAUNCHER"
+}
+
+# ── library replacement (installer-owned, rename-aside swap) ────────────────
 replace_library() {
     src="$1"
     dst="$2"
-
-    [ -d "$src" ] || die "the release archive carries no skills library"
 
     mkdir -p "$(dirname "$dst")"
     if [ -d "$dst" ]; then
         rm -rf "${dst}.backup" 2>/dev/null || true
         mv "$dst" "${dst}.backup"
     fi
-    mv "$src" "$dst"
-    rm -rf "${dst}.backup" 2>/dev/null || true
-}
-
-# ── PATH coverage ───────────────────────────────────────────────────────────
-# Default: print-only (a piped `curl | bash` that silently edits rc files is
-# not READY's style). --path opts into a detected rc file, idempotently.
-handle_path() {
-    bin_path="$(bin_dir)"
-
-    block_begin="# >>> ready install >>>"
-    block_end="# <<< ready install <<<"
-    block="$block_begin
-export PATH=\"$bin_path:\$PATH\"
-$block_end"
-
-    printf 'add %s to your PATH:\n  export PATH="%s:$PATH"\n\n' "$bin_path" "$bin_path"
-
-    [ "$EDIT_PATH" = 1 ] || return 0
-
-    rc="$(rc_file)"
-    [ -n "$rc" ] || die "could not detect a shell rc file to edit — add the export line above by hand, or pass --prefix with an rc-managed directory"
-
-    mkdir -p "$(dirname "$rc")"
-    touch "$rc"
-    if grep -qF "$block_begin" "$rc"; then
-        printf 'PATH block already present in %s (idempotent — not added twice)\n' "$rc"
-        return 0
-    fi
-
-    {
-        printf '\n'
-        printf '%s\n' "$block"
-    } >>"$rc"
-    printf 'added the PATH block to %s (starts a new shell to apply)\n' "$rc"
-
-    UNINSTALL_RC="$rc"
-}
-
-rc_file() {
-    if [ -n "${ZSH_VERSION:-}" ] && [ -f "$HOME/.zshrc" ]; then
-        printf '%s/.zshrc' "$HOME"
-    elif [ -f "$HOME/.bashrc" ]; then
-        printf '%s/.bashrc' "$HOME"
-    elif [ -f "$HOME/.profile" ]; then
-        printf '%s/.profile' "$HOME"
+    if mv "$src" "$dst"; then
+        rm -rf "${dst}.backup" 2>/dev/null || true
     else
-        printf '%s/.profile' "$HOME"
+        # Publication failed: restore the previous library.
+        if [ -d "${dst}.backup" ]; then
+            mv "${dst}.backup" "$dst"
+        fi
+        die "failed to publish the skill library at $dst"
     fi
+}
+
+# ── maintenance gate (installer↔daemon purge coordination) ──────────────────
+# start_gate runs the freshly-placed binary as the EXCLUSIVE maintenance-gate
+# holder for the agent directory and waits (bounded) for its readiness
+# marker. stdout carries the holder's output file path via HOLD_OUT; the PID
+# via HOLD_PID. Refusal (busy daemon/login) aborts BEFORE any deletion.
+start_gate() {
+    gate_dir="$1"
+    TMP_DIR="${TMP_DIR:-$(mktemp -d)}"
+    hold_out="$TMP_DIR/maintenance.out"
+    rm -f "$hold_out"
+    "$BODY" maintenance --agent-dir "$gate_dir" >"$hold_out" 2>&1 &
+    HOLD_PID=$!
+
+    i=0
+    while [ "$i" -lt 100 ]; do
+        if grep -q "MAINTENANCE-LOCKED" "$hold_out" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$HOLD_PID" 2>/dev/null; then
+            cat "$hold_out" >&2 || true
+            die "cannot take the exclusive maintenance gate on $gate_dir — a daemon or mutating login appears active; stop it and retry"
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    kill "$HOLD_PID" 2>/dev/null || true
+    die "the maintenance gate on $gate_dir did not become available in time; retry"
+}
+
+stop_gate() {
+    if [ -n "${HOLD_PID:-}" ]; then
+        kill "$HOLD_PID" 2>/dev/null || true
+        wait "$HOLD_PID" 2>/dev/null || true
+        HOLD_PID=""
+    fi
+}
+
+# ── PATH coverage (shell-aware, marker-bounded, opt-out) ────────────────────
+block_begin="# >>> ready >>>"
+block_end="# <<< ready <<<"
+
+print_manual_path() {
+    printf 'manual PATH (always valid): add this to your shell startup file:\n  export PATH="%s:$PATH"\n' "$LAUNCHER_DIR"
+}
+
+handle_path() {
+    # The SELECTED user shell — not the shell executing this piped script.
+    user_shell="${SHELL:-}"
+    if [ -z "$user_shell" ]; then
+        PATH_OUTCOME="unknown (no login shell detected)"
+        print_manual_path
+
+        return
+    fi
+    case "$user_shell" in
+        */zsh) rc="$HOME/.zshrc" ;;
+        */bash) rc="$HOME/.bashrc" ;;
+        *) rc="$HOME/.profile" ;;
+    esac
+
+    # 1. Current reachability: the launcher directory in the effective PATH.
+    case ":$PATH:" in
+        *:"$LAUNCHER_DIR":*)
+            PATH_OUTCOME="already reachable in the current PATH"
+            print_manual_path
+
+            return
+            ;;
+    esac
+
+    # 2. Configured for the SELECTED shell: an existing READY block in its rc
+    # (unrelated rc files, comments and inactive conditionals are never
+    # proof — only the selected rc's own bytes count).
+    if [ -f "$rc" ] && grep -qF "$block_begin" "$rc"; then
+        PATH_OUTCOME="configured (existing READY block in $(basename "$rc"))"
+        print_manual_path
+
+        return
+    fi
+
+    # 3. Edit at most one applicable rc, in a marker-bounded block.
+    if [ -f "$rc" ] || [ -w "$HOME" ]; then
+        mkdir -p "$(dirname "$rc")"
+        touch "$rc"
+        {
+            printf '\n'
+            printf '%s\n' "$block_begin"
+            printf 'export PATH="%s:$PATH"\n' "$LAUNCHER_DIR"
+            printf '%s\n' "$block_end"
+        } >>"$rc"
+        PATH_OUTCOME="edited $(basename "$rc") (starts a new shell to apply)"
+        print_manual_path
+
+        return
+    fi
+
+    PATH_OUTCOME="unknown (could not edit $(basename "$rc"))"
+    print_manual_path
 }
 
 # ── uninstall ───────────────────────────────────────────────────────────────
+# Removes only owned program/launcher/library entries. Shared PATH entries
+# and ALL agent state (default and explicit directories) are never touched.
 do_uninstall() {
-    bin_path="$(bin_dir)"
-    bin_file="$bin_path/$BIN_NAME"
-    install_root="$(install_home)"
+    USER_HOME="${HOME:-}"
+    [ -n "$USER_HOME" ] || die "cannot resolve the user home directory (HOME is empty)"
 
-    if [ -f "$bin_file" ]; then
-        rm -f "$bin_file"
-        printf 'removed the binary from %s\n' "$bin_path"
-    else
-        printf 'no binary found at %s\n' "$bin_file"
-    fi
-    if [ -n "${PREFIX_OPT:-}${UNINSTALL_RC:-}" ]; then
-        :
-    fi
-
-    # Remove the PATH block from every rc file that may carry it.
-    for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-        [ -f "$rc" ] || continue
-        if grep -qF "# >>> ready install >>>" "$rc"; then
-            awk 'BEGIN{skip=0} /# >>> ready install >>>/{skip=1; next} /# <<< ready install <<</{skip=0; next} skip==0{print}' "$rc" >"$rc.tmp"
-            mv "$rc.tmp" "$rc"
-            printf 'removed the PATH block from %s\n' "$rc"
-        fi
-    done
+    SHARE_DIR="$USER_HOME/.local/share/ready"
+    BODY="$SHARE_DIR/bin/$BIN_NAME"
+    LAUNCHER="$USER_HOME/.local/bin/$BIN_NAME"
+    LIBRARY_DIR="$SHARE_DIR/library/skills"
+    AGENT_DIR="$USER_HOME/.ready"
 
     if [ "$PURGE" = 1 ]; then
-        if [ "$ASSUME_YES" = 0 ]; then
-            # Ask on the terminal (not the pipe): a piped installer may have
-            # no stdin at all.
-            if [ -e /dev/tty ]; then
-                printf 'about to delete %s — this removes config, session transcripts, OAuth credentials and skills permanently. type "yes" to confirm: ' "$install_root" >/dev/tty
-                read -r answer </dev/tty
-            else
-                die "purge would delete $install_root (config, transcripts, OAuth credentials, skills) but no terminal is available for confirmation — run with --yes to proceed non-interactively"
-            fi
-            [ "$answer" = "yes" ] || die "purge aborted (nothing deleted)"
-        fi
-        rm -rf "$install_root"
-        printf 'deleted %s\n' "$install_root"
-    else
-        printf 'data kept: %s holds your config, session transcripts, OAuth credentials and skills\n' "$install_root"
-        printf 'remove it by hand if that is what you want (or uninstall with --purge)\n'
+        do_purge
+        return
     fi
+
+    if [ -f "$BODY" ]; then
+        rm -f "$BODY"
+        printf 'removed the program %s\n' "$BODY"
+    else
+        printf 'no program found at %s\n' "$BODY"
+    fi
+
+    if [ -L "$LAUNCHER" ]; then
+        rm -f "$LAUNCHER"
+        printf 'removed the launcher %s\n' "$LAUNCHER"
+    elif [ -e "$LAUNCHER" ]; then
+        die "refusing to remove $LAUNCHER (a non-READY file occupies the launcher name)"
+    else
+        printf 'no launcher found at %s\n' "$LAUNCHER"
+    fi
+
+    if [ -d "$SHARE_DIR" ]; then
+        rm -rf "$SHARE_DIR"
+        printf 'removed the shipped skill library %s\n' "$LIBRARY_DIR"
+    else
+        printf 'no shipped skill library found at %s\n' "$LIBRARY_DIR"
+    fi
+
+    printf 'agent data kept: %s holds your config, session transcripts, OAuth credentials and runtime skills\n' "$AGENT_DIR"
+    printf 'explicit --agent-dir directories are never discovered or removed\n'
+    printf 'PATH entries were never touched\n'
+    printf 'uninstalled.\n'
+}
+
+# ── combined purge (uninstall --purge) ──────────────────────────────────────
+# Confirms, takes the EXCLUSIVE maintenance gate on the default agent
+# directory, then deletes — config first so no new daemon can boot against a
+# recreated lock with an obsolete snapshot. Refuses: a busy daemon/login
+# (shared gate), a linked default agent directory, and any explicit agent
+# directory (never discovered).
+do_purge() {
+    if [ -L "$AGENT_DIR" ]; then
+        die "refusing to purge $AGENT_DIR: it is a symbolic link (the real directory it points to is never traversed for deletion)"
+    fi
+    [ -d "$AGENT_DIR" ] || die "no default agent directory at $AGENT_DIR — nothing to purge"
+
+    if [ "$ASSUME_YES" = 0 ]; then
+        # Ask on the terminal (not the pipe): a piped installer may have
+        # no stdin at all.
+        if [ -e /dev/tty ]; then
+            printf 'about to delete %s — this removes config, session transcripts, OAuth credentials and runtime skills permanently. type "yes" to confirm: ' "$AGENT_DIR" >/dev/tty
+            read -r answer </dev/tty
+        else
+            die "purge would delete $AGENT_DIR (config, transcripts, OAuth credentials, runtime skills) but no terminal is available for confirmation — run with --yes to proceed non-interactively"
+        fi
+        [ "$answer" = "yes" ] || die "purge aborted (nothing deleted)"
+    fi
+
+    # Exclusive maintenance gate BEFORE any deletion (including the program
+    # and library below): a busy daemon/login aborts everything untouched.
+    start_gate "$AGENT_DIR"
+
+    # Forget the Store key's vault entry (macOS Keychain) BEFORE the agent
+    # directory and the program disappear: it names the agent id kept in the
+    # config. Best-effort — a key held in the agent directory goes away with it.
+    if [ -x "$BODY" ]; then
+        if ! "$BODY" secrets forget-key --agent-dir "$AGENT_DIR" --yes >"$TMP_DIR/forget.out" 2>&1; then
+            printf 'note: the store key could not be forgotten automatically (the agent may predate the secret store, or its config is unreadable).\n' >&2
+            printf '      If it kept its key in the OS vault, remove the "ready" entry named after the agent id by hand.\n' >&2
+        fi
+    fi
+
+    # Config first: a new daemon cannot boot without it even if it raced a
+    # recreated gate file (its ownership recheck refuses a missing config).
+    rm -f "$AGENT_DIR/config.yaml"
+    rm -rf "$AGENT_DIR"
+    printf 'deleted the default agent directory %s\n' "$AGENT_DIR"
+
+    # Program and library (owned entries only; the gate stays held).
+    if [ -f "$BODY" ]; then
+        rm -f "$BODY"
+        printf 'removed the program %s\n' "$BODY"
+    fi
+    if [ -L "$LAUNCHER" ]; then
+        rm -f "$LAUNCHER"
+        printf 'removed the launcher %s\n' "$LAUNCHER"
+    elif [ -e "$LAUNCHER" ]; then
+        printf 'kept %s (a non-READY file occupies the launcher name)\n' "$LAUNCHER" >&2
+    fi
+    if [ -d "$SHARE_DIR" ]; then
+        rm -rf "$SHARE_DIR"
+        printf 'removed the shipped skill library %s\n' "$LIBRARY_DIR"
+    fi
+
+    stop_gate
+
+    printf 'explicit agent directories and PATH entries remain untouched\n'
     printf 'uninstalled.\n'
 }
 

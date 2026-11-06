@@ -1,3 +1,4 @@
+//nolint:goconst // literal fixtures are clearer inline than behind constants
 package config
 
 import (
@@ -8,6 +9,7 @@ import (
 
 func codexConfig() *Config {
 	return &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:  "codex-work::gpt-5-codex",
 			Failover: []string{"codex-personal::gpt-5-codex"},
@@ -59,11 +61,10 @@ func TestOpenAICodexPreservesExplicitBaseURLAndLegacyProvider(t *testing.T) {
 
 func TestValidateOpenAICodexRejectsStaticCredentialsAndWrongAPI(t *testing.T) {
 	for name, mutate := range map[string]func(*LLMProviderConfig){
-		"api_key":      func(p *LLMProviderConfig) { p.APIKey = "secret" },
-		"api_key_file": func(p *LLMProviderConfig) { p.APIKeyFile = "/secret" },
-		"wrong_api":    func(p *LLMProviderConfig) { p.API = APIChatCompletions },
-		"keep_alive":   func(p *LLMProviderConfig) { d := time.Second; p.KeepAlive = &d },
-		"options":      func(p *LLMProviderConfig) { p.Options = &OllamaOptions{} },
+		"api_key":    func(p *LLMProviderConfig) { p.APIKey = testKeyRef },
+		"wrong_api":  func(p *LLMProviderConfig) { p.API = APIChatCompletions },
+		"keep_alive": func(p *LLMProviderConfig) { d := time.Second; p.KeepAlive = &d },
+		"options":    func(p *LLMProviderConfig) { p.Options = &OllamaOptions{} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := codexConfig()

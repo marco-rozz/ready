@@ -17,9 +17,11 @@ import (
 
 	"github.com/marco-rozz/ready/internal/codexauth"
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/daemonlock"
 	homemcp "github.com/marco-rozz/ready/internal/mcp"
 	"github.com/marco-rozz/ready/internal/oauth"
 	"github.com/marco-rozz/ready/internal/profile"
+	"github.com/marco-rozz/ready/internal/secretstore"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/rs/zerolog"
@@ -65,10 +67,11 @@ func newLoginCommand(stderr io.Writer) *cli.Command {
 		ArgsUsage: "[mcp:<server>|llm:<provider>|name]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				// Optional: without it login elects the config exactly like
-				// serve (flag > ./.ready/config.yaml > ~/.ready/config.yaml).
-				Name:  "config",
-				Usage: "path to the YAML configuration file (elected through the resolution chain when omitted)",
+				// Optional: without it the default agent directory ~/.ready
+				// is selected, exactly like serve (cwd-independent). The
+				// directory must exist and hold the sole config.yaml.
+				Name:  flagAgentDirName,
+				Usage: "agent directory holding config.yaml and the OAuth store (default: ~/.ready)",
 			},
 			&cli.BoolFlag{
 				Name:  "status",
@@ -124,18 +127,19 @@ func validateLoginModes(status, forget, deviceCode bool, requested string) error
 	}
 }
 
-// electAndLoadConfig resolves the config chain (matching serve's election
-// when --config is absent), loads the file and validates it so login's
-// target enumeration, grants and secrets come from the config the daemon
-// runs. "using config <path>" is the FIRST output line: the login↔daemon
-// config mismatch is visible at the announcement, not at the next ping.
-func electAndLoadConfig(ctx context.Context, configFlag string, stdout io.Writer) (*config.Config, error) {
-	resolution, err := config.Elect(ctx, configFlag)
+// electAndLoadConfig selects the agent directory (matching serve's
+// --agent-dir selection when the flag is absent), loads the sole config.yaml
+// and validates it so login's target enumeration, grants and secrets come
+// from the config the daemon runs. "using agent directory <dir>" is the
+// FIRST output line: the login↔daemon directory mismatch is visible at the
+// announcement, not at the next ping.
+func electAndLoadConfig(ctx context.Context, agentDirFlag string, stdout io.Writer) (*config.Config, error) {
+	resolution, err := config.SelectAgentDir(ctx, agentDirFlag)
 	if err != nil {
 		return nil, err
 	}
 
-	_, _ = fmt.Fprintf(stdout, "using config %s\n", resolution.Path)
+	_, _ = fmt.Fprintf(stdout, "using agent directory %s\n", resolution.AgentDir)
 
 	cfg, err := config.Load(ctx, resolution.Path)
 	if err != nil {
@@ -143,11 +147,60 @@ func electAndLoadConfig(ctx context.Context, configFlag string, stdout io.Writer
 	}
 	cfg.Origin = resolution.Origin
 
-	if verr := cfg.Validate(); verr != nil {
-		return nil, verr
+	return cfg, nil
+}
+
+// openLoginSecrets opens the agent's Secret store for a login mode (read-only
+// for --status: it never creates a key or a store), installs the secret
+// source on the config and derives the pending fields. A target owning a
+// pending credential is refused later, at dispatch, before any network or
+// credential work.
+func openLoginSecrets(ctx context.Context, cfg *config.Config, readOnly bool) (*secretstore.Store, map[string]bool, error) {
+	store, err := cfg.OpenSecretStore(zerolog.Nop(), readOnly)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.SecretValues = config.NewSecretSource(store)
+	cfg.LLM.Secrets = cfg.SecretValues
+
+	payload, err := store.View(ctx)
+	if errors.Is(err, secretstore.ErrNoStore) {
+		payload = nil
+	} else if err != nil {
+		return nil, nil, fmt.Errorf("cannot read the secret store: %w", err)
+	}
+	pending := make(map[string]bool)
+	for _, f := range secretstore.Derive(payload, cfg.SecretStoreReferences(), nil).PendingFields() {
+		pending[f] = true
 	}
 
-	return cfg, nil
+	return store, pending, nil
+}
+
+// pendingOwnedByTarget reports whether one login target's own classified
+// credential is pending (safe refusal naming the field, never the value).
+func pendingOwnedByTarget(cfg *config.Config, target oauthTarget, pendingPaths map[string]bool) bool {
+	switch target.Kind {
+	case targetMCP:
+		srv, ok := cfg.MCPServers[target.Name]
+		if !ok {
+			return false
+		}
+		if srv.OAuth != nil && pendingPaths["mcp_servers."+target.Name+".oauth.client_secret"] {
+			return true
+		}
+		for h := range srv.Headers {
+			if pendingPaths["mcp_servers."+target.Name+".headers."+h] {
+				return true
+			}
+		}
+
+		return false
+	case targetLLM:
+		return pendingPaths["llm.providers."+target.Name+".api_key"]
+	default:
+		return false
+	}
 }
 
 // dispatchLoginMode routes the resolved targets to the selected mode:
@@ -160,10 +213,19 @@ func dispatchLoginMode(
 	status, forget, deviceCode bool,
 	stdin io.Reader,
 	stdout, stderr io.Writer,
+	pendingPaths map[string]bool,
 ) error {
 	switch {
 	case status:
 		printOAuthStatus(ctx, store, cfg, targets, stdout)
+
+		// guided-init B.4: pending targets surface as action required,
+		// without any network I/O.
+		for _, target := range targets {
+			if line := pendingStatusLine(target, pendingPaths); line != "" {
+				_, _ = fmt.Fprint(stdout, line)
+			}
+		}
 
 		return nil
 	case forget:
@@ -183,9 +245,13 @@ func runLoginWithIO(ctx context.Context, c *cli.Command, stdin io.Reader, stdout
 	return runLoginWithConfig(ctx, c, stdin, stdout, stderr, electAndLoadConfig)
 }
 
+// loginLoader is the config-load seam of runLoginWithConfig (tests swap it
+// for version matrices without globals).
+type loginLoader func(context.Context, string, io.Writer) (*config.Config, error)
+
 // runLoginWithConfig permits testing version failures on every mode before any
 // target lookup or credential/network side effect, without a mutable global.
-func runLoginWithConfig(ctx context.Context, c *cli.Command, stdin io.Reader, stdout, stderr io.Writer, load func(context.Context, string, io.Writer) (*config.Config, error)) error {
+func runLoginWithConfig(ctx context.Context, c *cli.Command, stdin io.Reader, stdout, stderr io.Writer, load loginLoader) error {
 	status := c.Bool("status")
 	forget := c.Bool("forget")
 	deviceCode := c.Bool("device-code")
@@ -197,11 +263,28 @@ func runLoginWithConfig(ctx context.Context, c *cli.Command, stdin io.Reader, st
 		return cli.Exit("", ExitErr)
 	}
 
-	cfg, err := load(ctx, c.String("config"), stdout)
+	cfg, err := load(ctx, c.String(flagAgentDirName), stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 
 		return cli.Exit("", ExitErr)
+	}
+
+	// Mutating modes participate in the maintenance gate (per-user-install-
+	// agent-isolation): an installer purge excludes them for its whole
+	// operation. Status takes nothing — it stays artifact-free.
+	if !status {
+		maintenance, mErr := daemonlock.AcquireMaintenanceShared(ctx, cfg.RuntimeHome)
+		if mErr != nil {
+			_, _ = fmt.Fprintf(stderr, "failed to acquire the maintenance gate on %s: %v\n", cfg.RuntimeHome, mErr)
+
+			return cli.Exit("", ExitErr)
+		}
+		defer func() {
+			if relErr := maintenance.Release(); relErr != nil {
+				_, _ = fmt.Fprintf(stderr, "release maintenance gate: %v\n", relErr)
+			}
+		}()
 	}
 
 	// Target enumeration comes before store construction: with no
@@ -214,14 +297,89 @@ func runLoginWithConfig(ctx context.Context, c *cli.Command, stdin io.Reader, st
 		return cli.Exit("", ExitErr)
 	}
 
-	store, err := oauth.NewStore(ctx, cfg.OAuth)
+	secretStore, pendingPaths, err := openLoginSecrets(ctx, cfg, status)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 
 		return cli.Exit("", ExitErr)
 	}
 
-	return dispatchLoginMode(ctx, cfg, store, targets, status, forget, deviceCode, stdin, stdout, stderr)
+	// A target owning its own pending credential refuses
+	// before any target/credential/network work and without creating
+	// files. With no target, such targets are skipped with the reason and
+	// the run continues for the rest. In --status mode no target is
+	// skipped: the table reports pending ones as action required, with no
+	// network I/O.
+	if !status {
+		owned := make([]oauthTarget, 0, len(targets))
+		for _, target := range targets {
+			if pendingOwnedByTarget(cfg, target, pendingPaths) {
+				if requested == "" {
+					_, _ = fmt.Fprintf(stdout,
+						"%s: skipped — it owns a pending credential; set it with `ready secrets set <name>` first\n", target)
+
+					continue
+				}
+
+				_, _ = fmt.Fprintf(stderr,
+					"%s: its own credential is pending; set it with `ready secrets set <name>` (see `ready secrets list`)\n", target)
+
+				return cli.Exit("", ExitErr)
+			}
+			owned = append(owned, target)
+		}
+		targets = owned
+		if len(targets) == 0 && requested == "" {
+			_, _ = fmt.Fprintln(stderr, "no OAuth-capable target is currently usable (every target owns a pending credential)")
+
+			return cli.Exit("", ExitErr)
+		}
+	}
+
+	// Credentials live in the agent's encrypted store; --status opened it
+	// read-only, so it never creates a key or a store.
+	var store oauth.Store = oauth.NewSecretStore(secretStore, cfg.OAuth.Path)
+
+	return dispatchLoginMode(ctx, cfg, store, targets, status, forget, deviceCode, stdin, stdout, stderr, pendingPaths)
+}
+
+// pendingStatusLine renders the --status action-required entry for a target
+// that owns a pending credential (metadata only).
+func pendingStatusLine(target oauthTarget, pendingPaths map[string]bool) string {
+	if !pendingOwnedByTargetStatus(target, pendingPaths) {
+		return ""
+	}
+
+	return target.String() + ": credential pending in config.yaml — complete it (manual edit; or the RED entry area under --profile admin)\n"
+}
+
+// pendingOwnedByTargetStatus is pendingOwnedByTarget without a config
+// dependency: the field vocabulary maps the target kind to its classified
+// pending path.
+func pendingOwnedByTargetStatus(target oauthTarget, pendingPaths map[string]bool) bool {
+	switch target.Kind {
+	case targetMCP:
+		return pendingPaths["mcp_servers."+target.Name+".oauth.client_secret"] ||
+			headerPendingFor(target.Name, pendingPaths)
+	case targetLLM:
+		return pendingPaths["llm.providers."+target.Name+".api_key"]
+	default:
+		return false
+	}
+}
+
+// headerPendingFor reports any pending header under one MCP server using
+// the pending map only (status mode knows no config header names, so any
+// mcp_servers.<s>.headers.* path prefix satisfies the ownership rule).
+func headerPendingFor(server string, pendingPaths map[string]bool) bool {
+	prefix := "mcp_servers." + server + ".headers."
+	for path := range pendingPaths {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // resolveOAuthTargets applies the typed, backward-compatible target rules,
@@ -352,17 +510,12 @@ func printCodexStatusEntries(ctx context.Context, cfg *config.Config, targets []
 // retries creation) and prints that row's status line.
 func printCodexStatusEntry(ctx context.Context, cfg *config.Config, name string, codexStore codexauth.Store, stdout io.Writer) codexauth.Store {
 	if codexStore == nil {
-		store, err := codexauth.NewFileStore(ctx, cfg.OAuth.Path)
-		if err != nil {
-			_, _ = fmt.Fprintf(stdout, "llm:%s  credential error  action: ready login llm:%s\n", name, name)
-
-			return nil
-		}
+		store := codexauth.NewSecretStore(cfg.SecretValues.Store(), cfg.OAuth.Path)
 		codexStore = store
 	}
 
 	cred, _ := codexStore.Load(ctx, name)
-	present, expiry, account, action := codexStatusColumns(name, cred, time.Now())
+	present, expiry, account, action := codexStatusColumns(name, cfg.RuntimeHome, cred, time.Now())
 	_, _ = fmt.Fprintf(stdout, "llm:%-20s openai-codex credential=%s expiry=%s account=%s action=%s\n", name, present, expiry, account, action)
 
 	return codexStore
@@ -372,9 +525,9 @@ func printCodexStatusEntry(ctx context.Context, cfg *config.Config, name string,
 // credential row: "none" with the relogin action when no credential is
 // stored, otherwise presence, account id, RFC3339 expiry and the action
 // the Usable predicate deserves.
-func codexStatusColumns(name string, cred *codexauth.Credential, now time.Time) (present, expiry, account, action string) {
+func codexStatusColumns(name, agentDir string, cred *codexauth.Credential, now time.Time) (present, expiry, account, action string) {
 	present, expiry, account = "none", "-", "-"
-	action = fmt.Sprintf("run `ready login llm:%s`", name)
+	action = "run `" + config.LoginCommand(agentDir, "llm:"+name) + "`"
 	if cred == nil {
 		return present, expiry, account, action
 	}
@@ -394,12 +547,7 @@ func runForgetTarget(ctx context.Context, mcpStore oauth.Store, cfg *config.Conf
 	if target.Kind == targetMCP {
 		return runForget(ctx, mcpStore, cfg, target.Name, stdout, stderr)
 	}
-	store, err := codexauth.NewFileStore(ctx, cfg.OAuth.Path)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, err)
-
-		return cli.Exit("", ExitErr)
-	}
+	store := codexauth.NewSecretStore(cfg.SecretValues.Store(), cfg.OAuth.Path)
 	cred, err := store.Load(ctx, target.Name)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
@@ -459,16 +607,20 @@ func runSingleOAuthTarget(
 }
 
 func loginCodexProvider(ctx context.Context, cfg *config.Config, name string, deviceCode bool, stdin io.Reader, stdout io.Writer) error {
-	store, err := codexauth.NewFileStore(ctx, cfg.OAuth.Path)
-	if err != nil {
-		return err
-	}
+	store := codexauth.NewSecretStore(cfg.SecretValues.Store(), cfg.OAuth.Path)
 	client := codexauth.NewClient(&http.Client{Timeout: 30 * time.Second})
+
+	// Snapshot before the interactive/device flow; the commit below compares
+	// so a concurrent daemon refresh/login/forget cannot be clobbered.
+	snapshot, snapErr := store.Snapshot(ctx, name)
+	if snapErr != nil {
+		return fmt.Errorf("failed to snapshot the stored credential: %w", snapErr)
+	}
 	cred, err := obtainCodexCredential(ctx, client, name, deviceCode, stdin, stdout)
 	if err != nil {
 		return err
 	}
-	if err := store.Save(ctx, cred); err != nil {
+	if err := store.SaveCommitted(ctx, cred, snapshot); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "%s: ChatGPT authorization stored for account %s\n", name, cred.PublicAccountID())
@@ -663,7 +815,7 @@ func printLoginStatus(ctx context.Context, store oauth.Store, cfg *config.Config
 	_, _ = fmt.Fprintf(stdout, rowFmt, "SERVER", "GRANT", "CREDENTIAL", "EXPIRY", "ACTION REQUIRED")
 
 	for _, name := range servers {
-		printLoginStatusRow(ctx, store, name, cfg.MCPServers[name], now, stdout)
+		printLoginStatusRow(ctx, store, name, cfg.MCPServers[name], cfg.RuntimeHome, now, stdout)
 	}
 }
 
@@ -675,6 +827,7 @@ func printLoginStatusRow(
 	store oauth.Store,
 	name string,
 	srv config.MCPServerConfig,
+	agentDir string,
 	now time.Time,
 	stdout io.Writer,
 ) {
@@ -692,7 +845,7 @@ func printLoginStatusRow(
 	}
 
 	cred, _ := store.Load(ctx, name)
-	credentialCol, expiryCol, actionCol := loginStatusColumns(name, cred, now)
+	credentialCol, expiryCol, actionCol := loginStatusColumns(name, agentDir, cred, now)
 	_, _ = fmt.Fprintf(stdout, rowFmt, name, grant, credentialCol, expiryCol, actionCol)
 }
 
@@ -700,8 +853,8 @@ func printLoginStatusRow(
 // stored MCP credential: "none" with the relogin action when absent,
 // otherwise presence, the RFC3339 expiry when recorded, and the action the
 // Usable predicate deserves at now.
-func loginStatusColumns(name string, cred *oauth.Credential, now time.Time) (credentialCol, expiryCol, actionCol string) {
-	credentialCol, expiryCol, actionCol = statusActionNone, "-", fmt.Sprintf("run `ready login %s`", name)
+func loginStatusColumns(name, agentDir string, cred *oauth.Credential, now time.Time) (credentialCol, expiryCol, actionCol string) {
+	credentialCol, expiryCol, actionCol = statusActionNone, "-", "run `"+config.LoginCommand(agentDir, name)+"`"
 	if cred == nil {
 		return credentialCol, expiryCol, actionCol
 	}
@@ -732,9 +885,8 @@ func isLikelyAutonomous(oa *config.MCPOAuthConfig, grant string) bool {
 		return false
 	}
 
-	secret, err := oa.ResolveClientSecret()
-
-	return err == nil && oa.ClientID != "" && secret != ""
+	// Structural: a client secret reference (not its value) selects the grant.
+	return oa.ClientID != "" && oa.ClientSecret.IsSet()
 }
 
 // runForget implements `--forget` (task 7.7): deregister when RFC 7592
@@ -801,9 +953,16 @@ func mapLoginErr(ctx context.Context, err error) error {
 // skipped, not treated as an error.
 func loginServer(ctx context.Context, cfg *config.Config, store oauth.Store, name string, stdout io.Writer) error {
 	srv := cfg.MCPServers[name]
+	// Secret-capable plain field: resolve the reference (login runs with the
+	// store open). A pending URL cannot be probed — refuse with the remedy.
+	if pending, err := srv.URL.Resolve(ctx, cfg, "mcp_servers."+name+".url"); err != nil {
+		return fmt.Errorf("failed to resolve the MCP URL secret: %w", err)
+	} else if pending || srv.URL.Value == "" {
+		return fmt.Errorf("mcp_servers.%s.url is pending: enter its value with the secret editor or `ready secrets set`, then retry", name)
+	}
 	httpClient := homemcp.NewScopedHTTPClient(&srv)
 
-	challenges, err := oauth.Probe(ctx, httpClient, srv.URL)
+	challenges, err := oauth.Probe(ctx, httpClient, srv.URL.Value)
 	if err != nil {
 		if errors.Is(err, oauth.ErrNoAuthorizationRequired) {
 			_, _ = fmt.Fprintf(stdout, "%s: server does not require authorization\n", name)
@@ -814,7 +973,7 @@ func loginServer(ctx context.Context, cfg *config.Config, store oauth.Store, nam
 		return fmt.Errorf("probe failed: %w", err)
 	}
 
-	prm, err := oauth.DiscoverProtectedResource(ctx, httpClient, challenges, srv.URL)
+	prm, err := oauth.DiscoverProtectedResource(ctx, httpClient, challenges, srv.URL.Value)
 	if err != nil {
 		return fmt.Errorf("protected resource discovery failed: %w", err)
 	}
@@ -824,12 +983,12 @@ func loginServer(ctx context.Context, cfg *config.Config, store oauth.Store, nam
 		return fmt.Errorf("authorization server discovery failed: %w", err)
 	}
 
-	secret, err := srv.OAuth.ResolveClientSecret()
+	secret, secretOK, err := cfg.ResolveSecret(ctx, srv.OAuth.ClientSecret, "mcp_servers."+name+".oauth.client_secret")
 	if err != nil {
 		return fmt.Errorf("failed to resolve client secret: %w", err)
 	}
 
-	hasClientCredentials := srv.OAuth.ClientID != "" && secret != ""
+	hasClientCredentials := srv.OAuth.ClientID != "" && secretOK && secret != ""
 	authServerSupportsCC := slices.Contains(asm.GrantTypesSupported, "client_credentials")
 	grant := oauth.ResolveGrant(srv.OAuth.Grant, hasClientCredentials, authServerSupportsCC)
 
@@ -863,7 +1022,24 @@ func loginAuthorizationCode(
 		return fmt.Errorf("failed to load stored credential: %w", err)
 	}
 
+	// Snapshot the target's generation before any interactive work; the
+	// guarded store compares before every commit, so concurrent daemon/
+	// login/forget activity fails explicitly instead of overwriting.
+	snapshot, snapErr := store.Snapshot(ctx, name)
+	if snapErr != nil {
+		return fmt.Errorf("failed to snapshot the stored credential: %w", snapErr)
+	}
+	store = &generationGuardedStore{inner: store, name: name, snapshot: snapshot}
+
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", cfg.OAuth.RedirectPort)
+
+	// Redirect registration mismatch (per-user-install-agent-isolation): a
+	// port change does not update a stored registration — detect it BEFORE
+	// the interactive flow and name the correct remedy per registration
+	// kind. Merely repeating login is not a remedy.
+	if existing != nil && existing.RedirectURI != "" && existing.RedirectURI != redirectURI {
+		return redirectMismatch(existing, redirectURI, cfg.RuntimeHome)
+	}
 
 	var fetcherErr error
 
@@ -947,6 +1123,68 @@ func trackingFetcher(
 
 		return res, ferr
 	}
+}
+
+// redirectMismatch explains a stored registration whose redirect URI no
+// longer matches the configured callback: dynamically registered clients
+// need an explicit forget + re-registration; operator-registered clients
+// must have their allowed redirect URIs updated at the authorization
+// server. It never claims that repeating login updates the registration.
+func redirectMismatch(existing *oauth.Credential, redirectURI, agentDir string) error {
+	if existing.RegistrationAccessToken != "" || existing.RegistrationClientURI != "" {
+		return fmt.Errorf("stored dynamic registration redirects to %s but the configured callback is %s — run `%s` to deregister it, then log in again (repeating login alone will not update the registration)",
+			existing.RedirectURI, redirectURI, config.LoginCommand(agentDir, "mcp:"+existing.ServerKey+" --forget"))
+	}
+
+	return fmt.Errorf("stored client registration redirects to %s but the configured callback is %s — this is an operator-registered client: update its allowed redirect URIs at the authorization server before logging in (repeating login alone will not update the registration)",
+		existing.RedirectURI, redirectURI)
+}
+
+// generationGuardedStore wraps the MCP store for one interactive login: its
+// Save/Delete are compare-committed against the snapshot taken before the
+// flow, and the snapshot advances with each of this flow's own commits so a
+// two-write login (registration, then exchange) does not conflict with
+// itself.
+type generationGuardedStore struct {
+	inner    oauth.Store
+	name     string
+	snapshot int64
+}
+
+func (g *generationGuardedStore) Load(ctx context.Context, serverKey string) (*oauth.Credential, error) {
+	return g.inner.Load(ctx, serverKey)
+}
+
+func (g *generationGuardedStore) Snapshot(ctx context.Context, serverKey string) (int64, error) {
+	return g.inner.Snapshot(ctx, serverKey)
+}
+
+func (g *generationGuardedStore) SaveCommitted(ctx context.Context, cred *oauth.Credential, snapshotGen int64) error {
+	return g.inner.SaveCommitted(ctx, cred, snapshotGen)
+}
+
+func (g *generationGuardedStore) Save(ctx context.Context, cred *oauth.Credential) error {
+	if cred == nil || cred.ServerKey != g.name {
+		return g.inner.Save(ctx, cred)
+	}
+	if err := g.inner.SaveCommitted(ctx, cred, g.snapshot); err != nil {
+		return err
+	}
+	g.snapshot = cred.Generation
+
+	return nil
+}
+
+func (g *generationGuardedStore) Delete(ctx context.Context, serverKey string) error {
+	dErr := g.inner.Delete(ctx, serverKey)
+	if serverKey == g.name {
+		snap, snapErr := g.inner.Snapshot(ctx, serverKey)
+		if snapErr == nil {
+			g.snapshot = snap
+		}
+	}
+
+	return dErr
 }
 
 // repudiatedStoredRegistration reports whether a failed first attempt is
@@ -1048,7 +1286,7 @@ func resolveClientRegistration(
 ) (*oauthex.ClientCredentials, oauth.CredentialMeta, error) {
 	meta := oauth.CredentialMeta{
 		ServerKey:   name,
-		ResourceURL: srv.URL,
+		ResourceURL: srv.URL.Value,
 		Issuer:      asm.Issuer,
 		Resource:    prm.Resource,
 		RedirectURI: redirectURI,
@@ -1163,15 +1401,15 @@ func printLoginSuccess(
 		_, _ = fmt.Fprintf(stdout, "  - %s: %s\n", info.Name, info.Desc)
 	}
 
-	if activeProfileName, _, profErr := cfg.ResolveProfile("", os.Getenv("READY_MCP_PROFILE")); profErr == nil {
+	if activeProfileName, _, profErr := cfg.ResolveProfile("", os.Getenv(config.ProfileEnvName)); profErr == nil {
 		gated, _ := profile.GateOwner(ctx, name, tools, srv.Profiles, activeProfileName, false, zerolog.Nop())
 		_, _ = fmt.Fprintf(stdout, "%s: %d of %d tool(s) exposed under the %q profile\n", name, len(gated), len(tools), activeProfileName)
 	}
 
 	if persisted != nil && persisted.RefreshToken == "" {
 		_, _ = fmt.Fprintf(stdout,
-			"%s: warning: no refresh token was issued — a new `ready login %s` will be required at every access-token expiry\n",
-			name, name)
+			"%s: warning: no refresh token was issued — a new `%s` will be required at every access-token expiry\n",
+			name, config.LoginCommand(cfg.RuntimeHome, name))
 	}
 
 	_, _ = fmt.Fprintf(stdout, "%s: if `ready serve` is already running, restart it for these tools to become available\n", name)

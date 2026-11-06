@@ -72,6 +72,20 @@ var replaceTextTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"replacementsMade": {"type": "integer"},
+	"replacedAtLines": {
+		"type": ["array", "null"],
+		"items": {"type": "integer"}
+	}
+},
+"required": ["replacementsMade", "replacedAtLines"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: replaceTextFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

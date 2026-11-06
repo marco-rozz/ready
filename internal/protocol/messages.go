@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -32,23 +33,27 @@ type RequestType string
 // which held only for graceful exits and left killed clients holding the
 // session lock until the idle watchdog.
 const (
-	RequestTypeSessionStart RequestType = "session_start"
-	RequestTypeSessionEnd   RequestType = "session_end"
-	RequestTypeMessage      RequestType = "message"
-	RequestTypeExec         RequestType = "exec"
-	RequestTypeSessionInfo  RequestType = "session_info"
-	RequestTypeContextUsage RequestType = "context_usage"
-	RequestTypePing         RequestType = "ping"
+	RequestTypeSessionStart  RequestType = "session_start"
+	RequestTypeSessionEnd    RequestType = "session_end"
+	RequestTypeMessage       RequestType = "message"
+	RequestTypeExec          RequestType = "exec"
+	RequestTypeSessionInfo   RequestType = "session_info"
+	RequestTypeContextUsage  RequestType = "context_usage"
+	RequestTypePing          RequestType = "ping"
+	RequestTypeSecretEntry   RequestType = "secret_entry"
+	RequestTypeOAuthLogin    RequestType = "oauth_login"
+	RequestTypeRuntimeReload RequestType = "runtime_reload"
 )
 
-// isAllowedRequestType reports whether t is one of the seven allowed
+// isAllowedRequestType reports whether t is one of the ten allowed
 // RequestType values. A switch keeps the lookup table off the package globals
 // and lets the compiler check exhaustiveness at the call site.
 func isAllowedRequestType(t RequestType) bool {
 	switch t {
 	case RequestTypeSessionStart, RequestTypeSessionEnd, RequestTypeMessage,
 		RequestTypeExec, RequestTypeSessionInfo, RequestTypeContextUsage,
-		RequestTypePing:
+		RequestTypePing, RequestTypeSecretEntry, RequestTypeOAuthLogin,
+		RequestTypeRuntimeReload:
 		return true
 	default:
 		return false
@@ -116,6 +121,81 @@ func isAllowedModelState(s ModelState) bool {
 // the applicable terminal message travels in Content.
 const ErrorCodeLLMUnavailable = "llm_unavailable"
 
+// ErrorCodeProtocolMismatch is the error_code of a session_start response
+// whose declared protocol_version differs from the daemon's (guided-init
+// D11a). No challenge, nonce, HMAC or session state is created for that
+// identity; the client closes and prints both versions.
+const ErrorCodeProtocolMismatch = "protocol_mismatch"
+
+// Stable secret-entry vocabulary. These values are deliberately independent
+// of human-facing content so clients can render safe guidance without parsing
+// daemon prose.
+const (
+	ErrorCodeMalformedRequest   = "malformed_request"
+	ErrorCodeNoActiveSession    = "no_active_session"
+	ErrorCodeLoopbackRequired   = "loopback_required"
+	ErrorCodeProfileRequired    = "profile_required"
+	ErrorCodeNoPendingSecrets   = "no_pending_secrets" //nolint:gosec // stable protocol error code, not a credential
+	ErrorCodeRequestInFlight    = "request_in_flight"
+	ErrorCodeSecretEntryActive  = "secret_entry_active"
+	ErrorCodeSecretEntryExpired = "secret_entry_expired"
+	ErrorCodeInvalidValue       = "invalid_value" // a value rule failed; the rule code rides SecretEntryResponse.RuleCode
+	ErrorCodeUnknownName        = "unknown_name"  // the Secret name is neither referenced nor stored
+	ErrorCodeNameInUse          = "name_in_use"   // delete refused: a configuration field still references the name
+	ErrorCodeWriteNotCommitted  = "write_not_committed"
+)
+
+type SecretEntryAction string
+
+const (
+	SecretEntryActionList   SecretEntryAction = "list"
+	SecretEntryActionBegin  SecretEntryAction = "begin"
+	SecretEntryActionSubmit SecretEntryAction = "submit"
+	SecretEntryActionDelete SecretEntryAction = "delete"
+	SecretEntryActionEnd    SecretEntryAction = "end"
+)
+
+type SecretEntryOutcome string
+
+const (
+	SecretEntryOutcomeListed    SecretEntryOutcome = "listed"
+	SecretEntryOutcomeActive    SecretEntryOutcome = "active"
+	SecretEntryOutcomeCommitted SecretEntryOutcome = "committed"
+	SecretEntryOutcomeDeleted   SecretEntryOutcome = "deleted"
+	SecretEntryOutcomeReleased  SecretEntryOutcome = "released"
+	SecretEntryOutcomeRefused   SecretEntryOutcome = "refused"
+)
+
+type OAuthLoginAction string
+
+const (
+	OAuthLoginActionBegin  OAuthLoginAction = "begin"
+	OAuthLoginActionSubmit OAuthLoginAction = "submit"
+	OAuthLoginActionCancel OAuthLoginAction = "cancel"
+)
+
+type OAuthLoginOutcome string
+
+const (
+	OAuthLoginOutcomeWaiting     OAuthLoginOutcome = "waiting"
+	OAuthLoginOutcomeCommitted   OAuthLoginOutcome = "committed"
+	OAuthLoginOutcomeNotRequired OAuthLoginOutcome = "not_required"
+	OAuthLoginOutcomeCancelled   OAuthLoginOutcome = "cancelled"
+	OAuthLoginOutcomeRefused     OAuthLoginOutcome = "refused"
+)
+
+// Version is the ZMQ wire-protocol version (guided-init D11a). It is an
+// integer independent of the software release: a release that changes no
+// wire contract keeps this value (mixed releases still connect); a wire
+// change a strict previous-version peer would reject or misinterpret bumps
+// it. It applies to the ZMQ transport only; no other channel negotiates.
+const Version = 3
+
+// PredatesVersioningGuess is the client's message when a handshake response
+// cannot carry a protocol version at all — an unmarshal refusal or an error
+// reply without the field, i.e. a daemon from before protocol versioning.
+const PredatesVersioningHint = "daemon predates protocol versioning"
+
 // isAllowedResponseStatus reports whether s is one of the five allowed
 // ResponseStatus values.
 func isAllowedResponseStatus(s ResponseStatus) bool {
@@ -156,6 +236,84 @@ type Request struct {
 	RequestID    string      `json:"request_id,omitempty"`
 	AuthToken    string      `json:"auth_token,omitempty"`
 	Content      string      `json:"content,omitempty"`
+	// ProtocolVersion rides BOTH session_start rounds and nothing else
+	// (guided-init D11a): the daemon requires exact equality before any
+	// authentication work. Zero here means a peer that predates protocol
+	// versioning — a mismatch by definition.
+	ProtocolVersion int                 `json:"protocol_version,omitempty"`
+	SecretEntry     *SecretEntryRequest `json:"secret_entry,omitempty"`
+	OAuthLogin      *OAuthLoginRequest  `json:"oauth_login,omitempty"`
+}
+
+// OAuthLoginRequest is the strict, dedicated OAuth login control payload
+// coordinated over ZMQ for an interactive loopback client.
+type OAuthLoginRequest struct {
+	Action      OAuthLoginAction `json:"action"`
+	OperationID string           `json:"operation_id,omitempty"`
+	Target      string           `json:"target,omitempty"`
+	Value       *string          `json:"value,omitempty"`
+}
+
+// OAuthLoginResponse carries the daemon's response or unsolicited control
+// result for an interactive OAuth login operation.
+type OAuthLoginResponse struct {
+	Action        OAuthLoginAction  `json:"action,omitempty"`
+	OperationID   string            `json:"operation_id,omitempty"`
+	Target        string            `json:"target,omitempty"`
+	Outcome       OAuthLoginOutcome `json:"outcome"`
+	AuthURL       string            `json:"auth_url,omitempty"`
+	AcceptsManual bool              `json:"accepts_manual,omitempty"`
+	Warnings      []string          `json:"warnings,omitempty"`
+}
+
+// SecretEntryRequest is the strict, dedicated credential-entry control
+// payload, addressed by Secret name. Presence of Value is significant: an
+// empty value is still a submitted value and is refused by the value rules.
+type SecretEntryRequest struct {
+	Action      SecretEntryAction `json:"action"`
+	OperationID string            `json:"operation_id,omitempty"`
+	Name        string            `json:"name,omitempty"`
+	Value       *string           `json:"value,omitempty"`
+}
+
+// SecretState is the daemon-derived state of one Secret name.
+type SecretState string
+
+const (
+	SecretStatePending  SecretState = "pending"
+	SecretStateSet      SecretState = "set"
+	SecretStateUnused   SecretState = "unused"
+	SecretStateExternal SecretState = "pending_external"
+)
+
+// PendingSecret is one Secret name with the configuration fields that
+// reference it and its derived state. It never carries a value.
+type PendingSecret struct {
+	Name   string      `json:"name"`
+	Fields []string    `json:"fields,omitempty"`
+	State  SecretState `json:"state"`
+	// Rule is the violated value rule when a present value is non-conforming.
+	Rule string `json:"rule,omitempty"`
+}
+
+// CredentialInfo summarizes one login-managed OAuth Credential.
+type CredentialInfo struct {
+	Target    string `json:"target"`
+	State     string `json:"state"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+type SecretEntryResponse struct {
+	Action      SecretEntryAction  `json:"action"`
+	OperationID string             `json:"operation_id,omitempty"`
+	Outcome     SecretEntryOutcome `json:"outcome"`
+	Warnings    []string           `json:"warnings,omitempty"`
+	// RuleCode names the violated value rule on invalid_value.
+	RuleCode string `json:"rule_code,omitempty"`
+	// Secrets and Credentials answer a list action: every Secret name and
+	// every Credential, never a value.
+	Secrets     []PendingSecret  `json:"secrets,omitempty"`
+	Credentials []CredentialInfo `json:"credentials,omitempty"`
 }
 
 // UsageInfo carries a session's cumulative LLM token usage (the architecture decision records):
@@ -213,6 +371,28 @@ type Response struct {
 	// Compaction rides the unsolicited `compacted` control event only
 	// (session-lifecycle): the token estimates before and after.
 	Compaction *CompactionInfo `json:"compaction,omitempty"`
+	// AgentDir rides the authenticated handshake ok response only
+	// (per-user-install-agent-isolation): the daemon-authoritative agent
+	// directory for the interactive startup block, home-prefix sanitised
+	// daemon-side (a leading ~ denotes the daemon user's home). Challenges,
+	// auth failures and unauthenticated responses omit it; clients never
+	// infer it from local config/cwd.
+	AgentDir string `json:"agent_dir,omitempty"`
+	// ProtocolVersion rides every response to a session_start (challenge,
+	// ok, auth_fail, busy and protocol_mismatch) and is absent elsewhere
+	// (guided-init D11a). A successful handshake fixes the version for the
+	// whole connection. The client checks it before any HMAC work.
+	ProtocolVersion int `json:"protocol_version,omitempty"`
+	// AgentID and AgentName ride the authenticated handshake ok response
+	// only: the daemon's agent identity, shown by the TUI.
+	AgentID        string               `json:"agent_id,omitempty"`
+	AgentName      string               `json:"agent_name,omitempty"`
+	PendingSecrets []PendingSecret      `json:"pending_secrets,omitempty"`
+	Secrets        []PendingSecret      `json:"secrets,omitempty"`
+	Credentials    []CredentialInfo     `json:"credentials,omitempty"`
+	SecretEntry    *SecretEntryResponse `json:"secret_entry,omitempty"`
+	OAuthLogin     *OAuthLoginResponse  `json:"oauth_login,omitempty"`
+	ConfigSaved    bool                 `json:"config_saved,omitempty"`
 }
 
 // CompactionInfo carries a Compaction's estimated prompt size before and
@@ -222,15 +402,21 @@ type CompactionInfo struct {
 	TokensAfter  int `json:"tokens_after"`
 }
 
-// Content values of the unsolicited Session lifecycle control events
-// (Status=ok, ResponseType=control, no error_code). Neither consumes a
-// pending reply slot.
+// Content values of the unsolicited Session lifecycle and post-save activation
+// control events (Status=ok, ResponseType=control, no error_code). None of
+// them consumes a pending reply slot.
 const (
 	// ControlSessionChanged announces a new conversation Session (carries
 	// SessionID, no Usage).
 	ControlSessionChanged = "session_changed"
 	// ControlCompacted announces a completed Compaction (carries Compaction).
 	ControlCompacted = "compacted"
+	// ControlOAuthLoginResult announces completion of an interactive OAuth
+	// login callback on the daemon (carries OAuthLogin).
+	ControlOAuthLoginResult = "oauth_login_result"
+	// ControlConfigReloaded announces completion of an in-process runtime
+	// reload triggered outside the connected TUI.
+	ControlConfigReloaded = "config_reloaded"
 )
 
 // Validate checks structural and semantic invariants on a Request. It returns
@@ -252,7 +438,7 @@ func (r Request) Validate() error {
 	}
 
 	if !isAllowedRequestType(r.Type) {
-		return fmt.Errorf("%w: unknown type %q", ErrMalformedRequest, string(r.Type))
+		return fmt.Errorf("%w: unknown request type", ErrMalformedRequest)
 	}
 
 	if r.Timestamp == "" {
@@ -260,7 +446,40 @@ func (r Request) Validate() error {
 	}
 
 	if _, err := time.Parse(time.RFC3339, r.Timestamp); err != nil {
-		return fmt.Errorf("%w: timestamp %q is not valid RFC3339: %w", ErrMalformedRequest, r.Timestamp, err)
+		return fmt.Errorf("%w: invalid timestamp", ErrMalformedRequest)
+	}
+
+	// Missing and differing session_start versions reach the daemon gate,
+	// which returns protocol_mismatch with the daemon's version before auth.
+	if r.Type != RequestTypeSessionStart && r.ProtocolVersion != 0 {
+		return fmt.Errorf("%w: protocol_version is carried on session_start only", ErrMalformedRequest)
+	}
+	if r.Type == RequestTypeSecretEntry {
+		if r.RequestID == "" || r.Content != "" || r.AuthToken != "" || r.SecretEntry == nil {
+			return fmt.Errorf("%w: secret_entry requires request_id, empty content, no auth_token and a payload", ErrMalformedRequest)
+		}
+		if err := r.SecretEntry.validate(); err != nil {
+			return err
+		}
+	} else if r.SecretEntry != nil {
+		return fmt.Errorf("%w: secret_entry is allowed only for secret_entry requests", ErrMalformedRequest)
+	}
+
+	if r.Type == RequestTypeOAuthLogin {
+		if r.RequestID == "" || r.Content != "" || r.AuthToken != "" || r.OAuthLogin == nil {
+			return fmt.Errorf("%w: oauth_login requires request_id, empty content, no auth_token and a payload", ErrMalformedRequest)
+		}
+		if err := r.OAuthLogin.validate(); err != nil {
+			return err
+		}
+	} else if r.OAuthLogin != nil {
+		return fmt.Errorf("%w: oauth_login is allowed only for oauth_login requests", ErrMalformedRequest)
+	}
+
+	if r.Type == RequestTypeRuntimeReload {
+		if r.RequestID == "" || r.Content != "" || r.AuthToken != "" {
+			return fmt.Errorf("%w: runtime_reload requires request_id, empty content and no auth_token", ErrMalformedRequest)
+		}
 	}
 
 	return nil
@@ -281,6 +500,119 @@ func (r Response) Validate() error {
 	if !isAllowedModelState(r.ModelState) {
 		return fmt.Errorf("%w: unknown model_state %q", ErrMalformedResponse, string(r.ModelState))
 	}
+	if r.SecretEntry != nil {
+		if !validSecretAction(r.SecretEntry.Action) || !validSecretOutcome(r.SecretEntry.Outcome) {
+			return fmt.Errorf("%w: invalid secret_entry response", ErrMalformedResponse)
+		}
+	}
+	if r.OAuthLogin != nil {
+		if (r.OAuthLogin.Action != "" && !validOAuthLoginAction(r.OAuthLogin.Action)) || !validOAuthLoginOutcome(r.OAuthLogin.Outcome) {
+			return fmt.Errorf("%w: invalid oauth_login response", ErrMalformedResponse)
+		}
+	}
+
+	return nil
+}
+
+func validOAuthLoginAction(a OAuthLoginAction) bool {
+	switch a {
+	case OAuthLoginActionBegin, OAuthLoginActionSubmit, OAuthLoginActionCancel:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOAuthLoginOutcome(outcome OAuthLoginOutcome) bool {
+	switch outcome {
+	case OAuthLoginOutcomeWaiting, OAuthLoginOutcomeCommitted, OAuthLoginOutcomeNotRequired, OAuthLoginOutcomeCancelled, OAuthLoginOutcomeRefused:
+		return true
+	default:
+		return false
+	}
+}
+
+func validOAuthTarget(target string) bool {
+	if len(target) <= 4 {
+		return false
+	}
+	prefix := target[:4]
+
+	return prefix == "llm:" || prefix == "mcp:"
+}
+
+func (o OAuthLoginRequest) validate() error {
+	if !validOAuthLoginAction(o.Action) {
+		return fmt.Errorf("%w: unknown oauth_login action", ErrMalformedRequest)
+	}
+	if !validOAuthTarget(o.Target) {
+		return fmt.Errorf("%w: oauth_login requires a valid llm:<name> or mcp:<name> target", ErrMalformedRequest)
+	}
+	has := func(v string) bool { return v != "" }
+	switch o.Action {
+	case OAuthLoginActionBegin:
+		if has(o.OperationID) || o.Value != nil {
+			return fmt.Errorf("%w: oauth_login begin accepts target only", ErrMalformedRequest)
+		}
+	case OAuthLoginActionSubmit:
+		if !has(o.OperationID) || o.Value == nil {
+			return fmt.Errorf("%w: oauth_login submit requires operation_id, target and value", ErrMalformedRequest)
+		}
+	case OAuthLoginActionCancel:
+		if !has(o.OperationID) || o.Value != nil {
+			return fmt.Errorf("%w: oauth_login cancel requires operation_id and target only", ErrMalformedRequest)
+		}
+	}
+
+	return nil
+}
+
+func validSecretAction(a SecretEntryAction) bool {
+	switch a {
+	case SecretEntryActionList, SecretEntryActionBegin, SecretEntryActionSubmit, SecretEntryActionDelete, SecretEntryActionEnd:
+		return true
+	default:
+		return false
+	}
+}
+
+func validSecretOutcome(outcome SecretEntryOutcome) bool {
+	switch outcome {
+	case SecretEntryOutcomeListed, SecretEntryOutcomeActive, SecretEntryOutcomeCommitted, SecretEntryOutcomeDeleted, SecretEntryOutcomeReleased, SecretEntryOutcomeRefused:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s SecretEntryRequest) validate() error {
+	if !validSecretAction(s.Action) {
+		return fmt.Errorf("%w: unknown secret_entry action", ErrMalformedRequest)
+	}
+	has := func(v string) bool { return v != "" }
+	switch s.Action {
+	case SecretEntryActionList:
+		if has(s.OperationID) || has(s.Name) || s.Value != nil {
+			return fmt.Errorf("%w: list accepts action only", ErrMalformedRequest)
+		}
+	case SecretEntryActionBegin:
+		// An optional name selects one Secret for rotation.
+		if has(s.OperationID) || s.Value != nil {
+			return fmt.Errorf("%w: begin accepts an optional name only", ErrMalformedRequest)
+		}
+	case SecretEntryActionSubmit:
+		if !has(s.OperationID) || !has(s.Name) || s.Value == nil {
+			return fmt.Errorf("%w: submit requires operation_id, name and value", ErrMalformedRequest)
+		}
+	case SecretEntryActionDelete:
+		if !has(s.Name) || has(s.OperationID) || s.Value != nil {
+			return fmt.Errorf("%w: delete requires name only", ErrMalformedRequest)
+		}
+	case SecretEntryActionEnd:
+		if !has(s.OperationID) || has(s.Name) || s.Value != nil {
+			return fmt.Errorf("%w: end requires operation_id only", ErrMalformedRequest)
+		}
+	}
 
 	return nil
 }
@@ -297,6 +629,30 @@ func Marshal(v any) ([]byte, error) {
 	return b, nil
 }
 
+// MarshalJSON distinguishes an authoritative empty set from metadata that is
+// unavailable (omitted): a non-nil empty pending_secrets, secrets or
+// credentials slice is emitted as [], a nil one is omitted.
+func (r Response) MarshalJSON() ([]byte, error) {
+	type wire Response
+	out := struct {
+		wire
+		PendingSecrets *[]PendingSecret  `json:"pending_secrets,omitempty"`
+		Secrets        *[]PendingSecret  `json:"secrets,omitempty"`
+		Credentials    *[]CredentialInfo `json:"credentials,omitempty"`
+	}{wire: wire(r)}
+	if r.PendingSecrets != nil {
+		out.PendingSecrets = &r.PendingSecrets
+	}
+	if r.Secrets != nil {
+		out.Secrets = &r.Secrets
+	}
+	if r.Credentials != nil {
+		out.Credentials = &r.Credentials
+	}
+
+	return json.Marshal(out)
+}
+
 // UnmarshalRequest decodes data into a Request, rejecting unknown JSON fields
 // and calling Validate on the result. Any failure returns an error that
 // satisfies errors.Is(err, ErrMalformedRequest).
@@ -307,7 +663,10 @@ func UnmarshalRequest(data []byte) (Request, error) {
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(&req); err != nil {
-		return Request{}, fmt.Errorf("%w: %w", ErrMalformedRequest, err)
+		return Request{}, fmt.Errorf("%w: invalid request encoding", ErrMalformedRequest)
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		return Request{}, ErrMalformedRequest
 	}
 
 	if err := req.Validate(); err != nil {
@@ -327,7 +686,10 @@ func UnmarshalResponse(data []byte) (Response, error) {
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(&resp); err != nil {
-		return Response{}, fmt.Errorf("%w: %w", ErrMalformedResponse, err)
+		return Response{}, fmt.Errorf("%w: invalid response encoding", ErrMalformedResponse)
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		return Response{}, ErrMalformedResponse
 	}
 
 	if err := resp.Validate(); err != nil {

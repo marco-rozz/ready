@@ -55,6 +55,33 @@ var listDirectoryTool = spec.Tool{
 "required": [],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"path": {"type": "string"},
+	"reachedMaxEntries": {"type": "boolean"},
+	"items": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"name": {"type": "string"},
+				"kind": {
+					"type": "string",
+					"enum": ["all", "file", "directory", "other"]
+				}
+			},
+			"required": ["name", "kind"],
+			"additionalProperties": false
+		}
+	}
+},
+"required": ["path", "reachedMaxEntries"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: listDirectoryFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

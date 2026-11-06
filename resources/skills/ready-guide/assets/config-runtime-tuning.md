@@ -1,7 +1,11 @@
 # Tuning the numbers — what to set, what to leave alone
 
 These five knobs are the ones worth tuning on a real deployment, and the
-only ones where measured evidence beats rules of thumb:
+only ones where measured evidence beats rules of thumb. (This asset tunes
+**token budgets from evidence**. For the *timeout* clocks — what bounds a
+turn, a tool call, a dead link — and for tuning by **expectations** before
+evidence exists, read `assets/config-timeouts.md`. The two pair: this one
+once the daemon has run for a while, that one at first setup.)
 
 ## context_window (per provider instance)
 
@@ -47,6 +51,8 @@ the first chunk; a healthy stream never gets cut by it.
   flapping between two providers.
 - `sessions.*` — defaults match the session-model design; tune only
   retention when disk space matters.
+- Every other timeout key — the full clock map and the log-line symptom
+  index that justifies moving one live in `assets/config-timeouts.md`.
 
 ## Reading runtime evidence (operator's view)
 

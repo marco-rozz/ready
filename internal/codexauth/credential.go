@@ -31,6 +31,11 @@ type Credential struct {
 	Expiry       time.Time `json:"expiry"`
 	AccountID    string    `json:"chatgpt_account_id"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// Generation is the monotonic cross-process record generation (per-user-
+	// install-agent-isolation): bumped by every Save under the target's
+	// coordination lock; interactive login snapshots/compares it and the
+	// token source re-checks it on every fetch.
+	Generation int64 `json:"generation,omitempty"`
 }
 
 // NewCredential constructs a record with the current storage version.

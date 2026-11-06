@@ -13,6 +13,9 @@ import (
 
 const backupTimeFormat = "20060102T150405.000000000Z"
 
+// backupEncryptedSuffix marks a config backup sealed to the Store key.
+const backupEncryptedSuffix = ".age"
+
 func acquireMigrationLock(ctx context.Context, path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -56,7 +59,7 @@ func readMigrationSource(ctx context.Context, path string) ([]byte, os.FileInfo,
 		return nil, nil, fmt.Errorf("stat config %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("config %s: migration requires a regular unlinked file; copy the config and use --config", path)
+		return nil, nil, fmt.Errorf("config %s: %w: migration requires a regular unlinked file; copy the config and use --config", path, ErrNotRegularConfig)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -83,57 +86,12 @@ func readMigrationSource(ctx context.Context, path string) ([]byte, os.FileInfo,
 }
 
 func commitMigration(ctx context.Context, path string, source, candidate []byte, info os.FileInfo, report *MigrationReport, fs migrationIO) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("commit config: %w", err)
-	}
-	dir := filepath.Dir(path)
-	write := fs.write
-	if write == nil {
-		write = writeMigrationFile
-	}
-	backup, err := write(ctx, path, filepath.Base(path)+".bak."+time.Now().UTC().Format(backupTimeFormat)+".*", source, info.Mode().Perm()&0o600)
-	if err != nil {
-		return err
-	}
-	report.BackupPath = backup
-	// Persist the backup directory entry before publishing a new config.
-	if err = fs.syncDir(ctx, dir); err != nil {
-		return fmt.Errorf("sync backup directory: %w", err)
-	}
-	tmp, err := write(ctx, path, "."+filepath.Base(path)+".migration-*", candidate, info.Mode().Perm()&0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp) }()
-	if err = os.Chmod(tmp, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("preserve config permissions: %w", err)
-	}
-	current, currentInfo, err := readMigrationSource(ctx, path)
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(info, currentInfo) || info.Mode() != currentInfo.Mode() || !bytes.Equal(source, current) {
-		return ErrConfigSourceConflict
-	}
-	if err = ctx.Err(); err != nil {
-		return fmt.Errorf("commit config: %w", err)
-	}
-	if err = fs.replace(ctx, tmp, path); err != nil {
-		return fmt.Errorf("replace config: %w", err)
-	}
-	report.Committed = true
-	if err = fs.syncDir(ctx, dir); err != nil {
-		return fmt.Errorf("sync committed config directory: %w", err)
-	}
-	prune := fs.prune
-	if prune == nil {
-		prune = pruneConfigBackups
-	}
-	if err = prune(ctx, path); err != nil {
-		report.Warnings = append(report.Warnings, err.Error())
-	}
+	committedReport, err := commitConfig(ctx, path, source, candidate, info, fs)
+	report.BackupPath = committedReport.BackupPath
+	report.Committed = committedReport.Committed
+	report.Warnings = append(report.Warnings, committedReport.Warnings...)
 
-	return nil
+	return err
 }
 
 func writeMigrationFile(ctx context.Context, sourcePath, pattern string, data []byte, mode os.FileMode) (string, error) {
@@ -189,7 +147,7 @@ func pruneConfigBackups(ctx context.Context, path string) error {
 		if len(suffix) <= len(backupTimeFormat)+1 {
 			continue
 		}
-		stamp, random := suffix[:len(backupTimeFormat)], suffix[len(backupTimeFormat)+1:]
+		stamp, random := suffix[:len(backupTimeFormat)], strings.TrimSuffix(suffix[len(backupTimeFormat)+1:], backupEncryptedSuffix)
 		if suffix[len(backupTimeFormat)] != '.' || len(random) < 6 || strings.Trim(random, "0123456789") != "" {
 			continue
 		}

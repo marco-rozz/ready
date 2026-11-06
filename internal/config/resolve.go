@@ -8,122 +8,195 @@ import (
 	"strings"
 )
 
-// OriginKind names how an elected config file was found. It answers
-// "who chose it": the explicit --config flag, the local ./.ready/config.yaml
-// relative to the working directory, or the global config under the Install
-// home.
+// OriginKind names how an agent directory was selected. It answers
+// "who chose it": the explicit --agent-dir flag, or the unconditional
+// per-user default.
 type OriginKind string
 
 const (
-	// OriginFlag marks an explicitly passed --config path. No other source
-	// is ever consulted for a flagged election.
+	// OriginFlag marks an explicitly passed --agent-dir. No other source is
+	// ever consulted for a flagged selection.
 	OriginFlag OriginKind = "flag"
-	// OriginLocal marks the local ./.ready/config.yaml candidate.
-	OriginLocal OriginKind = "local"
-	// OriginGlobal marks the global ~/.ready/config.yaml fallback.
-	OriginGlobal OriginKind = "global"
+	// OriginDefault marks the unconditional ~/.ready default selection.
+	OriginDefault OriginKind = "default"
 )
 
 // Runtime-home layout constants. Every runtime path of a daemon run resolves
-// against the directory containing the elected config file.
+// against the selected agent directory.
 const (
-	// LocalConfigRel is the cwd-relative local candidate of the resolution
-	// chain (flag > local > global).
-	LocalConfigRel = ".ready/config.yaml"
-	// dirNameReady is the Install home's directory name under the user home.
+	// ConfigFileName is the sole configuration filename inside an agent
+	// directory. No alternative filename is ever accepted.
+	ConfigFileName = "config.yaml"
+	// SecretKeysDirName is the agent-local directory of generated private
+	// credential files (secrets/<instance>.key and friends). Init creates
+	// it 0700; every file inside is 0600.
+	SecretKeysDirName = "secrets"
+	// dirNameReady is the default agent directory's name under the user home.
 	dirNameReady = ".ready"
-	// defaultSkillsDir is the default skills directory inside the runtime
-	// home.
+	// defaultSkillsDir is the default skills directory inside the agent
+	// directory.
 	defaultSkillsDir = "skills"
-	// defaultOAuthDir is the default OAuth credentials directory inside the
-	// Install home (the deliberate carve-out from the runtime-home rule).
+	// defaultOAuthDir is the OAuth credentials directory inside the agent
+	// directory.
 	defaultOAuthDir = "oauth"
-	// defaultSessionsDir is the default sessions directory inside the
-	// runtime home.
+	// defaultSessionsDir is the default sessions directory inside the agent
+	// directory.
 	defaultSessionsDir = "sessions"
 )
 
-// ConfigurationNotFound is returned by Elect when no config file could be
-// elected and no explicit path was given. Callers render it as a single
-// human-readable boot failure.
-type ConfigurationNotFound struct {
-	Candidates []string
-}
-
-func (e *ConfigurationNotFound) Error() string {
-	return fmt.Sprintf("no configuration file found: searched %s", joinQuoted(e.Candidates))
-}
-
-func joinQuoted(paths []string) string {
-	out := ""
-	for i, p := range paths {
-		if i > 0 {
-			out += ", "
-		}
-		out += fmt.Sprintf("%q", p)
-	}
-
-	return out
-}
-
-// Resolution is the elected config file: its path and how it was elected.
+// Resolution is the selected agent directory: its physical path, the config
+// file inside it and how the directory was selected.
 type Resolution struct {
-	// Path is the elected config file path, as the electing source named it
-	// (an explicit relative flag stays relative; the chain candidates are
-	// resolved relative to the working directory resp. the user home).
+	// AgentDir is the selected physical agent directory (cleaned, links in
+	// every path component resolved — an alias spelling selects the same
+	// physical agent and therefore the same state paths).
+	AgentDir string
+	// Path is the sole config file inside the agent directory.
 	Path string
-	// Origin records the electing source for boot logging.
+	// Origin records the selecting source for boot logging.
 	Origin OriginKind
 }
 
-// RuntimeHome is the directory containing the elected config file. Every
-// runtime path (session files, log segments, runtime skill copy) of the run
-// resolves against it. There is deliberately no env or flag override for it.
-func (r Resolution) RuntimeHome() string {
-	return filepath.Dir(filepath.Clean(r.Path))
-}
-
-// Elect resolves exactly one configuration file, in strict order: the
-// explicit path (when non-empty — no fallback, Load names it when missing),
-// then the local ./.ready/config.yaml, then the global ~/.ready/config.yaml.
-// No settings are ever merged: the rejected candidates have no influence on
-// the run.
-func Elect(ctx context.Context, explicit string) (Resolution, error) {
+// SelectAgentDir resolves exactly one agent directory: the explicit
+// --agent-dir (which must exist and be a directory — no fallback, no
+// creation), else unconditionally the user's ~/.ready, independent of the
+// working directory. The resolution never merges settings and never searches
+// cwd or parents.
+func SelectAgentDir(ctx context.Context, explicit string) (Resolution, error) {
 	select {
 	case <-ctx.Done():
-		return Resolution{}, fmt.Errorf("failed to elect config: %w", ctx.Err())
+		return Resolution{}, fmt.Errorf("failed to select agent directory: %w", ctx.Err())
 	default:
 	}
 
 	if explicit != "" {
-		return Resolution{Path: explicit, Origin: OriginFlag}, nil
+		info, err := os.Stat(explicit)
+		if err != nil {
+			return Resolution{}, fmt.Errorf("agent directory %s: %w", explicit, err)
+		}
+		if abs, aerr := filepath.Abs(explicit); aerr == nil {
+			explicit = abs
+		}
+		if !info.IsDir() {
+			return Resolution{}, fmt.Errorf("agent directory %s is not a directory", explicit)
+		}
+		dir, dirErr := resolvePhysicalDir(filepath.Clean(explicit), true)
+		if dirErr != nil {
+			return Resolution{}, dirErr
+		}
+
+		return Resolution{AgentDir: dir, Path: filepath.Join(dir, ConfigFileName), Origin: OriginFlag}, nil
 	}
 
-	local := "./" + LocalConfigRel
-	if _, err := os.Stat(local); err == nil {
-		return Resolution{Path: local, Origin: OriginLocal}, nil
-	} else if !os.IsNotExist(err) {
-		return Resolution{}, fmt.Errorf("cannot read %s: %w", local, err)
-	}
-
-	installHome, err := InstallHome()
+	defaultDir, err := InstallHome()
 	if err != nil {
-		return Resolution{}, fmt.Errorf("user home is undeterminable (%w); searched the local candidate %s and there is no explicit config", err, local)
+		return Resolution{}, fmt.Errorf("cannot resolve the default agent directory: %w (pass --agent-dir explicitly)", err)
 	}
 
-	global := filepath.Join(installHome, "config.yaml")
-	if _, err := os.Stat(global); err == nil {
-		return Resolution{Path: global, Origin: OriginGlobal}, nil
-	} else if !os.IsNotExist(err) {
-		return Resolution{}, fmt.Errorf("cannot read %s: %w", global, err)
+	physical, physErr := resolvePhysicalDir(defaultDir, false)
+	if physErr != nil {
+		return Resolution{}, physErr
 	}
 
-	return Resolution{}, &ConfigurationNotFound{Candidates: []string{local, global}}
+	return Resolution{AgentDir: physical, Path: filepath.Join(physical, ConfigFileName), Origin: OriginDefault}, nil
 }
 
-// InstallHome resolves the per-user Install home ($HOME/.ready on unix,
-// %USERPROFILE%\.ready on Windows) lazily — callers that never need it never
-// pay for (or fail on) the OS user-home lookup.
+// SelectAgentDirForInit resolves the guided-init target with the same
+// physical-identity semantics as SelectAgentDir (alias spellings resolve to
+// one physical directory) but does NOT require the directory to exist:
+// only init may bootstrap a missing agent directory. The caller creates it
+// during publication. Known misspellings of config.yaml are not involved:
+// the target is always the directory, never a file.
+func SelectAgentDirForInit(ctx context.Context, explicit string) (Resolution, error) {
+	select {
+	case <-ctx.Done():
+		return Resolution{}, fmt.Errorf("failed to select agent directory: %w", ctx.Err())
+	default:
+	}
+
+	if explicit != "" {
+		if info, err := os.Stat(explicit); err == nil && !info.IsDir() {
+			return Resolution{}, fmt.Errorf("agent directory %s is not a directory", explicit)
+		}
+		if abs, aerr := filepath.Abs(explicit); aerr == nil {
+			explicit = abs
+		}
+		dir, dirErr := resolvePhysicalDir(filepath.Clean(explicit), false)
+		if dirErr != nil {
+			return Resolution{}, dirErr
+		}
+
+		return Resolution{AgentDir: dir, Path: filepath.Join(dir, ConfigFileName), Origin: OriginFlag}, nil
+	}
+
+	defaultDir, err := InstallHome()
+	if err != nil {
+		return Resolution{}, fmt.Errorf("cannot resolve the default agent directory: %w (pass --agent-dir explicitly)", err)
+	}
+
+	physical, physErr := resolvePhysicalDir(defaultDir, false)
+	if physErr != nil {
+		return Resolution{}, physErr
+	}
+
+	return Resolution{AgentDir: physical, Path: filepath.Join(physical, ConfigFileName), Origin: OriginDefault}, nil
+}
+
+// resolvePhysicalDir resolves symlinks and junctions in every path component
+// so alias spellings select one physical directory. An existing directory is
+// resolved whole; for a missing leaf (the default agent directory of a fresh
+// machine) the parent is resolved and the leaf rejoined, so the eventual
+// creation lands at the same physical identity. Evaluation is case-normalised
+// on case-insensitive filesystems (Windows/macOS), so distinct casings
+// select the same identity.
+func resolvePhysicalDir(dir string, mustExist bool) (string, error) {
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return filepath.Clean(resolved), nil
+	} else if !mustExist && os.IsNotExist(err) {
+		parent := filepath.Dir(dir)
+		resolved, perr := filepath.EvalSymlinks(parent)
+		if perr != nil {
+			return "", fmt.Errorf("agent directory %s: %w", dir, perr)
+		}
+
+		return filepath.Join(filepath.Clean(resolved), filepath.Base(dir)), nil
+	} else if err != nil {
+		return "", fmt.Errorf("agent directory %s: %w", dir, err)
+	}
+
+	return filepath.Clean(dir), nil
+}
+
+// RejectLinkedConfig checks the sole config file leaf: a symlink or other
+// non-regular file redirecting config.yaml elsewhere would relax the
+// directory boundary, so a linked config leaf is rejected.
+func RejectLinkedConfig(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("config %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("config %s must be a regular file, not a link or special file", path)
+	}
+
+	return nil
+}
+
+// SharedLibraryDir is the installer-owned skill library shared read-only by
+// every agent on this machine (outside any agent directory). An empty
+// result means the user home could not be resolved (the sync then no-ops).
+func SharedLibraryDir() string {
+	home, err := userHome()
+	if err != nil || home == "" {
+		return ""
+	}
+
+	return filepath.Join(home, ".local", "share", "ready", "library", "skills")
+}
+
+// InstallHome resolves the per-user default agent directory ($HOME/.ready on
+// unix, %USERPROFILE%\.ready on Windows) lazily — callers that never need it
+// never pay for (or fail on) the OS user-home lookup.
 func InstallHome() (string, error) {
 	home, err := userHome()
 	if err != nil {
@@ -147,12 +220,11 @@ func userHome() (string, error) {
 }
 
 // ApplyRuntimeHome fills the runtime-home-dependent defaults onto a freshly
-// unmarshalled config: the runtime home from the elected config path, the
+// unmarshalled config: the runtime home from the selected config path, the
 // default skills and sessions directories inside it, every explicitly
-// relative runtime path against it, and the OAuth credential store (the one
-// deliberate carve-out: its default anchors to the Install home). Errors
-// only when the OAuth default is actually needed and the Install home cannot
-// be resolved — the remedy is named in the message.
+// relative runtime path against it, and the OAuth credential store, fixed at
+// <agent-dir>/oauth. The store path is runtime-derived state, never author
+// config (the oauth.path YAML key is rejected).
 func (c *Config) ApplyRuntimeHome(path string) error {
 	c.ElectedPath = path
 	c.RuntimeHome = filepath.Dir(filepath.Clean(path))
@@ -178,18 +250,27 @@ func (c *Config) applyRuntimeHomePaths() {
 	c.Skills.Path = resolveRelPath(c.Skills.Path, c.RuntimeHome, defaultSkillsDir)
 	c.Sessions.Path = resolveRelPath(c.Sessions.Path, c.RuntimeHome, defaultSessionsDir)
 	c.Logging.FilePath = resolveRelPath(c.Logging.FilePath, c.RuntimeHome, "")
-	c.OAuth.Path = resolveRelPath(c.OAuth.Path, c.RuntimeHome, "")
-	c.LLM.OAuthPath = c.OAuth.Path
 
-	// The skill library: an explicit absolute path as-is, a relative one
-	// resolved against the runtime home (dev configs point it at
-	// ../resources/skills/). The default (empty) anchors to the Install
-	// home; an unresolvable user home just leaves it empty — the sync then
-	// no-ops like an absent library (never a boot error).
+	// The credential store is fixed inside the agent directory (no override):
+	// every consumer — daemon, login, forget — resolves the same records, and
+	// a moved agent directory keeps its credentials. A direct construction
+	// without a runtime home leaves the seam to the caller.
+	if c.RuntimeHome != "" {
+		c.OAuth.Path = filepath.Join(c.RuntimeHome, defaultOAuthDir)
+		c.LLM.OAuthPath = c.OAuth.Path
+	}
+
+	// The skill library: an explicit absolute path as-is (read-only source
+	// override), a relative one resolved against the runtime home (dev
+	// configs point it at ../resources/skills/). The default (empty) anchors
+	// to program storage: ~/.local/share/ready/library/skills on both
+	// platforms — installer-owned content shared read-only by every agent,
+	// never agent state. An unresolvable user home just leaves it empty —
+	// the sync then no-ops like an absent library (never a boot error).
 	c.Skills.LibraryPath = resolveRelPath(c.Skills.LibraryPath, c.RuntimeHome, "")
 	if c.Skills.LibraryPath == "" {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			c.Skills.LibraryPath = filepath.Join(home, dirNameReady, "library", "skills")
+		if home, err := userHome(); err == nil && home != "" {
+			c.Skills.LibraryPath = filepath.Join(home, ".local", "share", "ready", "library", "skills")
 		}
 	}
 }
@@ -215,34 +296,16 @@ func resolveRelPath(p, runtimeHome, defaultDir string) string {
 	return joined
 }
 
-// applyOAuthStore resolves the OAuth credential store: an
-// explicit path wins (already resolved against the runtime home by
-// applyRuntimeHomePaths; an absolute path is cleaned as-is); the default
-// anchors to the Install home and is only computed when something will
-// consume it — with no consumer an empty path is simply left empty, and
-// resolving the default for a Config built directly in Go is the caller's
-// forgotten step whose symptom (an empty store path error at first use)
-// names the remedy.
+// applyOAuthStore keeps the runtime-resolved store in sync with the copy
+// surfaced to the LLM layer, and leaves the direct-construction seam alone:
+// a Config built directly in Go (ElectedPath empty) keeps the path its
+// constructor set, defaulting to nothing.
 func (c *Config) applyOAuthStore() error {
 	if c.OAuth.Path == "" && c.ElectedPath == "" {
 		// Direct construction without ApplyRuntimeHome: leave the explicit
 		// defaulting to the caller.
 		return nil
 	}
-	if c.OAuth.Path != "" {
-		c.LLM.OAuthPath = c.OAuth.Path
-
-		return nil
-	}
-	if !c.HasOAuthTargets() {
-		return nil
-	}
-
-	installHome, err := InstallHome()
-	if err != nil {
-		return fmt.Errorf("cannot resolve the default OAuth credential store: %w — set oauth.path explicitly to proceed without an Install home", err)
-	}
-	c.OAuth.Path = filepath.Join(installHome, defaultOAuthDir)
 	c.LLM.OAuthPath = c.OAuth.Path
 
 	return nil

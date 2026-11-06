@@ -41,3 +41,102 @@ type ToolOutputUnion struct {
 	ImageItem *ToolOutputImage `json:"imageItem,omitempty"`
 	FileItem  *ToolOutputFile  `json:"fileItem,omitempty"`
 }
+
+// ToolOutputUnionListSchema returns a Draft-07 schema for the JSON encoding of
+// []ToolOutputUnion.
+func ToolOutputUnionListSchema() JSONSchema {
+	return JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "array",
+"items": {
+	"oneOf": [
+		{
+			"type": "object",
+			"properties": {
+				"kind": {
+					"const": "none"
+				}
+			},
+			"required": ["kind"],
+			"additionalProperties": false
+		},
+		{
+			"type": "object",
+			"properties": {
+				"kind": {
+					"const": "text"
+				},
+				"textItem": {
+					"type": "object",
+					"properties": {
+						"text": {
+							"type": "string"
+						}
+					},
+					"required": ["text"],
+					"additionalProperties": false
+				}
+			},
+			"required": ["kind", "textItem"],
+			"additionalProperties": false
+		},
+		{
+			"type": "object",
+			"properties": {
+				"kind": {
+					"const": "image"
+				},
+				"imageItem": {
+					"type": "object",
+					"properties": {
+						"detail": {
+							"type": "string",
+							"enum": ["high", "low", "auto"]
+						},
+						"imageName": {
+							"type": "string"
+						},
+						"imageMIME": {
+							"type": "string"
+						},
+						"imageData": {
+							"type": "string"
+						}
+					},
+					"required": ["detail", "imageName", "imageMIME", "imageData"],
+					"additionalProperties": false
+				}
+			},
+			"required": ["kind", "imageItem"],
+			"additionalProperties": false
+		},
+		{
+			"type": "object",
+			"properties": {
+				"kind": {
+					"const": "file"
+				},
+				"fileItem": {
+					"type": "object",
+					"properties": {
+						"fileName": {
+							"type": "string"
+						},
+						"fileMIME": {
+							"type": "string"
+						},
+						"fileData": {
+							"type": "string"
+						}
+					},
+					"required": ["fileName", "fileMIME", "fileData"],
+					"additionalProperties": false
+				}
+			},
+			"required": ["kind", "fileItem"],
+			"additionalProperties": false
+		}
+	]
+}
+}`)
+}

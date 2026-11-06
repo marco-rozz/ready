@@ -16,6 +16,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -112,10 +113,27 @@ func buildProbeRunner(ctx context.Context, m llm.ResolvedModel) (agent.Runner, e
 // synthetic; the probe performs no I/O besides the candidate's own model
 // call and has no side effects.
 func (o *Orchestrator) probeCandidate(ctx context.Context, cand Candidate) error {
-	probeCtx, cancel := context.WithTimeout(ctx, o.cfg.Recovery.ProbeTimeout)
+	if err := RunSyntheticProbe(ctx, cand.Model, o.cfg.Recovery.ProbeTimeout); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// RunSyntheticProbe runs the same isolated synthetic tool-call readiness
+// probe as the orchestrator's boot path, for callers outside the
+// orchestrator (guided init's optional bounded probe): a transient runner
+// over one resolved model with ONLY the local no-op tool and the fixed
+// probe prompt — no user history, no production tools, no HA data, no side
+// effects. A completed tool call/result exchange proves the model honours
+// the agent's tool-calling contract; timeout returns a wrapped
+// context.DeadlineExceeded without demoting anything (there is nothing to
+// demote here).
+func RunSyntheticProbe(ctx context.Context, m llm.ResolvedModel, timeout time.Duration) error {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	runner, err := buildProbeRunner(probeCtx, cand.Model)
+	runner, err := buildProbeRunner(probeCtx, m)
 	if err != nil {
 		return fmt.Errorf("failed to build probe runner: %w", err)
 	}

@@ -89,8 +89,9 @@ func infoLabelStyle() lipgloss.Style {
 
 // buildInfoBlock renders the static session-facts block shown as the first
 // viewport content in png/off modes and directly below the glyph banner in
-// glyph mode (chat-logo-modes D3): the daemon address, the session ID and
-// the client version — all known at TUI construction time from the
+// glyph mode (chat-logo-modes D3): the daemon address, the agent directory
+// (daemon-authoritative, per-user-install-agent-isolation), the session ID
+// and the client version — all known at TUI construction time from the
 // authenticated handshake. Plain styled text, NOT markdown-rendered; the
 // caller stores it separately from the completed-turn render cache, so it
 // is never persisted to history or checkpoints and never counted as a turn.
@@ -98,7 +99,7 @@ func infoLabelStyle() lipgloss.Style {
 // status line (operator preference: one place, always visible, never
 // duplicated in the banner). Missing facts render as "—", never as empty
 // labels.
-func buildInfoBlock(daemonAddr, sessionID, clientVersion string) string {
+func buildInfoBlock(daemonAddr, agent, agentDir, sessionID, clientVersion string) string {
 	line := func(label, value string) string {
 		if value == "" {
 			value = "—"
@@ -109,6 +110,8 @@ func buildInfoBlock(daemonAddr, sessionID, clientVersion string) string {
 
 	rows := []string{
 		line("daemon", daemonAddr),
+		line("agent", agent),
+		line("agent-dir", agentDir),
 		line("session", sessionID),
 		line("client", clientVersion),
 	}

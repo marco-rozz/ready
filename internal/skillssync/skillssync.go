@@ -1,5 +1,5 @@
 // Package skillssync implements the per-file three-way library sync run at
-// serve boot before the skills manager starts: it brings the runtime skill
+// fresh init and serve boot before the skills manager starts: it brings the runtime skill
 // copy (<runtime home>/skills/) up to date with the shipped library
 // (the release bundle's skills/, installed at <Install home>/library/skills/
 // or skills.library_path), per file and against a recorded state, so
@@ -31,7 +31,7 @@ import (
 )
 
 // stateFileName is the recorded-sync-state file inside the runtime skill
-// directory. It is daemon-private operator state, never a skill file.
+// directory. It is private synchronization state, never a skill file.
 const stateFileName = ".library-state.json"
 
 // generatedDir is the machine-generated directory name (the twin
@@ -108,14 +108,50 @@ func Run(ctx context.Context, cfg config.SkillsConfig, runtimeHome string, logge
 		return nil
 	}
 
+	runtimePath := cfg.Path
+	if runtimePath == "" {
+		runtimePath = filepath.Join(runtimeHome, "skills")
+	}
+	if err := validateSource(runtimePath, cfg.LibraryPath); err != nil {
+		return err
+	}
+
 	s := &syncer{
-		runtimePath: filepath.Join(runtimeHome, "skills"),
+		runtimePath: runtimePath,
 		libraryPath: cfg.LibraryPath,
 		mode:        m,
 		logger:      logger,
 	}
 
 	return s.run(ctx)
+}
+
+// validateSource rejects skill libraries that are agent state: the runtime
+// copy itself (or anything beneath it) cannot be its own sync source, and a
+// directory carrying another agent's `.library-state.json` is a private
+// runtime copy that must never serve as someone's read-only source.
+func validateSource(runtimePath, libraryPath string) error {
+	absRuntime, err := filepath.Abs(runtimePath)
+	if err != nil {
+		return fmt.Errorf("skill library sync: resolve runtime copy: %w", err)
+	}
+	absLibrary, err := filepath.Abs(libraryPath)
+	if err != nil {
+		return fmt.Errorf("skill library sync: resolve library: %w", err)
+	}
+	if absLibrary == absRuntime {
+		return fmt.Errorf("skill library sync: skills.library_path %s is the runtime skill copy itself — point it at the shipped library or a read-only source", libraryPath)
+	}
+	rel, relErr := filepath.Rel(absRuntime, absLibrary)
+	if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("skill library sync: skills.library_path %s is inside the runtime skill copy", libraryPath)
+	}
+
+	if _, err := os.Stat(filepath.Join(absLibrary, stateFileName)); err == nil {
+		return fmt.Errorf("skill library sync: skills.library_path %s is an agent's private runtime skill copy (it carries %s) and cannot be a source", libraryPath, stateFileName)
+	}
+
+	return nil
 }
 
 func (s *syncer) run(ctx context.Context) error {
@@ -125,9 +161,9 @@ func (s *syncer) run(ctx context.Context) error {
 
 	libInfo, err := os.Stat(s.libraryPath)
 	if err != nil || !libInfo.IsDir() {
-		// An absent library is a silent no-op (binary-only deployments) —
-		// deliberately swallowing the stat error.
-		s.logger.Debug().Str("library", s.libraryPath).Msg("skill library absent — sync is a no-op")
+		// A binary-only deployment may lack shared skills. Keep the agent
+		// usable, but make the missing installation visible at normal levels.
+		s.logger.Warn().Str("library", s.libraryPath).Msg("skill library absent — install or update READY to make shipped skills available")
 
 		//nolint:nilerr // an absent library is a documented silent no-op, not a failure
 		return nil

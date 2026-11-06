@@ -14,6 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/go-zeromq/zmq4"
@@ -37,7 +40,8 @@ type Listener struct {
 	socket zmq4.Socket
 	// addr is the resolved listen address (e.g. "tcp://127.0.0.1:50321"
 	// after an ephemeral bind to tcp://127.0.0.1:0).
-	addr string
+	addr     string
+	loopback bool
 	// logger is scoped to component=zmq-listener and used by Recv / Close.
 	logger zerolog.Logger
 	// closeOnce guards Close so multiple callers (channel manager shutdown +
@@ -92,15 +96,36 @@ func NewListener(ctx context.Context, bindAddr string, logger zerolog.Logger) (*
 	}
 
 	l := &Listener{
-		socket: socket,
-		addr:   resolved,
-		logger: logger,
-		ctx:    ctx,
+		socket:   socket,
+		addr:     resolved,
+		loopback: numericLoopbackBind(bindAddr),
+		logger:   logger,
+		ctx:      ctx,
 	}
 
 	l.logger.Info().Str("endpoint", resolved).Msg("zmq_listener_bound")
 
 	return l, nil
+}
+
+// IsNumericLoopback reports whether the configured TCP listener was bound to
+// a literal loopback address. Hostnames are intentionally not accepted: DNS
+// resolution can change after the listener starts and cannot prove exclusive
+// loopback ownership for secret entry.
+func (l *Listener) IsNumericLoopback() bool { return l.loopback }
+
+func numericLoopbackBind(bindAddr string) bool {
+	u, err := url.Parse(bindAddr)
+	if err != nil || strings.ToLower(u.Scheme) != "tcp" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
 }
 
 // Addr returns the resolved listen address (e.g. "tcp://127.0.0.1:50321"

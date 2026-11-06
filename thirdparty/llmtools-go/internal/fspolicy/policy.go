@@ -265,7 +265,7 @@ func (p FSPolicy) resolvePathWithCheck(inputPath, defaultIfEmpty string) (absLex
 	absCheck = evalSymlinksBestEffort(absLex)
 
 	if err := ensureWithinRoots(absCheck, p.allowedRoots); err != nil {
-		return "", "", fmt.Errorf("path %q (resolved to %q): %w", absLex, absCheck, err)
+		return "", "", fmt.Errorf("path %q: %w", absLex, err)
 	}
 
 	return absLex, absCheck, nil

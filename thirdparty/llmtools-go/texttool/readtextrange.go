@@ -48,6 +48,31 @@ var readTextRangeTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"startLine": {"type": "integer"},
+	"endLine": {"type": "integer"},
+	"linesReturned": {"type": "integer"},
+	"lines": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"lineNumber": {"type": "integer"},
+				"text": {"type": "string"}
+			},
+			"required": ["lineNumber", "text"],
+			"additionalProperties": false
+		}
+	},
+	"eofReached": {"type": "boolean"}
+},
+"required": ["linesReturned", "lines", "eofReached"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: readTextRangeFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

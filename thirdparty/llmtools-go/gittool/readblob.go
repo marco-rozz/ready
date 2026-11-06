@@ -54,6 +54,56 @@ var readBlobTool = spec.Tool{
 "required": ["repoPath", "path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"revision": {"type": "string"},
+	"path": {"type": "string"},
+	"mode": {"type": "string"},
+	"hash": {"type": "string"},
+	"size": {"type": "integer"},
+	"encoding": {"type": "string", "enum": ["auto", "text", "base64"]},
+	"content": {"type": "string"},
+	"bytes": {"type": "integer"},
+	"truncated": {"type": "boolean"},
+	"maxBytes": {"type": "integer"},
+	"isBinary": {"type": "boolean"},
+	"contentOmitted": {"type": "boolean"},
+	"omissionReason": {"type": "string"},
+	"outputMeta": {
+		"type": "object",
+		"properties": {
+			"bytes": {"type": "integer"},
+			"truncated": {"type": "boolean"},
+			"omittedBinaryFiles": {"type": "integer"},
+			"skippedLargeFiles": {"type": "integer"},
+			"maxBytes": {"type": "integer"}
+		},
+		"required": ["bytes", "truncated", "omittedBinaryFiles", "skippedLargeFiles", "maxBytes"],
+		"additionalProperties": false
+	}
+},
+"required": [
+	"repoPath",
+	"revision",
+	"path",
+	"mode",
+	"hash",
+	"size",
+	"encoding",
+	"bytes",
+	"truncated",
+	"maxBytes",
+	"isBinary",
+	"contentOmitted",
+	"outputMeta"
+],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: readBlobFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

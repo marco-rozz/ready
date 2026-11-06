@@ -58,6 +58,21 @@ var writeFileTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"path": {"type": "string"},
+	"bytesWritten": {"type": "integer"},
+	"action": {
+		"type": "string",
+		"enum": ["created", "overwritten"]
+	}
+},
+"required": ["path", "bytesWritten", "action"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: writeFileFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

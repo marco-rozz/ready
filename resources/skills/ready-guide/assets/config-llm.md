@@ -39,25 +39,84 @@ Full key spellings and the complete commented example live in
 | Provider type | Valid `api` | Credential |
 |---|---|---|
 | `ollama` | `ollama` | optional (Bearer when set) |
-| `openrouter` | `chat_completions` | `api_key` or `api_key_file` required |
+| `openrouter` | `chat_completions` | `api_key: !secret <name>` (or `!secret_file`) required |
 | `opencode` | `chat_completions` \| `anthropic` \| `google` \| `responses` | required on all four |
 | `openai-codex` | `responses` only | **forbidden** — authenticate via `ready login llm:<name>` |
+
+For direct Ollama Cloud access, set `base_url: https://ollama.com` and an
+`api_key: !secret <name>`; the native client appends `/api/...`. `ready init` asks
+`local` or `cloud`, suggests the corresponding host and stores the cloud key
+in the encrypted Secret store. The endpoint remains editable.
+
+## OpenAI: choose authentication before writing YAML
+
+When the user asks for OpenAI, ask whether they mean ChatGPT/Codex via
+OAuth or OpenAI Platform via an API key, unless they already specified it.
+READY currently implements only `openai-codex` for direct OpenAI access;
+it requires OAuth and rejects `api_key`. There is no
+`provider: openai` type. Do not invent an API-key configuration or repoint
+`opencode` at OpenAI Platform; its implementation is gateway-specific.
+Explain this limit if the user chooses an OpenAI Platform API key.
+
+For ChatGPT/Codex OAuth, compose the provider without `base_url`:
+
+```yaml
+llm:
+  default: "codex-work::<model-id>"  # use the model ID agreed with the user
+  providers:
+    codex-work:
+      provider: openai-codex
+      api: responses
+```
+
+Omit `base_url` entirely: READY selects its ChatGPT backend endpoint.
+Never add `base_url: https://api.openai.com/v1` to an OAuth provider.
+When repairing an existing OAuth block, remove that override in the staged
+diff, along with any `api_key` reference.
+
+Ask whether sign-in is already complete for this provider instance in the
+selected agent directory. When credentials are missing or invalid, explain
+that OAuth requires the user's participation and ask them to sign in after
+the provider configuration is saved:
+
+```text
+ready login llm:codex-work --agent-dir <selected-agent-dir>
+```
+
+Use `--device-code` for a headless host; `--status` checks credential state.
+Keep the instance name and agent directory consistent with the saved config.
+Never request OAuth tokens or authorization codes in chat. `ready serve`
+does not prompt for sign-in. Always distinguish configuration saved,
+sign-in pending/completed, runtime activation, and any reload failure; a YAML draft is not a save,
+and saving YAML is not proof of authentication.
 
 Details worth knowing:
 
 - `api` is mandatory everywhere; there is no default protocol.
-- `api_key` and `api_key_file` are mutually exclusive; `_file` content is
-  trimmed; an empty-after-trim file is an error.
+- `api_key` is a reference only (`!secret <name>` or `!secret_file /abs/path`);
+  a `!secret_file` is read byte for byte minus one trailing newline and an
+  empty one is pending. The value is entered with `ready secrets set` or in the
+  masked secret editor; there is no `api_key_file` key any more.
 - Default `base_url` values: ollama `http://localhost:11434`, openrouter
   `https://openrouter.ai/api/v1`, opencode `https://opencode.ai/zen/v1`,
   openai-codex `https://chatgpt.com/backend-api`.
+
+### OpenCode plans: Go (subscription) vs Zen (pay-per-use)
+
+When the user says **OpenCode Go** (a subscription account), set
+`base_url: "https://opencode.ai/zen/go/v1"` — never the Zen default. When
+the user means **OpenCode Zen** (consumption billing), keep the default
+`https://opencode.ai/zen/v1` (or `https://opencode.ai/zen` root for the
+`google` API, see below). Ask which plan when the user just says
+"OpenCode"; the API-key reference mechanism is identical on both plans.
 - **opencode `google`**: point `base_url` at the gateway **root**; the SDK
   itself appends `/v1beta/models/{model}:generateContent`.
 - **opencode `anthropic`**: Anthropic Messages protocol, Bearer auth, fixed
   8192 max output tokens.
 - **openai-codex**: ChatGPT-subscription identity — a distinct billing
-  boundary; needs `api: responses`, refuses api keys at boot (the error
-  names `ready login <name>`), never falls back to OpenAI Platform. After
+  boundary; needs `api: responses`, refuses api keys at boot, authenticates
+  with `ready login llm:<name> --agent-dir <selected-agent-dir>`, and never
+  falls back to OpenAI Platform. After
   one 401 the credential is refreshed and the request replayed once.
 - **ollama-only keys** on any other type are a boot error:
   `keep_alive` (one duration per instance, applies to every model on it)

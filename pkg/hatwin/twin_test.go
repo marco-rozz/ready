@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -633,5 +635,17 @@ func TestComputeBackoff(t *testing.T) {
 	// Clamp to MaxBackoff.
 	if got := computeBackoff(opts, 100); got != 60*time.Second {
 		t.Errorf("attempt 100: got %v, want 60s (clamped)", got)
+	}
+}
+
+func TestResolveTokenFilePreservesLiteralCredential(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ha.token")
+	value := "  literal-ha-credential\r\n"
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := resolveToken(Options{TokenFile: path})
+	if err != nil || token != value {
+		t.Fatal("Twin token differs from literal credential bytes")
 	}
 }

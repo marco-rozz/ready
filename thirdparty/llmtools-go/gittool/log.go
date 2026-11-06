@@ -55,6 +55,36 @@ var logTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"revision": {"type": "string"},
+	"maxCount": {"type": "integer"},
+	"commits": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"hash": {"type": "string"},
+				"shortHash": {"type": "string"},
+				"authorName": {"type": "string"},
+				"authorEmail": {"type": "string"},
+				"authorWhen": {"type": "string", "format": "date-time"},
+				"subject": {"type": "string"},
+				"body": {"type": "string"}
+			},
+			"required": ["hash", "shortHash", "authorName", "authorEmail", "authorWhen", "subject"],
+			"additionalProperties": false
+		}
+	}
+},
+"required": ["repoPath", "revision", "maxCount", "commits"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: logFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

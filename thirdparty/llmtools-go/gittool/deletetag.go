@@ -36,6 +36,20 @@ var deleteTagTool = spec.Tool{
 "required": ["repoPath", "name"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"name": {"type": "string"},
+	"hash": {"type": "string"},
+	"action": {"type": "string"}
+},
+"required": ["repoPath", "name", "hash", "action"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: deleteTagFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

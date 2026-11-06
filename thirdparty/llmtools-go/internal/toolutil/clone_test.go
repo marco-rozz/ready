@@ -127,6 +127,19 @@ func TestCloneStringSlice(t *testing.T) {
 	}
 }
 
+func TestCloneToolClonesOutputSchema(t *testing.T) {
+	source := spec.Tool{
+		OutputSchema: spec.JSONSchema(`{"type":"object"}`),
+	}
+
+	cloned := CloneTool(source)
+	cloned.OutputSchema[0] = '['
+
+	if got := string(source.OutputSchema); got != `{"type":"object"}` {
+		t.Fatalf("source OutputSchema changed: %q", got)
+	}
+}
+
 func assertBytesDeepCopied(t *testing.T, orig, cloned []byte) {
 	t.Helper()
 

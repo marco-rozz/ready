@@ -32,10 +32,12 @@ import (
 )
 
 // noSubcommandMessage is the exact stderr line emitted when the binary is
+// run without a subcommand. guided-init-and-direct-secret-entry adds init
+// to the four-command guidance.
 // invoked without a subcommand. The wording is part of the public CLI
 // contract: tests pin to this string, and operators see it when they forget
 // to update their systemd unit or launcher script.
-const noSubcommandMessage = "missing subcommand: use 'serve', 'chat' or 'login'"
+const noSubcommandMessage = "missing subcommand: use 'serve', 'chat', 'login', 'init' or 'secrets'"
 
 const homeAgent = "ready"
 
@@ -133,6 +135,9 @@ func newRootCommand(stderr io.Writer) *cli.Command {
 			newServeCommand(stderr),
 			newChatCommand(stderr),
 			newLoginCommand(stderr),
+			newInitCommand(stderr),
+			newSecretsCommand(stderr),
+			newMaintenanceCommand(),
 		},
 	}
 

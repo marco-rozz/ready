@@ -3,9 +3,6 @@ package oauth
 import (
 	"context"
 	"errors"
-	"fmt"
-
-	"github.com/marco-rozz/ready/internal/config"
 )
 
 // ErrStoreUnavailable is returned when a Store cannot be constructed or
@@ -14,30 +11,24 @@ import (
 var ErrStoreUnavailable = errors.New("oauth credential store unavailable")
 
 // Store persists one Credential per MCP server, keyed by its configuration
-// map key (a file-based store, allowing
+// map key (an encrypted Secret-store entry, allowing
 // per-server revocation by deleting one record).
 type Store interface {
 	// Load returns the stored Credential for serverKey, or (nil, nil) when
 	// no record exists.
 	Load(ctx context.Context, serverKey string) (*Credential, error)
 	// Save persists cred, replacing any existing record for the same
-	// ServerKey.
+	// ServerKey. It serializes cross-process on the target's coordination
+	// lock and bumps the record's generation.
 	Save(ctx context.Context, cred *Credential) error
-	// Delete removes the stored Credential for serverKey. It is not an
+	// Delete removes the stored Credential for serverKey, recording a
+	// tombstone so stale work cannot resurrect the record. It is not an
 	// error to delete an absent record.
 	Delete(ctx context.Context, serverKey string) error
-}
-
-// NewStore builds the Store backend selected by cfg.TokenStore. File is the
-// only backend today; config.Validate rejects any other value
-// before this is ever called, but the factory still fails explicitly rather
-// than silently defaulting, so a future caller that skips validation cannot
-// end up writing secrets to an unintended location.
-func NewStore(ctx context.Context, cfg config.OAuthConfig) (Store, error) {
-	switch cfg.TokenStore {
-	case "", "file":
-		return NewFileStore(ctx, cfg.Path)
-	default:
-		return nil, fmt.Errorf("%w: unsupported token_store %q", ErrStoreUnavailable, cfg.TokenStore)
-	}
+	// Snapshot returns the target's current generation (record or
+	// tombstone, 0 when neither exists) for snapshot/compare-commit flows.
+	Snapshot(ctx context.Context, serverKey string) (int64, error)
+	// SaveCommitted persists cred only while the target's generation still
+	// equals snapshotGen; divergence fails with ErrGenerationConflict.
+	SaveCommitted(ctx context.Context, cred *Credential, snapshotGen int64) error
 }

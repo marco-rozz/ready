@@ -32,6 +32,26 @@ var mimeForPathTool = spec.Tool{
 "required": ["path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"path": {"type": "string"},
+	"extension": {"type": "string"},
+	"normalizedExtension": {"type": "string"},
+	"mimeType": {"type": "string"},
+	"baseMIMEType": {"type": "string"},
+	"mode": {
+		"type": "string",
+		"enum": ["text", "image", "document", "default"]
+	},
+	"method": {"type": "string", "enum": ["extension", "sniff"]}
+},
+"required": ["path", "mimeType", "baseMIMEType", "mode", "method"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: mimeForPathFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -55,6 +55,26 @@ var resetTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"mode": {"type": "string", "enum": ["mixed", "hard"]},
+	"revision": {"type": "string"},
+	"headHash": {"type": "string"},
+	"paths": {
+		"type": ["array", "null"],
+		"items": {"type": "string"}
+	},
+	"discardedWorktree": {"type": "boolean"},
+	"action": {"type": "string"}
+},
+"required": ["repoPath", "mode", "revision", "discardedWorktree", "action"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: resetFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

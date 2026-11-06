@@ -71,6 +71,34 @@ var searchFilesTool = spec.Tool{
 "required": ["query"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"root": {"type": "string"},
+	"items": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"path": {"type": "string"},
+				"matchKind": {
+					"type": "string",
+					"enum": ["path", "content", "pathAndContent"]
+				}
+			},
+			"required": ["path", "matchKind"],
+			"additionalProperties": false
+		}
+	},
+	"matchCount": {"type": "integer"},
+	"reachedMaxResults": {"type": "boolean"}
+},
+"required": ["root", "matchCount", "reachedMaxResults"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: searchFilesFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

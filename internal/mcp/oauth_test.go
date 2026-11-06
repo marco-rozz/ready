@@ -16,6 +16,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/rs/zerolog"
+
+	"github.com/marco-rozz/ready/internal/secretstore"
 	"golang.org/x/oauth2"
 )
 
@@ -98,7 +100,7 @@ func TestOAuthHandler_ReachesTransport(t *testing.T) {
 
 	counting := &countingOAuthHandler{inner: inner}
 
-	cfg := &config.MCPServerConfig{URL: srv.URL, Timeout: 5 * time.Second}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}, Timeout: 5 * time.Second}
 	rc, err := NewReconnectingClient(context.Background(), cfg,
 		ClientConfig{HTTPClient: srv.Client(), OAuthHandler: counting, Timeout: 5 * time.Second},
 		ReconnectConfig{}, "srv", "")
@@ -126,7 +128,7 @@ func TestLoginRequired_SurvivesFullSDKErrorChain(t *testing.T) {
 
 	handler := &alwaysLoginRequiredHandler{}
 
-	cfg := &config.MCPServerConfig{URL: srv.URL}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}}
 
 	_, err := connectToServer(context.Background(), cfg, 2*time.Second, srv.Client(), handler)
 	if err == nil {
@@ -211,7 +213,7 @@ func TestSessionSurvivesAuthFailure_CallToolAndPing(t *testing.T) {
 		t.Fatalf("NewAuthorizationCodeHandler: %v", err)
 	}
 
-	cfg := &config.MCPServerConfig{URL: srv.URL, Timeout: 5 * time.Second}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}, Timeout: 5 * time.Second}
 	rc, err := NewReconnectingClient(context.Background(), cfg,
 		ClientConfig{HTTPClient: srv.Client(), OAuthHandler: handler, Timeout: 5 * time.Second},
 		ReconnectConfig{}, "srv", "")
@@ -298,7 +300,7 @@ func TestHealthMonitor_PicksUpStoreChangeWithoutToolCall(t *testing.T) {
 		t.Fatalf("NewAuthorizationCodeHandler: %v", err)
 	}
 
-	cfg := &config.MCPServerConfig{URL: srv.URL, Timeout: 5 * time.Second}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}, Timeout: 5 * time.Second}
 	rc, err := NewReconnectingClient(context.Background(), cfg,
 		ClientConfig{HTTPClient: srv.Client(), OAuthHandler: handler, Timeout: 5 * time.Second},
 		ReconnectConfig{}, "srv", "")
@@ -359,18 +361,24 @@ func TestHealthMonitor_PicksUpStoreChangeWithoutToolCall(t *testing.T) {
 	}
 }
 
-// newTempOAuthStore returns a file-backed oauth.Store rooted at a fresh temp
+// newTempOAuthStore returns a Secret-store-backed oauth.Store rooted at a fresh temp
 // directory, for tests that need a real Store to satisfy
 // NewTokenSourceFromCredential's signature.
 func newTempOAuthStore(t *testing.T) homeoauth.Store {
 	t.Helper()
 
-	store, err := homeoauth.NewFileStore(context.Background(), t.TempDir())
+	dir := t.TempDir()
+	secrets, err := secretstore.New(secretstore.Options{
+		Dir:     dir,
+		Key:     secretstore.KeySpec{Location: secretstore.KeyAgentDir},
+		AgentID: "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+		Log:     zerolog.Nop(),
+	})
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("secretstore.New: %v", err)
 	}
 
-	return store
+	return homeoauth.NewSecretStore(secrets, dir)
 }
 
 // TestReconnect_BothSentinelsAbortWithoutRetrying verifies task 6.10: both
@@ -413,7 +421,7 @@ func TestReconnect_BothSentinelsAbortWithoutRetrying(t *testing.T) {
 			defer srv.Close()
 
 			rc := newTestReconnectingClient(&ReconnectingClient{
-				serverCfg:    &config.MCPServerConfig{URL: srv.URL},
+				serverCfg:    &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}},
 				clientCfg:    ClientConfig{Timeout: 2 * time.Second, HTTPClient: srv.Client(), OAuthHandler: tt.handler},
 				oauthHandler: tt.handler,
 				reconnectCf: ReconnectConfig{

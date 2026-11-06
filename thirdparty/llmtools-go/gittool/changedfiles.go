@@ -59,6 +59,42 @@ var changedFilesTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"kind": {"type": "string", "enum": ["working", "staged", "refs"]},
+	"base": {"type": "string"},
+	"target": {"type": "string"},
+	"paths": {
+		"type": ["array", "null"],
+		"items": {"type": "string"}
+	},
+	"maxCount": {"type": "integer"},
+	"files": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"path": {"type": "string"},
+				"oldPath": {"type": "string"},
+				"status": {"type": "string"},
+				"staging": {"type": "string"},
+				"worktree": {"type": "string"}
+			},
+			"required": ["path", "status"],
+			"additionalProperties": false
+		}
+	},
+	"count": {"type": "integer"},
+	"truncated": {"type": "boolean"}
+},
+"required": ["repoPath", "kind", "maxCount", "files", "count", "truncated"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: changedFilesFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

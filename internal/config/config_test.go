@@ -21,12 +21,13 @@ const (
 	testModelOllamaProv = "ollama-gemma"
 	testProvOR          = "or"
 	testProvOC          = "oc"
-	testAPIKeyLit       = "key"
 )
 
 func TestLoad_ValidConfig(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -43,12 +44,11 @@ channels:
     baud_rate: 2400
   telegram:
     enabled: false
-    token: ""
 mcp_servers:
   home_assistant:
     url: http://ha.local:8123/mcp
     headers:
-      Authorization: "Bearer token123"
+      Authorization: !secret mcp_home_assistant_authorization
 skills:
   path: .ready/skills/
   hot_reload: true
@@ -94,8 +94,8 @@ compaction:
 		t.Fatal("expected home_assistant MCP server")
 	}
 
-	if ha.URL != "http://ha.local:8123/mcp" {
-		t.Errorf("unexpected MCP URL: %s", ha.URL)
+	if ha.URL.Value != "http://ha.local:8123/mcp" {
+		t.Errorf("unexpected MCP URL: %s", ha.URL.Value)
 	}
 
 	if cfg.Compaction.MaxTurns != 100 {
@@ -105,7 +105,9 @@ compaction:
 
 func TestLoad_CLIOnlyConfig(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -165,7 +167,9 @@ channels:
 // headless (both channels off) instead of failing validation.
 func TestLoad_ZMQFirstDefault(t *testing.T) {
 	base := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "p::test"
   providers:
@@ -176,7 +180,7 @@ channels:
   zmqcli:
     bind: tcp://127.0.0.1:7600
 `
-	zmqAuthBlock := "    auth_token: token-0123456789abcdef\n"
+	zmqAuthBlock := "    auth_token: !secret zmq_token\n"
 
 	t.Run("token configured without enabled key", func(t *testing.T) {
 		cfg, err := Load(context.Background(), writeTempFile(t, base+zmqAuthBlock))
@@ -251,8 +255,91 @@ func TestLoad_InvalidYAML(t *testing.T) {
 	}
 }
 
+// Strict decode: unknown or misplaced keys in the home_assistant block are a
+// decoding error, never a silent drop that disables the twin without a trace
+// (the malformed-shape failure observed with the config-manager flow).
+func TestLoad_UnknownHomeAssistantKeysRejected(t *testing.T) {
+	t.Run("flat url/token shape", func(t *testing.T) {
+		path := writeTempFile(t, `
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
+llm:
+  default: "ollama-gemma::gemma4:31b"
+  providers:
+    ollama-gemma:
+      provider: ollama
+      api: ollama
+home_assistant:
+  url: http://homeassistant.local:8123
+  token: !secret ha_token
+channels:
+  cli:
+    enabled: true
+`)
+
+		_, err := Load(context.Background(), path)
+		if err == nil {
+			t.Fatal("expected the flat home_assistant url/token shape to be refused")
+		}
+		if !strings.Contains(err.Error(), "field url not found") {
+			t.Errorf("error should name the unknown field, got: %v", err)
+		}
+	})
+
+	t.Run("unknown key inside websocket", func(t *testing.T) {
+		path := writeTempFile(t, `
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
+llm:
+  default: "ollama-gemma::gemma4:31b"
+  providers:
+    ollama-gemma:
+      provider: ollama
+      api: ollama
+home_assistant:
+  enabled: true
+  websocket:
+    url: ws://homeassistant.local:8123/api/websocket
+    token: !secret ha_token
+    endpoint: ws://elsewhere
+channels:
+  cli:
+    enabled: true
+`)
+
+		if _, err := Load(context.Background(), path); err == nil {
+			t.Fatal("expected the unknown websocket key to be refused")
+		}
+	})
+
+	t.Run("unknown key inside channels is refused too", func(t *testing.T) {
+		path := writeTempFile(t, `
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
+llm:
+  default: "ollama-gemma::gemma4:31b"
+  providers:
+    ollama-gemma:
+      provider: ollama
+      api: ollama
+channels:
+  cli:
+    enabled: true
+    unknown_key: 1
+`)
+
+		if _, err := Load(context.Background(), path); err == nil {
+			t.Fatal("expected the unknown channels key to be refused")
+		}
+	})
+}
+
 func TestValidate_MissingDefault(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Providers: map[string]LLMProviderConfig{
 				testModelOllamaProv: {Provider: testProviderOllama, API: APIOllama},
@@ -266,7 +353,8 @@ func TestValidate_MissingDefault(t *testing.T) {
 
 func TestValidate_MissingModels(t *testing.T) {
 	cfg := &Config{
-		LLM: LLMConfig{Default: testModelOllamaProv + "::" + testModel},
+		Agent: testAgent,
+		LLM:   LLMConfig{Default: testModelOllamaProv + "::" + testModel},
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for missing providers")
@@ -275,6 +363,7 @@ func TestValidate_MissingModels(t *testing.T) {
 
 func TestValidate_DanglingDefault(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: "nonexistent::model",
 			Providers: map[string]LLMProviderConfig{
@@ -289,6 +378,7 @@ func TestValidate_DanglingDefault(t *testing.T) {
 
 func TestValidate_DanglingFailover(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:  testModelOllamaProv + "::" + testModel,
 			Failover: []string{"nonexistent::model"},
@@ -302,26 +392,9 @@ func TestValidate_DanglingFailover(t *testing.T) {
 	}
 }
 
-func TestValidate_BothCredentialFields(t *testing.T) {
-	cfg := &Config{
-		LLM: LLMConfig{
-			Default: testProvOR + "::" + testModel,
-			Providers: map[string]LLMProviderConfig{
-				testProvOR: {
-					Provider:   ProviderOpenRouter,
-					APIKey:     "inline",
-					APIKeyFile: "file",
-				},
-			},
-		},
-	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected validation error for both api_key and api_key_file")
-	}
-}
-
 func TestValidate_APIOnOllama(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testOllamaEntryRef,
 			Providers: map[string]LLMProviderConfig{
@@ -339,13 +412,14 @@ func TestValidate_APIOnOllama(t *testing.T) {
 
 func TestValidate_ResponsesAccepted(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testProvOC + "::" + testModel,
 			Providers: map[string]LLMProviderConfig{
 				testProvOC: {
 					Provider: ProviderOpenCode,
 					API:      APIResponses,
-					APIKey:   "key",
+					APIKey:   testKeyRef,
 				},
 			},
 		},
@@ -357,13 +431,14 @@ func TestValidate_ResponsesAccepted(t *testing.T) {
 
 func TestValidate_GoogleAccepted(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testProvOC + "::" + testModel,
 			Providers: map[string]LLMProviderConfig{
 				testProvOC: {
 					Provider: ProviderOpenCode,
 					API:      APIGoogle,
-					APIKey:   "key",
+					APIKey:   testKeyRef,
 				},
 			},
 		},
@@ -375,6 +450,7 @@ func TestValidate_GoogleAccepted(t *testing.T) {
 
 func TestValidate_MissingAPIKeyForKeyedProvider(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testProvOC + "::" + testModel,
 			Providers: map[string]LLMProviderConfig{
@@ -389,7 +465,9 @@ func TestValidate_MissingAPIKeyForKeyedProvider(t *testing.T) {
 
 func TestValidate_LegacyLLMShapeRejected(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   provider: "ollama"
   api: ollama
@@ -399,13 +477,11 @@ channels:
     enabled: true
 `
 	path := writeTempFile(t, content)
-	cfg, err := Load(context.Background(), path)
-	if err != nil {
-		t.Fatalf("unexpected load error: %v", err)
-	}
-	err = cfg.Validate()
+	// Strict decode: the legacy shape is refused at Load with the same
+	// operator-facing message Validate used to produce.
+	_, err := Load(context.Background(), path)
 	if err == nil {
-		t.Fatal("expected validation error for legacy llm shape")
+		t.Fatal("expected load error for legacy llm shape")
 	}
 	if !strings.Contains(err.Error(), "superseded") {
 		t.Errorf("expected 'superseded' in error, got: %v", err)
@@ -420,7 +496,9 @@ channels:
 
 func TestValidate_LegacyModelsShapeRejected(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma"
   models:
@@ -433,13 +511,11 @@ channels:
     enabled: true
 `
 	path := writeTempFile(t, content)
-	cfg, err := Load(context.Background(), path)
-	if err != nil {
-		t.Fatalf("unexpected load error: %v", err)
-	}
-	err = cfg.Validate()
+	// Strict decode: the superseded shape is refused at Load with the same
+	// operator-facing message Validate used to produce.
+	_, err := Load(context.Background(), path)
 	if err == nil {
-		t.Fatal("expected validation error for superseded llm.models shape")
+		t.Fatal("expected load error for superseded llm.models shape")
 	}
 	if !strings.Contains(err.Error(), "llm.models") {
 		t.Errorf("expected 'llm.models' in error, got: %v", err)
@@ -454,13 +530,15 @@ channels:
 
 func TestValidate_MissingAPIIsRejected(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "zen::deepseek-v4-flash-free"
   providers:
     zen:
       provider: "opencode"
-      api_key: "test-key"
+      api_key: !secret test_key
 channels:
   cli:
     enabled: true
@@ -517,10 +595,11 @@ func TestValidate_ProviderAPITable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			entry := LLMProviderConfig{Provider: tc.provider, API: tc.api}
 			if tc.provider != ProviderOllama {
-				entry.APIKey = testAPIKeyLit
+				entry.APIKey = testKeyRef
 			}
 
 			cfg := &Config{
+				Agent: testAgent,
 				LLM: LLMConfig{
 					Default:   "prov::model",
 					Providers: map[string]LLMProviderConfig{"prov": entry},
@@ -552,14 +631,16 @@ func TestValidate_ProviderAPITable(t *testing.T) {
 func TestValidate_RecoveryDefaultsAndValidation(t *testing.T) {
 	t.Run("defaults apply when omitted", func(t *testing.T) {
 		content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "zen::deepseek-v4-flash-free"
   providers:
     zen:
       provider: "opencode"
       api: chat_completions
-      api_key: "test-key"
+      api_key: !secret test_key
 channels:
   cli:
     enabled: true
@@ -659,8 +740,8 @@ channels:
 			if tc.name == "negative attempt timeout" {
 				attempt = "  failover_attempt_timeout: -45s\n"
 			}
-			content := "config_version: 1\nllm:\n  default: \"zen::deepseek-v4-flash-free\"\n" + attempt + tc.recovery +
-				"  providers:\n    zen:\n      provider: \"opencode\"\n      api: chat_completions\n      api_key: \"test-key\"\nchannels:\n  cli:\n    enabled: true\n"
+			content := "config_version: 2\nagent:\n  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001\nllm:\n  default: \"zen::deepseek-v4-flash-free\"\n" + attempt + tc.recovery +
+				"  providers:\n    zen:\n      provider: \"opencode\"\n      api: chat_completions\n      api_key: !secret test_key\nchannels:\n  cli:\n    enabled: true\n"
 			path := writeTempFile(t, content)
 			cfg, err := Load(context.Background(), path)
 			if err != nil {
@@ -679,7 +760,9 @@ channels:
 
 	t.Run("explicit zero disables attempt budget and retries", func(t *testing.T) {
 		content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "zen::model"
   failover_attempt_timeout: 0s
@@ -688,7 +771,7 @@ llm:
     zen:
       provider: "opencode"
       api: chat_completions
-      api_key: "test-key"
+      api_key: !secret test_key
 channels:
   cli:
     enabled: true
@@ -715,12 +798,13 @@ channels:
 // type, not the api value, selects the construction path.
 func TestValidate_SameAPIOnDifferentProviders(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:  "oc::model",
 			Failover: []string{"or::model"},
 			Providers: map[string]LLMProviderConfig{
-				"oc": {Provider: ProviderOpenCode, API: APIChatCompletions, APIKey: "k"},
-				"or": {Provider: ProviderOpenRouter, API: APIChatCompletions, APIKey: "k"},
+				"oc": {Provider: ProviderOpenCode, API: APIChatCompletions, APIKey: testKeyRef},
+				"or": {Provider: ProviderOpenRouter, API: APIChatCompletions, APIKey: testKeyRef},
 			},
 		},
 	}
@@ -731,9 +815,10 @@ func TestValidate_SameAPIOnDifferentProviders(t *testing.T) {
 
 func TestValidate_TelegramEnabledWithoutToken(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		Channels: ChannelsConfig{
-			Telegram: TelegramChannelConfig{Enabled: true, Token: ""},
+			Telegram: TelegramChannelConfig{Enabled: true, Token: SecretRef{}},
 		},
 	}
 	if err := cfg.Validate(); err == nil {
@@ -743,7 +828,8 @@ func TestValidate_TelegramEnabledWithoutToken(t *testing.T) {
 
 func TestValidate_SerialEnabledWithoutPort(t *testing.T) {
 	cfg := &Config{
-		LLM: validLLMConfig(),
+		Agent: testAgent,
+		LLM:   validLLMConfig(),
 		Channels: ChannelsConfig{
 			Serial: SerialChannelConfig{Enabled: true, Port: ""},
 		},
@@ -755,6 +841,7 @@ func TestValidate_SerialEnabledWithoutPort(t *testing.T) {
 
 func TestValidate_ValidConfig(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:   testProviderOllama + "::" + testModelGemma,
 			Providers: map[string]LLMProviderConfig{testProviderOllama: {Provider: testProviderOllama, API: APIOllama}},
@@ -770,7 +857,9 @@ func TestValidate_ValidConfig(t *testing.T) {
 
 func TestLoad_NewOwnerProfileShape(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -823,7 +912,9 @@ builtin_tools:
 
 func TestLoad_DiscloseDeniedToolsFlag(t *testing.T) {
 	base := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -833,7 +924,7 @@ llm:
 channels:
   cli:
     enabled: true
-mcp_profile: default
+default_profile: default
 `
 
 	t.Run("flag alongside inject_skills loads and validates", func(t *testing.T) {
@@ -898,7 +989,9 @@ profiles:
 
 func TestValidate_RejectsPreRefactorProfileShape(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -916,14 +1009,11 @@ profiles:
 `
 	path := writeTempFile(t, content)
 
-	cfg, err := Load(context.Background(), path)
-	if err != nil {
-		t.Fatalf("unexpected load error: %v", err)
-	}
-
-	err = cfg.Validate()
+	// Strict decode: the pre-refactor shape is refused at Load with the same
+	// operator-facing message Validate used to produce.
+	_, err := Load(context.Background(), path)
 	if err == nil {
-		t.Fatal("expected validation error for pre-refactor profiles.default.allow/deny/edit_tools shape")
+		t.Fatal("expected load error for pre-refactor profiles.default.allow/deny/edit_tools shape")
 	}
 
 	for _, field := range []string{"profiles.default.allow", "profiles.default.deny", "profiles.default.edit_tools"} {
@@ -939,6 +1029,7 @@ profiles:
 
 func TestApplyDefaults_TwinThresholds(t *testing.T) {
 	cfg := &Config{
+		Agent:    testAgent,
 		LLM:      validLLMConfig(),
 		Channels: ChannelsConfig{CLI: CLIChannelConfig{Enabled: true}},
 	}
@@ -962,7 +1053,7 @@ func TestApplyDefaults_TwinThresholds(t *testing.T) {
 }
 
 func TestHasEnabledChannels(t *testing.T) {
-	cfg := &Config{}
+	cfg := &Config{Agent: testAgent}
 	if cfg.HasEnabledChannels() {
 		t.Error("expected no enabled channels")
 	}
@@ -977,7 +1068,9 @@ func TestHasEnabledChannels(t *testing.T) {
 // absent → false; explicit true → true; explicit false → false.
 func TestLoggingThoughts_Absent(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "p::test"
   providers:
@@ -1002,7 +1095,9 @@ logging:
 
 func TestLoggingThoughts_ExplicitTrue(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "p::test"
   providers:
@@ -1028,7 +1123,9 @@ logging:
 
 func TestLoggingThoughts_ExplicitFalse(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "p::test"
   providers:
@@ -1054,7 +1151,9 @@ logging:
 
 func TestLoggingThoughts_NonBooleanError(t *testing.T) {
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "p::test"
   providers:
@@ -1141,13 +1240,14 @@ func TestEffectiveToolPrefix(t *testing.T) {
 func TestValidate_KeepAliveOnNonOllama(t *testing.T) {
 	ka := 30 * time.Minute
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testProvOR + "::" + testModel,
 			Providers: map[string]LLMProviderConfig{
 				testProvOR: {
 					Provider:  ProviderOpenRouter,
 					API:       APIChatCompletions,
-					APIKey:    testAPIKeyLit,
+					APIKey:    testKeyRef,
 					KeepAlive: &ka,
 				},
 			},
@@ -1168,13 +1268,14 @@ func TestValidate_KeepAliveOnNonOllama(t *testing.T) {
 func TestValidate_OptionsOnNonOllama(t *testing.T) {
 	temp := float32(0.3)
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testProvOC + "::" + testModel,
 			Providers: map[string]LLMProviderConfig{
 				testProvOC: {
 					Provider: ProviderOpenCode,
 					API:      APIChatCompletions,
-					APIKey:   testAPIKeyLit,
+					APIKey:   testKeyRef,
 					Options:  &OllamaOptions{Temperature: &temp},
 				},
 			},
@@ -1194,6 +1295,7 @@ func TestValidate_OllamaKeepAliveAndOptionsOK(t *testing.T) {
 	np := 256
 	temp := float32(0.3)
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testModelOllamaProv + "::" + testModel,
 			Providers: map[string]LLMProviderConfig{
@@ -1215,6 +1317,7 @@ func TestValidate_OllamaKeepAliveAndOptionsOK(t *testing.T) {
 // the contract: one llm.providers entry and a default referencing a model on it.
 func TestValidate_SingleProviderRegistry(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testModelOllamaProv + "::" + testModelGemma,
 			Providers: map[string]LLMProviderConfig{
@@ -1231,6 +1334,7 @@ func TestValidate_SingleProviderRegistry(t *testing.T) {
 // reference is a bare model name with no '::'.
 func TestValidate_ReferenceMissingSeparator(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testModelGemma, // no '::'
 			Providers: map[string]LLMProviderConfig{
@@ -1251,6 +1355,7 @@ func TestValidate_ReferenceMissingSeparator(t *testing.T) {
 // reference has the form '<provider>::' (empty model-id).
 func TestValidate_ReferenceEmptyModelID(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testModelOllamaProv + "::",
 			Providers: map[string]LLMProviderConfig{
@@ -1272,6 +1377,7 @@ func TestValidate_ReferenceEmptyModelID(t *testing.T) {
 func TestValidate_DuplicateReference(t *testing.T) {
 	ref := testModelOllamaProv + "::" + testModel
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:  ref,
 			Failover: []string{ref},
@@ -1295,6 +1401,7 @@ func TestValidate_DuplicateReferenceInFailover(t *testing.T) {
 	ref := testModelOllamaProv + "::" + testModel
 	other := testModelOllamaProv + "::other"
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:  other,
 			Failover: []string{ref, ref},
@@ -1317,6 +1424,7 @@ func TestValidate_DuplicateReferenceInFailover(t *testing.T) {
 // 'gemma4:31b' used verbatim.
 func TestValidate_ModelIDWithSingleColon(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: testModelOllamaProv + "::" + testModelGemma, // gemma4:31b
 			Providers: map[string]LLMProviderConfig{
@@ -1334,12 +1442,13 @@ func TestValidate_ModelIDWithSingleColon(t *testing.T) {
 // different base_urls; references qualify the intended instance by name.
 func TestValidate_TwoSameTypeProviders(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default:  "zen1::gpt-5.4-mini",
 			Failover: []string{"zen2::claude-sonnet-4-5"},
 			Providers: map[string]LLMProviderConfig{
-				"zen1": {Provider: ProviderOpenCode, API: APIResponses, APIKey: "k1", BaseURL: "https://gw1/zen/v1"},
-				"zen2": {Provider: ProviderOpenCode, API: APIAnthropic, APIKey: "k2", BaseURL: "https://gw2/zen/v1"},
+				"zen1": {Provider: ProviderOpenCode, API: APIResponses, APIKey: testKeyRef, BaseURL: "https://gw1/zen/v1"},
+				"zen2": {Provider: ProviderOpenCode, API: APIAnthropic, APIKey: testKeyRef, BaseURL: "https://gw2/zen/v1"},
 			},
 		},
 	}
@@ -1352,6 +1461,7 @@ func TestValidate_TwoSameTypeProviders(t *testing.T) {
 // provider instance names MUST NOT contain '::'.
 func TestValidate_ProviderInstanceNameWithSeparator(t *testing.T) {
 	cfg := &Config{
+		Agent: testAgent,
 		LLM: LLMConfig{
 			Default: "weird::name::gemma4:31b",
 			Providers: map[string]LLMProviderConfig{
@@ -1417,6 +1527,7 @@ func TestParseModelReference(t *testing.T) {
 func TestValidate_ContextWindow(t *testing.T) {
 	t.Run("absent is accepted", func(t *testing.T) {
 		cfg := &Config{
+			Agent: testAgent,
 			LLM: LLMConfig{
 				Default: testOllamaEntryRef,
 				Providers: map[string]LLMProviderConfig{
@@ -1431,10 +1542,11 @@ func TestValidate_ContextWindow(t *testing.T) {
 
 	t.Run("positive is accepted on any provider", func(t *testing.T) {
 		cfg := &Config{
+			Agent: testAgent,
 			LLM: LLMConfig{
 				Default: "or-entry::model",
 				Providers: map[string]LLMProviderConfig{
-					"or-entry": {Provider: ProviderOpenRouter, API: APIChatCompletions, APIKey: "inline", ContextWindow: 128000},
+					"or-entry": {Provider: ProviderOpenRouter, API: APIChatCompletions, APIKey: testKeyRef, ContextWindow: 128000},
 				},
 			},
 		}
@@ -1446,6 +1558,7 @@ func TestValidate_ContextWindow(t *testing.T) {
 	for _, bad := range []int{-1, -8192} {
 		t.Run(fmt.Sprintf("negative %d rejected", bad), func(t *testing.T) {
 			cfg := &Config{
+				Agent: testAgent,
 				LLM: LLMConfig{
 					Default: testOllamaEntryRef,
 					Providers: map[string]LLMProviderConfig{
@@ -1464,8 +1577,9 @@ func TestValidate_ContextWindow(t *testing.T) {
 	}
 }
 
-// session-lifecycle 1.5/2.3/3.7: removed or renamed keys fail validation with
-// a message naming the replacement (plain yaml.Unmarshal would drop them).
+// session-lifecycle 1.5/2.3/3.7: removed or renamed keys fail with a message
+// naming the replacement. Strict decoding refuses them at Load (they are no
+// longer struct fields) with the same operator-facing reason.
 func TestValidate_RemovedKeysRejected(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -1477,12 +1591,15 @@ func TestValidate_RemovedKeysRejected(t *testing.T) {
 		{"session_timeout", "  zmqcli:\n    session_timeout: 15m\n", "use channels.zmqcli.connection_idle_timeout"},
 		{"checkpoints_path", "persistence:\n  checkpoints_path: .ready/checkpoints/\n", "use sessions.path"},
 		{"max_history", "persistence:\n  max_history: 50\n", "use compaction.max_turns"},
+		{"mcp_profile", "mcp_profile: edit\n", "renamed: use default_profile"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -1494,14 +1611,9 @@ channels:
     enabled: true
 ` + tc.block
 
-			cfg, err := Load(context.Background(), writeTempFile(t, content))
-			if err != nil {
-				t.Fatalf("unexpected load error: %v", err)
-			}
-
-			err = cfg.Validate()
+			_, err := Load(context.Background(), writeTempFile(t, content))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.want)
+				t.Fatalf("Load() = %v, want an error containing %q", err, tc.want)
 			}
 		})
 	}
@@ -1511,7 +1623,9 @@ func loadSessionsYAML(t *testing.T, block string) (*Config, error) {
 	t.Helper()
 
 	content := `
-config_version: 1
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
 llm:
   default: "ollama-gemma::gemma4:31b"
   providers:
@@ -1585,4 +1699,129 @@ func TestSessionRetention_ZeroDaysAllowed(t *testing.T) {
 	if cfg.Sessions.Retention.Days() != 0 || cfg.Sessions.Retention.MaxTotalSize != 1<<20 {
 		t.Errorf("retention = %+v", cfg.Sessions.Retention)
 	}
+}
+
+// guided-init-and-direct-secret-entry D.1: the renamed selector — legacy
+// mcp_profile refuses at validation even when null or combined with the
+// replacement, and the removed READY_MCP_PROFILE env name is ignored
+// (never aliased), not mistakenly promoted or rejected as config.
+func TestValidate_LegacyProfileSelectorRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		block string
+	}{
+		{"scalar", "mcp_profile: default\n"},
+		{"null", "mcp_profile:\n"},
+		{"both keys", "mcp_profile: default\ndefault_profile: edit\n"},
+		{"commented value only", "mcp_profile: ''\n"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Strict decode: the legacy selector is refused at Load with the
+			// same operator-facing reason Validate used to produce.
+			content := `
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
+llm:
+  default: "ollama-gemma::gemma4:31b"
+  providers:
+    ollama-gemma:
+      provider: ollama
+      api: ollama
+channels:
+  cli:
+    enabled: true
+` + tc.block
+			_, err := Load(context.Background(), writeTempFile(t, content))
+			if err == nil {
+				t.Fatal("expected legacy mcp_profile survival to fail loading")
+			}
+			if !strings.Contains(err.Error(), "renamed: use default_profile") {
+				t.Fatalf("error %v must name the replacement selector", err)
+			}
+		})
+	}
+}
+
+func TestDefaultProfileSelectorAndEnv(t *testing.T) {
+	t.Run("config key", func(t *testing.T) {
+		cfg, err := loadSessionsYAML(t, "default_profile: edit\n")
+		if err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		if cfg.DefaultProfile != profileNameEdit {
+			t.Errorf("DefaultProfile = %q, want %q", cfg.DefaultProfile, profileNameEdit)
+		}
+	})
+
+	t.Run("resolve honours selector and flag", func(t *testing.T) {
+		cfg, err := loadSessionsYAML(t, "default_profile: edit\n")
+		if err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+		name, _, err := cfg.ResolveProfile("", "")
+		if err != nil || name != profileNameEdit {
+			t.Fatalf("ResolveProfile = %q, %v", name, err)
+		}
+		name, _, err = cfg.ResolveProfile(profileNameDefault, "")
+		if err != nil || name != profileNameDefault {
+			t.Fatalf("ResolveProfile(flag) = %q, %v — the flag must win", name, err)
+		}
+	})
+}
+
+// Allow and deny are mutually exclusive on one profile entry (every owner:
+// MCP servers, the HA twin, builtin_tools). An entry expresses an allow-list
+// or a deny-list; "allow everything except X" is a deny list without allow.
+func TestValidate_OwnerProfilesAllowDenyExclusive(t *testing.T) {
+	base := `
+config_version: 2
+agent:
+  id: 0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001
+llm:
+  default: "ollama-gemma::gemma4:31b"
+  providers:
+    ollama-gemma:
+      provider: "ollama"
+      api: ollama
+channels:
+  cli:
+    enabled: true
+%s`
+
+	cases := []struct {
+		name  string
+		block string
+		owner string
+	}{
+		{"builtin_tools", "builtin_tools:\n  profiles:\n    default:\n      allow: [\"*\"]\n      deny: [\"config-manager\"]\n", "builtin_tools.profiles.default"},
+		{"home_assistant", "home_assistant:\n  enabled: true\n  websocket:\n    url: ws://ha:8123/api/websocket\n    token: !secret ha_token\n  profiles:\n    default:\n      allow: [\"ha_state_query\"]\n      deny: [\"ha_command\"]\n", "home_assistant.profiles.default"},
+		{"mcp_server", "mcp_servers:\n  ha:\n    url: http://ha:8123\n    profiles:\n      default:\n        allow: [\"light/*\"]\n        deny: [\"lock/*\"]\n", "mcp_servers.ha.profiles.default"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(context.Background(), writeTempFile(t, fmt.Sprintf(base, tc.block)))
+			if err != nil {
+				t.Fatalf("unexpected load error: %v", err)
+			}
+			err = cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "mutually exclusive") || !strings.Contains(err.Error(), tc.owner) {
+				t.Fatalf("Validate() = %v, want a mutual-exclusivity error naming %s", err, tc.owner)
+			}
+		})
+	}
+
+	t.Run("deny alone means allow-everything-except-denied", func(t *testing.T) {
+		cfg, err := Load(context.Background(), writeTempFile(t, fmt.Sprintf(base,
+			"builtin_tools:\n  profiles:\n    default:\n      deny: [\"config-manager\"]\n")))
+		if err != nil {
+			t.Fatalf("unexpected load error: %v", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil", err)
+		}
+	})
 }

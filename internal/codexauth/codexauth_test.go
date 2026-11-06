@@ -11,13 +11,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	mcpoauth "github.com/marco-rozz/ready/internal/oauth"
+	"github.com/marco-rozz/ready/internal/secretstore"
 )
 
 const (
@@ -70,42 +72,57 @@ func TestExtractAccountID(t *testing.T) {
 	}
 }
 
-func TestFileStoreNamespaceTraversalAndPermissions(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "oauth")
-	store, err := NewFileStore(context.Background(), dir)
+func newTestSecrets(t *testing.T, dir string) *secretstore.Store {
+	t.Helper()
+	secrets, err := secretstore.New(secretstore.Options{
+		Dir:     dir,
+		Key:     secretstore.KeySpec{Location: secretstore.KeyAgentDir},
+		AgentID: "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001",
+		Log:     zerolog.Nop(),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	return secrets
+}
+
+func newTestStore(t *testing.T, dir string) *SecretStore {
+	t.Helper()
+
+	return NewSecretStore(newTestSecrets(t, dir), dir)
+}
+
+func TestSecretStoreNamespacesDoNotCollide(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "agent")
+	secrets := newTestSecrets(t, dir)
+	store := NewSecretStore(secrets, dir)
 	cred := NewCredential("../same/name")
 	cred.AccessToken, cred.RefreshToken, cred.AccountID = "access", "refresh", "account"
 	if saveErr := store.Save(context.Background(), cred); saveErr != nil {
 		t.Fatal(saveErr)
 	}
-	mcpStore, err := mcpoauth.NewFileStore(context.Background(), dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mcpStore := mcpoauth.NewSecretStore(secrets, dir)
 	mcpCred := mcpoauth.NewCredential("../same/name")
 	if saveErr := mcpStore.Save(context.Background(), mcpCred); saveErr != nil {
 		t.Fatal(saveErr)
 	}
+	got, err := store.Load(context.Background(), "../same/name")
+	if err != nil || got == nil || got.AccessToken != "access" {
+		t.Fatalf("codex credential = %+v, %v", got, err)
+	}
+	if other, loadErr := mcpStore.Load(context.Background(), "../same/name"); loadErr != nil || other == nil {
+		t.Fatalf("mcp credential = %+v, %v", other, loadErr)
+	}
+	// Nothing derived from the provider key may become a path: the only
+	// files under the agent directory are the store, its key and the locks.
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 2 {
-		t.Fatalf("entries=%v err=%v", entries, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	var llmFile string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "llm-") {
-			llmFile = entry.Name()
-		}
-	}
-	if llmFile == "" || strings.Contains(llmFile, "..") || strings.Contains(llmFile, "/") {
-		t.Fatalf("unsafe or missing LLM filename %q", llmFile)
-	}
-	if runtime.GOOS != "windows" {
-		info, _ := os.Stat(filepath.Join(dir, llmFile))
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("file mode=%o", info.Mode().Perm())
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "same") || strings.Contains(e.Name(), "..") {
+			t.Fatalf("unsafe entry %q", e.Name())
 		}
 	}
 }
@@ -202,7 +219,7 @@ func TestTokenSourceSingleFlightRefresh(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	store, _ := NewFileStore(context.Background(), t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	old := NewCredential(testProviderKey)
 	old.AccessToken, old.RefreshToken, old.AccountID = "expired", "old", "acct"
 	old.Expiry = time.Now().Add(-time.Hour)
@@ -212,7 +229,7 @@ func TestTokenSourceSingleFlightRefresh(t *testing.T) {
 	}
 	client := NewClient(srv.Client())
 	client.Endpoints.Token = srv.URL
-	source, err := NewTokenSource(store, client, testProviderKey, old)
+	source, err := NewTokenSource(store, client, testProviderKey, "", old)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +261,7 @@ func TestTokenSourceConcurrentLoginWinsRefresh(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	store, _ := NewFileStore(context.Background(), t.TempDir())
+	store := newTestStore(t, t.TempDir())
 	old := NewCredential(testProviderKey)
 	old.AccessToken, old.RefreshToken, old.AccountID = "expired", "old", "old-account"
 	old.Expiry = time.Now().Add(-time.Hour)
@@ -254,7 +271,7 @@ func TestTokenSourceConcurrentLoginWinsRefresh(t *testing.T) {
 	}
 	client := NewClient(srv.Client())
 	client.Endpoints.Token = srv.URL
-	source, err := NewTokenSource(store, client, testProviderKey, old)
+	source, err := NewTokenSource(store, client, testProviderKey, "", old)
 	if err != nil {
 		t.Fatal(err)
 	}

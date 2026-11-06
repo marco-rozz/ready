@@ -18,7 +18,7 @@ func emptyBody() io.ReadCloser {
 }
 
 func TestLoginRequiredHandler(t *testing.T) {
-	h := newLoginRequiredHandler(testServerKey)
+	h := newLoginRequiredHandler(testServerKey, "")
 
 	ts, err := h.TokenSource(context.Background())
 	if err != nil {

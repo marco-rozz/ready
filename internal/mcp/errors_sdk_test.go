@@ -45,7 +45,7 @@ func TestClassifyError_ToolNotFound_ThroughSDK(t *testing.T) {
 // TestClassifyError_ConnectionRefused_ThroughSDK connects to a port nothing
 // listens on, so the SDK transport surfaces a genuine connection failure.
 func TestClassifyError_ConnectionRefused_ThroughSDK(t *testing.T) {
-	cfg := &config.MCPServerConfig{URL: "http://127.0.0.1:1"}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "http://127.0.0.1:1"}}
 
 	_, err := connectToServer(context.Background(), cfg, 2*time.Second, nil, nil)
 	if err == nil {
@@ -67,7 +67,7 @@ func TestClassifyError_Timeout_ThroughSDK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.MCPServerConfig{URL: srv.URL}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}}
 
 	_, err := connectToServer(context.Background(), cfg, 20*time.Millisecond, nil, nil)
 	if err == nil {
@@ -88,7 +88,7 @@ func TestClassifyError_Unauthorized_ThroughSDK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.MCPServerConfig{URL: srv.URL}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}}
 
 	_, err := connectToServer(context.Background(), cfg, 2*time.Second, nil, nil)
 	if err == nil {

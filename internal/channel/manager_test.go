@@ -210,3 +210,51 @@ func TestManager_MultipleChannels(t *testing.T) {
 		t.Fatalf("unexpected error on stop: %v", err)
 	}
 }
+
+// A generation-scoped channel is replaced or stopped without touching the
+// other channels or closing the shared incoming stream (runtime reload).
+func TestManager_AddOrReplaceAndStopChannelKeepIncomingOpen(t *testing.T) {
+	persistent := newMockChannel("cli")
+	gen1 := newMockChannel("telegram")
+	mgr := NewManager(testLogger(), persistent, gen1)
+	if err := mgr.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mgr.Stop() }()
+
+	gen2 := newMockChannel("telegram")
+	mgr.AddOrReplace(gen2)
+	if !gen1.isClosed() {
+		t.Fatal("the replaced channel must be closed")
+	}
+	if persistent.isClosed() {
+		t.Fatal("an untouched channel must stay open")
+	}
+
+	gen2.msgCh <- Message{Content: "from gen2"}
+	select {
+	case msg := <-mgr.Incoming():
+		if msg.Content != "from gen2" || msg.ChannelName != "telegram" {
+			t.Fatalf("unexpected message %+v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the replacement channel is not being received")
+	}
+
+	if err := mgr.StopChannel("telegram"); err != nil {
+		t.Fatal(err)
+	}
+	if !gen2.isClosed() || mgr.Channel("telegram") != nil {
+		t.Fatal("StopChannel must close and unregister the channel")
+	}
+
+	persistent.msgCh <- Message{Content: "still here"}
+	select {
+	case msg := <-mgr.Incoming():
+		if msg.Content != "still here" {
+			t.Fatalf("unexpected message %+v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the shared incoming stream must survive a channel stop")
+	}
+}

@@ -32,6 +32,65 @@ var repoInfoTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"gitDir": {"type": "string"},
+	"bare": {"type": "boolean"},
+	"headHash": {"type": "string"},
+	"branch": {"type": "string"},
+	"detachedHead": {"type": "boolean"},
+	"unbornHead": {"type": "boolean"},
+	"defaultAuthorName": {"type": "string"},
+	"defaultAuthorEmail": {"type": "string"},
+	"remotes": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"name": {"type": "string"},
+				"urls": {
+					"type": ["array", "null"],
+					"items": {"type": "string"}
+				}
+			},
+			"required": ["name", "urls"],
+			"additionalProperties": false
+		}
+	},
+	"localBranchCount": {"type": "integer"},
+	"remoteBranchCount": {"type": "integer"},
+	"tagCount": {"type": "integer"},
+	"indexState": {
+		"type": "object",
+		"properties": {
+			"entries": {"type": "integer"},
+			"hasConflicts": {"type": "boolean"},
+			"conflictPaths": {
+				"type": ["array", "null"],
+				"items": {"type": "string"}
+			}
+		},
+		"required": ["entries", "hasConflicts"],
+		"additionalProperties": false
+	}
+},
+"required": [
+	"repoPath",
+	"gitDir",
+	"bare",
+	"detachedHead",
+	"unbornHead",
+	"localBranchCount",
+	"remoteBranchCount",
+	"tagCount"
+],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: repoInfoFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

@@ -196,20 +196,21 @@ type Channel struct {
 	logger    zerolog.Logger
 }
 
-// New creates a Channel backed by a live tgbotapi.BotAPI client.
-func New(cfg config.TelegramChannelConfig, rootLogger zerolog.Logger) (*Channel, error) {
-	if cfg.Token == "" {
+// New creates a Channel backed by a live tgbotapi.BotAPI client. token is the
+// bot token resolved from the channel's Secret reference by the caller.
+func New(cfg config.TelegramChannelConfig, token string, rootLogger zerolog.Logger) (*Channel, error) {
+	if token == "" {
 		return nil, errors.New("telegram: token is required")
 	}
 
-	bot, err := tgbotapi.NewBotAPIWithClient(cfg.Token, tgbotapi.APIEndpoint, newHTTPClient())
+	bot, err := tgbotapi.NewBotAPIWithClient(token, tgbotapi.APIEndpoint, newHTTPClient())
 	if err != nil {
 		return nil, fmt.Errorf("telegram: failed to create bot api: %w", err)
 	}
 
 	wrapper := &botWrapper{
 		api:   bot,
-		token: cfg.Token,
+		token: token,
 		hc:    newHTTPClient(),
 	}
 
@@ -507,6 +508,10 @@ func (c *Channel) Send(ctx context.Context, msg channel.Message) error {
 	sanitized := sanitizeHTML(msg.Content)
 
 	for _, chunk := range splitMessage(sanitized, MaxMessageLength) {
+		// A chunk boundary can fall between an opening and a closing tag of
+		// a globally balanced message; rebalance each chunk for delivery.
+		chunk = balanceTags(chunk)
+
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("telegram: send cancelled: %w", ctx.Err())
@@ -676,11 +681,14 @@ func (c *Channel) SendStreamEdit(ctx context.Context, chatID int64, messageID in
 		return nil
 	}
 
-	// Truncate to Telegram's 4096-char limit.
+	// Truncate to Telegram's 4096-char limit.  The truncation can cut a
+	// kept tag or an entity in half, or orphan an open/close pair: balance
+	// after it repairs all three artifacts.
 	sanitized := sanitizeHTML(content)
 	if len([]rune(sanitized)) > MaxMessageLength {
 		sanitized = string([]rune(sanitized)[:MaxMessageLength])
 	}
+	sanitized = balanceTags(sanitized)
 
 	edit := tgbotapi.EditMessageTextConfig{
 		BaseEdit: tgbotapi.BaseEdit{

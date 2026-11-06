@@ -263,9 +263,9 @@ func TestInvalidClientRecovery(t *testing.T) {
 	ctx := context.Background()
 	client := fas.Client()
 
-	store, err := NewFileStore(ctx, t.TempDir())
+	store, err := newTestStore(t, t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("newTestStore: %v", err)
 	}
 
 	cred := NewCredential(testServerKey)

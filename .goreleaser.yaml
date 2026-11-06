@@ -7,8 +7,8 @@
 # Composition (the extendable manifest knob is archive.files below): one
 # archive per platform with the binary at the archive root, the example
 # config, and the shipped skill library mapped to skills/. The installer
-# places the library at <Install home>/library/skills/ and the daemon copies
-# it into the runtime home at boot, per file.
+# places the library in ~/.local/share/ready/library/skills/. init prepares
+# the first agent copy; serve reconciles updates at boot, per file.
 version: 2
 
 project_name: ready
@@ -68,7 +68,7 @@ archives:
     # releases/latest/download/<asset> scheme has a fixed shape.
     name_template: '{{- if and (eq .Os "linux") (eq .Arch "arm") -}}ready_linux_armv6{{- else -}}ready_{{ .Os }}_{{ .Arch }}{{- end -}}'
     # The extendable bundle list. Skills land at skills/ inside the archive;
-    # the installer maps that to <Install home>/library/skills/.
+    # the installer maps that to program storage at ~/.local/share/ready/library/skills/.
     files:
       # the binary is included implicitly at the archive root
       - src: config.example.yaml

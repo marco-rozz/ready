@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/marco-rozz/ready/internal/config"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/oauth2"
@@ -20,6 +21,7 @@ import (
 // never trigger a client registration through this path.
 type loginRequiredHandler struct {
 	serverKey string
+	agentDir  string
 }
 
 // Guarantees at compile time that loginRequiredHandler implements auth.OAuthHandler.
@@ -28,8 +30,8 @@ var _ auth.OAuthHandler = (*loginRequiredHandler)(nil)
 // newLoginRequiredHandler returns a handler for serverKey whose every
 // operation fails with an error naming the server and the remediation
 // command (the design doc's 401 message).
-func newLoginRequiredHandler(serverKey string) *loginRequiredHandler {
-	return &loginRequiredHandler{serverKey: serverKey}
+func newLoginRequiredHandler(serverKey, agentDir string) *loginRequiredHandler {
+	return &loginRequiredHandler{serverKey: serverKey, agentDir: agentDir}
 }
 
 func (h *loginRequiredHandler) TokenSource(context.Context) (oauth2.TokenSource, error) {
@@ -44,7 +46,7 @@ func (h *loginRequiredHandler) Authorize(_ context.Context, _ *http.Request, res
 }
 
 func (h *loginRequiredHandler) err() error {
-	return fmt.Errorf("%w: no usable credential for %q: run `ready login %s`", ErrLoginRequired, h.serverKey, h.serverKey)
+	return fmt.Errorf("%w: no usable credential for %q: run `%s`", ErrLoginRequired, h.serverKey, config.LoginCommand(h.agentDir, h.serverKey))
 }
 
 // failingTokenSource always returns the same error and never a token. It is

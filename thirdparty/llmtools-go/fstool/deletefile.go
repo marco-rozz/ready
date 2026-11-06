@@ -45,6 +45,21 @@ var deleteFileTool = spec.Tool{
 "additionalProperties": false
 }`),
 
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"originalPath": {"type": "string"},
+	"trashedPath": {"type": "string"},
+	"method": {
+		"type": "string",
+		"enum": ["rename", "copyAndRemove", "symlinkRehome"]
+	}
+},
+"required": ["originalPath", "trashedPath", "method"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: deleteFileFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

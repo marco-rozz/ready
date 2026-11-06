@@ -45,6 +45,9 @@ var readFileTool = spec.Tool{
 "required": ["path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.ToolOutputUnionListSchema(),
+
 	GoImpl: spec.GoToolImpl{FuncID: readFileFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

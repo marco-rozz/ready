@@ -111,6 +111,11 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
+	// Observe replacement/forget before acting on the cached record
+	// (per-user-install-agent-isolation): a newer generation — including a
+	// tombstone from a concurrent forget — supersedes the cache.
+	ts.adoptCurrentLocked()
+
 	tok, err := ts.tokenLocked()
 	if err == nil {
 		return tok, nil
@@ -124,6 +129,28 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 	ts.cred = reloaded
 
 	return ts.tokenLocked()
+}
+
+// adoptCurrentLocked re-reads the store's generation and adopts any newer
+// record; an absent record whose tombstone generation supersedes the cached
+// one replaces the cache with an unusable credential (login required).
+// Best-effort: store/lock hiccups keep the cached credential. Caller holds
+// ts.mu.
+func (ts *TokenSource) adoptCurrentLocked() {
+	snap, err := ts.store.Snapshot(context.Background(), ts.serverKey)
+	if err != nil || snap == 0 || (ts.cred != nil && snap <= ts.cred.Generation) {
+		return
+	}
+	cur, err := ts.store.Load(context.Background(), ts.serverKey)
+	if err != nil {
+		return
+	}
+	if cur == nil {
+		ts.cred = NewCredential(ts.serverKey) // unusable → ErrLoginRequired
+
+		return
+	}
+	ts.cred = cur
 }
 
 // tokenLocked returns a usable token for ts.cred, refreshing and persisting

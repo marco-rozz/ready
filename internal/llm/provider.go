@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
@@ -22,6 +23,7 @@ import (
 	"github.com/marco-rozz/ready/internal/codex"
 	"github.com/marco-rozz/ready/internal/codexauth"
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/secretstore"
 	"github.com/rs/zerolog"
 	"google.golang.org/genai"
 )
@@ -139,7 +141,7 @@ func CompileCandidates(registry *config.LLMConfig) ([]CandidateDescriptor, error
 
 // BuildForReference builds the ResolvedModel for a single reference without
 // probing. A returned error is a PER-CANDIDATE failure (construction or
-// credential: unreadable api_key_file, unsupported api, provider build
+// credential: pending or unreadable api_key, unsupported api, provider build
 // error), never a fatal global registry error — the caller marks only this
 // candidate unhealthy and continues with the rest of the chain. Identical
 // to the boot construction path so a post-switch model is behaviourally
@@ -165,13 +167,13 @@ func BuildForReference(ctx context.Context, registry *config.LLMConfig, ref stri
 	var key string
 	if providerCfg.Provider != config.ProviderOpenAICodex {
 		var keyErr error
-		key, keyErr = providerCfg.ResolvedAPIKey(ctx)
+		key, keyErr = registry.ResolveAPIKey(ctx, providerName)
 		if keyErr != nil {
 			return ResolvedModel{}, fmt.Errorf("config error for model reference %q: %w", ref, keyErr)
 		}
 	}
 
-	resolved, buildErr := buildModel(ctx, &providerCfg, modelID, key, registry.OAuthPath)
+	resolved, buildErr := buildModel(ctx, &providerCfg, modelID, key, codexCredentials(registry))
 	if buildErr != nil {
 		return ResolvedModel{}, fmt.Errorf("config error for model reference %q: %w", ref, buildErr)
 	}
@@ -205,10 +207,10 @@ func PreflightCatalog(ctx context.Context, registry *config.LLMConfig, ref strin
 	}
 
 	if providerCfg.Provider == config.ProviderOpenAICodex {
-		return preflightCodexCredential(ctx, registry.OAuthPath, providerName)
+		return preflightCodexCredential(ctx, codexCredentials(registry), providerName)
 	}
 
-	key, keyErr := providerCfg.ResolvedAPIKey(ctx)
+	key, keyErr := registry.ResolveAPIKey(ctx, providerName)
 	if keyErr != nil {
 		return fmt.Errorf("config error for model reference %q: %w", ref, keyErr)
 	}
@@ -338,9 +340,9 @@ func promptLayoutFor(providerCfg *config.LLMProviderConfig) PromptLayout {
 // ToolCallingChatModel for every protocol except `responses`, or an
 // AgenticModel for `responses`. It returns a config error for invalid
 // configurations. The caller is responsible for resolving the API key via
-// LLMProviderConfig.ResolvedAPIKey(ctx) before calling buildModel (D7: read
+// LLMConfig.ResolveAPIKey(ctx, name) before calling buildModel (D7: read
 // once at boot).
-func buildModel(ctx context.Context, providerCfg *config.LLMProviderConfig, modelID, key string, oauthPaths ...string) (ResolvedModel, error) {
+func buildModel(ctx context.Context, providerCfg *config.LLMProviderConfig, modelID, key string, creds codexCreds) (ResolvedModel, error) {
 	// Re-validate provider-level config that config.Validate() also checks.
 	// This ensures Resolve() from tests without Load+Validate also catches
 	// config errors before any connection attempt.
@@ -351,15 +353,8 @@ func buildModel(ctx context.Context, providerCfg *config.LLMProviderConfig, mode
 		return ResolvedModel{}, fmt.Errorf("model-id is required")
 	}
 
-	hasKey := providerCfg.APIKey != ""
-	hasFile := providerCfg.APIKeyFile != ""
-
-	if hasKey && hasFile {
-		return ResolvedModel{}, fmt.Errorf("api_key and api_key_file are mutually exclusive")
-	}
-
 	if key == "" && providerCfg.Provider != config.ProviderOllama && providerCfg.Provider != config.ProviderOpenAICodex {
-		return ResolvedModel{}, fmt.Errorf("api_key or api_key_file is required for provider %q", providerCfg.Provider)
+		return ResolvedModel{}, fmt.Errorf("api_key is required for provider %q", providerCfg.Provider)
 	}
 
 	// The context window is provider-level (tui-usage-observability): every
@@ -394,11 +389,7 @@ func buildModel(ctx context.Context, providerCfg *config.LLMProviderConfig, mode
 
 		return withWindow(r), nil
 	case config.ProviderOpenAICodex:
-		var oauthPath string
-		if len(oauthPaths) > 0 {
-			oauthPath = oauthPaths[0]
-		}
-		agenticModel, err := buildOpenAICodex(ctx, providerCfg, modelID, oauthPath)
+		agenticModel, err := buildOpenAICodex(ctx, providerCfg, modelID, creds)
 		if err != nil {
 			return ResolvedModel{}, err
 		}
@@ -409,17 +400,11 @@ func buildModel(ctx context.Context, providerCfg *config.LLMProviderConfig, mode
 	}
 }
 
-func buildOpenAICodex(ctx context.Context, entry *config.LLMProviderConfig, modelID, oauthPath string) (model.AgenticModel, error) {
+func buildOpenAICodex(ctx context.Context, entry *config.LLMProviderConfig, modelID string, creds codexCreds) (model.AgenticModel, error) {
 	if entry.API != config.APIResponses {
 		return nil, fmt.Errorf("openai-codex requires api %q", config.APIResponses)
 	}
-	// One OAuth-store resolver: config.Load resolves the store (Install-home
-	// default or explicit oauth.path); an empty path here means the caller
-	// bypassed it and there is no silent fallback to a relative directory.
-	if oauthPath == "" {
-		return nil, fmt.Errorf("openai-codex provider %q: oauth credential store path is empty — load the config through config.Load or set oauth.path", entry.Name)
-	}
-	store, err := codexauth.NewFileStore(ctx, oauthPath)
+	store, err := creds.open(entry.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -428,10 +413,10 @@ func buildOpenAICodex(ctx context.Context, entry *config.LLMProviderConfig, mode
 		return nil, err
 	}
 	if cred == nil || !cred.Usable(entry.Name, time.Now(), 30*time.Second) {
-		return nil, fmt.Errorf("%w for provider %q; run `ready login %s`", codexauth.ErrLoginRequired, entry.Name, entry.Name)
+		return nil, fmt.Errorf("%w for provider %q; run `%s`", codexauth.ErrLoginRequired, entry.Name, codexLoginCommand(creds.oauthPath, entry.Name))
 	}
 	authClient := codexauth.NewClient(streamSafeHTTPClient(nil))
-	tokenSource, err := codexauth.NewTokenSource(store, authClient, entry.Name, cred)
+	tokenSource, err := codexauth.NewTokenSource(store, authClient, entry.Name, codexLoginCommand(creds.oauthPath, entry.Name), cred)
 	if err != nil {
 		return nil, err
 	}
@@ -442,11 +427,27 @@ func buildOpenAICodex(ctx context.Context, entry *config.LLMProviderConfig, mode
 	})
 }
 
-func preflightCodexCredential(ctx context.Context, oauthPath, providerName string) error {
-	if oauthPath == "" {
-		return fmt.Errorf("openai-codex provider %q: oauth credential store path is empty — load the config through config.Load or set oauth.path", providerName)
+// codexCreds locates the Codex Credential store: the agent's Secret store plus
+// the oauth coordination directory (also the anchor of the login command).
+type codexCreds struct {
+	secrets   *secretstore.Store
+	oauthPath string
+}
+
+func codexCredentials(registry *config.LLMConfig) codexCreds {
+	return codexCreds{secrets: registry.Secrets.Store(), oauthPath: registry.OAuthPath}
+}
+
+func (c codexCreds) open(providerName string) (*codexauth.SecretStore, error) {
+	if c.oauthPath == "" || c.secrets == nil {
+		return nil, fmt.Errorf("openai-codex provider %q: the agent's secret store is not available — load the config through config.Load and open its secret store", providerName)
 	}
-	store, err := codexauth.NewFileStore(ctx, oauthPath)
+
+	return codexauth.NewSecretStore(c.secrets, c.oauthPath), nil
+}
+
+func preflightCodexCredential(ctx context.Context, creds codexCreds, providerName string) error {
+	store, err := creds.open(providerName)
 	if err != nil {
 		return err
 	}
@@ -455,10 +456,16 @@ func preflightCodexCredential(ctx context.Context, oauthPath, providerName strin
 		return err
 	}
 	if cred == nil || !cred.Usable(providerName, time.Now(), 30*time.Second) {
-		return fmt.Errorf("%w for provider %q; run `ready login %s`", codexauth.ErrLoginRequired, providerName, providerName)
+		return fmt.Errorf("%w for provider %q; run `%s`", codexauth.ErrLoginRequired, providerName, codexLoginCommand(creds.oauthPath, providerName))
 	}
 
 	return nil
+}
+
+// codexLoginCommand names the login remediation for the agent owning the
+// fixed <agent-dir>/oauth store.
+func codexLoginCommand(oauthPath, providerName string) string {
+	return config.LoginCommand(filepath.Dir(oauthPath), providerName)
 }
 
 // streamSafeTransport returns a copy of http.DefaultTransport with deadlines

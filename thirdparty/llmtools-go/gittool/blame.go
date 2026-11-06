@@ -59,6 +59,49 @@ var blameTool = spec.Tool{
 "required": ["repoPath", "path"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"path": {"type": "string"},
+	"revision": {"type": "string"},
+	"startLine": {"type": "integer"},
+	"endLine": {"type": "integer"},
+	"maxCommits": {"type": "integer"},
+	"lines": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"lineNumber": {"type": "integer"},
+				"text": {"type": "string"},
+				"commit": {
+					"type": "object",
+					"properties": {
+						"hash": {"type": "string"},
+						"shortHash": {"type": "string"},
+						"authorName": {"type": "string"},
+						"authorEmail": {"type": "string"},
+						"authorWhen": {"type": "string", "format": "date-time"},
+						"subject": {"type": "string"},
+						"body": {"type": "string"}
+					},
+					"required": ["hash", "shortHash", "authorName", "authorEmail", "authorWhen", "subject"],
+					"additionalProperties": false
+				}
+			},
+			"required": ["lineNumber", "text", "commit"],
+			"additionalProperties": false
+		}
+	},
+	"note": {"type": "string"}
+},
+"required": ["repoPath", "path", "revision", "startLine", "endLine", "maxCommits", "lines"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: blameFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

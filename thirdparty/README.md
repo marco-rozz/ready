@@ -7,7 +7,7 @@ possible so upstream diffs stay reviewable.
 
 ## llmtools-go
 
-- **Upstream**: `github.com/flexigpt/llmtools-go` at **v0.24.5**
+- **Upstream**: `github.com/flexigpt/llmtools-go` at **v0.25.0**
 - **Why patched**: the upstream `RegisterBuiltins` registry imports and
   registers the `webtool` (pulls `go-dateparser`/`go-trafilatura`) and
   `gittool` (pulls `go-git`) packages. READY never registers those tools as

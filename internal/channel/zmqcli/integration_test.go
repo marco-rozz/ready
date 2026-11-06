@@ -58,7 +58,6 @@ func newIntegrationChannel(ctx context.Context, t *testing.T, secret string, ses
 
 	cfg := config.ZMQCLIChannelConfig{
 		Bind:                  "tcp://127.0.0.1:0",
-		AuthToken:             secret,
 		ConnectionIdleTimeout: timeout,
 	}
 
@@ -241,9 +240,10 @@ func TestIntegration_BusyRejection(t *testing.T) {
 
 	// Round 1 probe for B.
 	data, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: sessionIDB,
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    sessionIDB,
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	})
 	rawChallenge := reqSendRecv(t, reqB, data)
 	var challengeB protocol.Response
@@ -257,10 +257,11 @@ func TestIntegration_BusyRejection(t *testing.T) {
 	// Round 2 verify for B.
 	tokenB := hmacHex("secret-busy", challengeB.Content)
 	verifyData, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: sessionIDB,
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		AuthToken:    tokenB,
+		ConnectionID:    sessionIDB,
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		AuthToken:       tokenB,
 	})
 	rawBusy := reqSendRecv(t, reqB, verifyData)
 	var busyResp protocol.Response
@@ -312,9 +313,10 @@ func TestIntegration_AuthFail(t *testing.T) {
 
 	// Round 1: probe.
 	data, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: sessionID,
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    sessionID,
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	})
 	rawChallenge := reqSendRecv(t, req, data)
 	var challengeResp protocol.Response
@@ -325,10 +327,11 @@ func TestIntegration_AuthFail(t *testing.T) {
 	// Round 2: deliberately wrong token (all zeros, 64 hex chars).
 	wrongToken := strings.Repeat("0", 64)
 	verifyData, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: sessionID,
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		AuthToken:    wrongToken,
+		ConnectionID:    sessionID,
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		AuthToken:       wrongToken,
 	})
 	rawFail := reqSendRecv(t, req, verifyData)
 	var failResp protocol.Response
@@ -510,7 +513,6 @@ func TestIntegration_NoTokenInLogs(t *testing.T) {
 	// Enable payloads logging to exercise the worst case.
 	cfg := config.ZMQCLIChannelConfig{
 		Bind:                  "tcp://127.0.0.1:0",
-		AuthToken:             daemonSecret,
 		ConnectionIdleTimeout: 15 * time.Minute,
 	}
 	logger := zerolog.New(buf).Level(zerolog.TraceLevel)
@@ -640,9 +642,10 @@ func TestIntegration_SendFailureReleasesSession(t *testing.T) {
 	}()
 
 	probeData, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: "client-B-session",
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    "client-B-session",
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	})
 	rawChallenge := reqSendRecv(t, reqB, probeData)
 	var challengeResp protocol.Response
@@ -658,10 +661,11 @@ func TestIntegration_SendFailureReleasesSession(t *testing.T) {
 	// Complete handshake to confirm no "busy".
 	tokenB := hmacHex("secret-sendfail", challengeResp.Content)
 	verifyData, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: "client-B-session",
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		AuthToken:    tokenB,
+		ConnectionID:    "client-B-session",
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		AuthToken:       tokenB,
 	})
 	rawOK := reqSendRecv(t, reqB, verifyData)
 	var okResp protocol.Response
@@ -746,9 +750,10 @@ func TestIntegration_ReplyTimeoutReleasesSession(t *testing.T) {
 
 	// Full handshake — must not get "busy".
 	probeData, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: "client-B-reply-timeout",
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    "client-B-reply-timeout",
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	})
 	rawChallenge := reqSendRecv(t, reqB, probeData)
 	var challengeResp protocol.Response
@@ -761,10 +766,11 @@ func TestIntegration_ReplyTimeoutReleasesSession(t *testing.T) {
 
 	tokenB := hmacHex("secret-replytmo", challengeResp.Content)
 	verifyData, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: "client-B-reply-timeout",
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		AuthToken:    tokenB,
+		ConnectionID:    "client-B-reply-timeout",
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		AuthToken:       tokenB,
 	})
 	rawOK := reqSendRecv(t, reqB, verifyData)
 	var okResp protocol.Response

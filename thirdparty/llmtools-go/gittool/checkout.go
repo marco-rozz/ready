@@ -51,6 +51,23 @@ var checkoutTool = spec.Tool{
 "required": ["repoPath", "name"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"name": {"type": "string"},
+	"created": {"type": "boolean"},
+	"force": {"type": "boolean"},
+	"startPoint": {"type": "string"},
+	"currentHead": {"type": "string"},
+	"headHash": {"type": "string"}
+},
+"required": ["repoPath", "name", "created", "force"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: checkoutFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

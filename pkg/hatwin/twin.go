@@ -14,7 +14,6 @@ import (
 	"maps"
 	"math"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -352,7 +351,7 @@ func resolveToken(opts Options) (string, error) {
 			return "", fmt.Errorf("hatwin: read token file: %w", err)
 		}
 
-		return strings.TrimSpace(string(data)), nil
+		return string(data), nil
 	}
 
 	return "", fmt.Errorf("hatwin: Token or TokenFile must be set")

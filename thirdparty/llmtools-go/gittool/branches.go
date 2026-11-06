@@ -38,6 +38,33 @@ var branchesTool = spec.Tool{
 "required": ["repoPath"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"repoPath": {"type": "string"},
+	"kind": {"type": "string", "enum": ["local", "remote", "all"]},
+	"current": {"type": "string"},
+	"branches": {
+		"type": ["array", "null"],
+		"items": {
+			"type": "object",
+			"properties": {
+				"name": {"type": "string"},
+				"kind": {"type": "string", "enum": ["local", "remote", "all"]},
+				"hash": {"type": "string"},
+				"current": {"type": "boolean"}
+			},
+			"required": ["name", "kind", "hash", "current"],
+			"additionalProperties": false
+		}
+	}
+},
+"required": ["repoPath", "kind", "branches"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: branchesFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

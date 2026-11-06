@@ -59,7 +59,7 @@ func TestCompileCandidates_OrderAndDescriptors(t *testing.T) {
 		Failover: []string{"cloud::claude-4", testLocalProv + "::qwen3"},
 		Providers: map[string]config.LLMProviderConfig{
 			testLocalProv: {Provider: config.ProviderOllama, API: config.APIOllama},
-			"cloud":       {Provider: config.ProviderOpenCode, API: config.APIAnthropic, APIKey: "k"},
+			"cloud":       {Provider: config.ProviderOpenCode, API: config.APIAnthropic, APIKey: testKeyFile(t, "k")},
 		},
 	}
 

@@ -364,3 +364,54 @@ func TestIntegration_GenericFailureKeepsOKStatus(t *testing.T) {
 		t.Fatal("server-side driver did not finish")
 	}
 }
+
+// countingStatusSource counts subscription cancellations so a test can prove a
+// replaced subscription is released (runtime reload must not leak them).
+type countingStatusSource struct {
+	events    chan ModelStatusEvent
+	mu        sync.Mutex
+	cancelled int
+}
+
+func (c *countingStatusSource) ModelStatus() ModelStatusEvent { return ModelStatusEvent{} }
+
+func (c *countingStatusSource) SubscribeModelStatus() (<-chan ModelStatusEvent, func()) {
+	return c.events, func() {
+		c.mu.Lock()
+		c.cancelled++
+		c.mu.Unlock()
+	}
+}
+
+func (c *countingStatusSource) cancels() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.cancelled
+}
+
+// Repeated WatchModelStatus calls (one per runtime reload) cancel the
+// previous orchestrator subscription before the new one starts.
+func TestWatchModelStatus_ReplacementCancelsPreviousSubscription(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ch, _ := newIntegrationChannel(ctx, t, "secret-watch", 0, zerolog.Nop())
+	first := &countingStatusSource{events: make(chan ModelStatusEvent, 1)}
+	second := &countingStatusSource{events: make(chan ModelStatusEvent, 1)}
+
+	ch.WatchModelStatus(first)
+	ch.WatchModelStatus(second)
+
+	deadline := time.After(2 * time.Second)
+	for first.cancels() != 1 {
+		select {
+		case <-deadline:
+			t.Fatalf("previous subscription cancelled %d times, want 1", first.cancels())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if second.cancels() != 0 {
+		t.Fatal("the live subscription must stay active")
+	}
+}

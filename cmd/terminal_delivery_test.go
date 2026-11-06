@@ -332,24 +332,54 @@ func (e *termEnv) run(msg channel.Message) {
 // TestTerminalMessageFor covers the two-outcome selection table (design A2):
 // the discriminator is observable side effects, never the error class.
 func TestTerminalMessageFor(t *testing.T) {
+	rejected := errors.New("agent execution failed: status code: 400, status: 400 Bad Request, message: tools[3].function.parameters: expected an object")
+	unavailable := errors.New("candidate timed out")
+
 	cases := []struct {
 		name    string
 		outcome agent.TurnOutcome
+		runErr  error
 		want    string
 	}{
-		{"nothing ran", agent.TurnOutcome{}, msgLLMUnavailable},
-		{"tool started, result lost", agent.TurnOutcome{ToolCallStarted: true}, msgIncompleteResponse},
-		{"tool completed, no content", agent.TurnOutcome{ToolCallCompleted: true}, msgIncompleteResponse},
-		{"content delivered, no tool", agent.TurnOutcome{ContentDelivered: true}, msgIncompleteResponse},
-		{"tool completed and content delivered", agent.TurnOutcome{ToolCallCompleted: true, ContentDelivered: true}, msgIncompleteResponse},
+		{"nothing ran", agent.TurnOutcome{}, unavailable, msgLLMUnavailable},
+		{"nothing ran, no error", agent.TurnOutcome{}, nil, msgLLMUnavailable},
+		{"request rejected with 400, nothing ran", agent.TurnOutcome{}, rejected, msgRequestRejected},
+		{"request rejected after a tool completed", agent.TurnOutcome{ToolCallCompleted: true}, rejected, msgIncompleteResponse},
+		{"tool started, result lost", agent.TurnOutcome{ToolCallStarted: true}, unavailable, msgIncompleteResponse},
+		{"tool completed, no content", agent.TurnOutcome{ToolCallCompleted: true}, unavailable, msgIncompleteResponse},
+		{"content delivered, no tool", agent.TurnOutcome{ContentDelivered: true}, unavailable, msgIncompleteResponse},
+		{"tool completed and content delivered", agent.TurnOutcome{ToolCallCompleted: true, ContentDelivered: true}, unavailable, msgIncompleteResponse},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := terminalMessageFor(tc.outcome); got != tc.want {
-				t.Errorf("terminalMessageFor(%+v) = %q, want %q", tc.outcome, got, tc.want)
+			if got := terminalMessageFor(tc.outcome, tc.runErr); got != tc.want {
+				t.Errorf("terminalMessageFor(%+v, %v) = %q, want %q", tc.outcome, tc.runErr, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestProcessMessage_TerminalDelivery_RequestRejected delivers the request-
+// rejected message (not the outage text) when the provider answers HTTP 400
+// before anything ran, exactly once on the channel.
+func TestProcessMessage_TerminalDelivery_RequestRejected(t *testing.T) {
+	var buf termBuffer
+
+	cliCh := newTestCLIChannel(&buf)
+	env := newTermEnv(t, channelFormatterCfg{}, cliCh)
+
+	env.runner.err = errors.New("agent execution failed: status code: 400, status: 400 Bad Request, message: tools[3].function.parameters: expected an object")
+	env.runner.outcome = agent.TurnOutcome{}
+
+	env.run(channel.Message{Content: "hi", ChannelName: testCLIChannelName})
+
+	out := buf.String()
+	if got := strings.Count(out, msgRequestRejected); got != 1 {
+		t.Fatalf("expected exactly one request-rejected message, got %d in %q", got, out)
+	}
+	if strings.Contains(out, msgLLMUnavailable) {
+		t.Fatalf("a 400 must not be reported as an outage: %q", out)
 	}
 }
 

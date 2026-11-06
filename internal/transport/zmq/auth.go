@@ -46,6 +46,7 @@ var ErrAuthMismatch = errors.New("zmq auth: token mismatch")
 // challenge holds the in-memory state for a single pending challenge.
 type challenge struct {
 	nonce     []byte
+	secret    []byte
 	createdAt time.Time
 }
 
@@ -88,6 +89,17 @@ func NewChallengeStore(secret string, ttl time.Duration, payloadsEnabled bool, l
 		pending:         make(map[string]challenge, maxPendingChallenges),
 		randSource:      rand.Reader,
 	}
+}
+
+// ReplaceSecret changes the shared HMAC secret for handshakes that have not
+// yet been verified. The same mutex protects pending challenge verification,
+// so a challenge already issued is verified entirely against the old or the
+// new value, never a mixture.
+func (s *ChallengeStore) ReplaceSecret(secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.secret = []byte(secret)
 }
 
 // IssueChallenge generates a fresh 16-byte nonce for identity, stores it, and
@@ -147,6 +159,7 @@ func (s *ChallengeStore) IssueChallenge(identity []byte) (string, error) {
 
 	s.pending[hex.EncodeToString(identity)] = challenge{
 		nonce:     nonce,
+		secret:    append([]byte(nil), s.secret...),
 		createdAt: time.Now(),
 	}
 
@@ -209,7 +222,7 @@ func (s *ChallengeStore) VerifyAuthToken(identity []byte, claimedHex string) err
 		return ErrAuthMismatch
 	}
 
-	mac := hmac.New(sha256.New, s.secret)
+	mac := hmac.New(sha256.New, c.secret)
 	mac.Write(c.nonce)
 	expected := hex.EncodeToString(mac.Sum(nil))
 

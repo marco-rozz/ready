@@ -120,15 +120,15 @@ func validateCommandDomains(domains []string) ([]string, []string) {
 	return active, unknown
 }
 
-// This is the single translation boundary between the YAML config model and
+// token is the Long-Lived Access Token resolved from the configured Secret
+// reference by the caller. This is the single translation boundary between the YAML config model and
 // the library's options model; neither side should know about the other's types.
-func OptionsFromConfig(cfg config.HomeAssistantConfig, logger zerolog.Logger) hatwin.Options {
+func OptionsFromConfig(cfg config.HomeAssistantConfig, token string, logger zerolog.Logger) hatwin.Options {
 	mon := cfg.Monitoring
 
 	return hatwin.Options{
-		URL:                       cfg.WebSocket.URL,
-		Token:                     cfg.WebSocket.Token,
-		TokenFile:                 cfg.WebSocket.TokenFile,
+		URL:                       cfg.WebSocket.URL.Value,
+		Token:                     token,
 		PingInterval:              mon.PingInterval,
 		TopologyDebounce:          mon.TopologyDebounce,
 		InitialBackoff:            mon.InitialBackoff,
@@ -152,14 +152,14 @@ func OptionsFromConfig(cfg config.HomeAssistantConfig, logger zerolog.Logger) ha
 // returned to the caller — criticalities-remediation (LOW): no log.Fatal
 // inside a library constructor; the bootstrapper retains control over failure
 // handling and cleanup ordering.
-func Init(ctx context.Context, cfg config.HomeAssistantConfig, logger zerolog.Logger) (*hatwin.Twin, error) {
+func Init(ctx context.Context, cfg config.HomeAssistantConfig, token string, logger zerolog.Logger) (*hatwin.Twin, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
 
 	log := logger.With().Str("component", "hatwin").Logger()
 
-	opts := OptionsFromConfig(cfg, log)
+	opts := OptionsFromConfig(cfg, token, log)
 	twin, err := hatwin.New(opts)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create HA digital twin")

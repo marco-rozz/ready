@@ -265,6 +265,42 @@ func TestSync_RemovedLibraryFileReportedAsOrphan(t *testing.T) {
 // generated/ content never acquires a state entry — a global run with a
 // library carrying generated content keeps the snapshotter's authority
 // intact (and the generated runtime copy untouched).
+
+// validateSource: overlap with the runtime copy and another agent's private
+// runtime copy are rejected before any sync work.
+func TestValidateSource(t *testing.T) {
+	runtime := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(runtime, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	library := filepath.Join(t.TempDir(), "library", "skills")
+	if err := os.MkdirAll(library, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateSource(runtime, library); err != nil {
+		t.Fatalf("a distinct shipped library must be accepted: %v", err)
+	}
+	if err := validateSource(runtime, runtime); err == nil || !strings.Contains(err.Error(), "runtime skill copy itself") {
+		t.Fatalf("self-source = %v", err)
+	}
+	if err := validateSource(runtime, filepath.Join(runtime, "nested")); err == nil || !strings.Contains(err.Error(), "inside the runtime skill copy") {
+		t.Fatalf("nested-source = %v", err)
+	}
+
+	// A directory carrying the sync-state file is a private runtime copy.
+	otherAgent := filepath.Join(t.TempDir(), "other", "skills")
+	if err := os.MkdirAll(otherAgent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherAgent, stateFileName), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSource(runtime, otherAgent); err == nil || !strings.Contains(err.Error(), "private runtime skill copy") {
+		t.Fatalf("another agent's runtime copy = %v", err)
+	}
+}
+
 func TestSync_GeneratedNeverRecorded(t *testing.T) {
 	e := newEnv(t)
 	e.putLibrary(t, "home-integration/SKILL.md", "v1")

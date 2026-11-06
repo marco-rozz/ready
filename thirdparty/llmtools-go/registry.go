@@ -205,6 +205,9 @@ func (r *Registry) RegisterTool(tool spec.Tool, fn spec.ToolFunc) error {
 	if len(tool.ArgSchema) > 0 && !json.Valid(tool.ArgSchema) {
 		return errors.New("invalid tool: argSchema is not valid JSON")
 	}
+	if len(tool.OutputSchema) > 0 && !json.Valid(tool.OutputSchema) {
+		return errors.New("invalid tool: outputSchema is not valid JSON")
+	}
 	if fn == nil {
 		return errors.New("invalid tool: nil func")
 	}

@@ -38,8 +38,10 @@ func freePort(t *testing.T) int {
 	return tcpAddr.Port
 }
 
+const testAuthorizeURL = "https://example.com/authorize"
+
 func TestNonInteractiveFetcher(t *testing.T) {
-	_, err := NonInteractiveFetcher(context.Background(), &auth.AuthorizationArgs{URL: "https://example.com/authorize"})
+	_, err := NonInteractiveFetcher(context.Background(), &auth.AuthorizationArgs{URL: testAuthorizeURL})
 	if !errors.Is(err, ErrLoginRequired) {
 		t.Fatalf("error = %v, want ErrLoginRequired", err)
 	}
@@ -57,7 +59,7 @@ func TestInteractiveFetcher_BusyPortFails(t *testing.T) {
 	defer func() { _ = blocker.Close() }()
 
 	fetcher := newInteractiveFetcher(port, time.Second, noopOpener)
-	if _, err := fetcher(context.Background(), &auth.AuthorizationArgs{URL: "https://example.com/authorize"}); err == nil {
+	if _, err := fetcher(context.Background(), &auth.AuthorizationArgs{URL: testAuthorizeURL}); err == nil {
 		t.Fatal("expected an error when the redirect port is already bound")
 	}
 }
@@ -222,4 +224,23 @@ func waitForPort(t *testing.T, port int) {
 	}
 
 	t.Fatalf("port %d never became reachable", port)
+}
+
+// Sequential listeners may reuse the configured callback port: two
+// back-to-back logins on one redirect_port both complete (per-user-install-
+// agent-isolation, D9 — only CONCURRENT listeners require distinct ports).
+func TestInteractiveFetcher_SequentialPortReuse(t *testing.T) {
+	port := freePort(t)
+
+	fetcher := newInteractiveFetcher(port, time.Second, func(context.Context, string) error { return nil })
+	// First holder: nothing will call the callback; the timeout fires.
+	if _, err := fetcher(context.Background(), &auth.AuthorizationArgs{URL: testAuthorizeURL}); err == nil {
+		t.Fatal("expected the first attempt to time out")
+	}
+
+	// A second sequential attempt binds the same port cleanly.
+	fetcher2 := newInteractiveFetcher(port, time.Second, func(context.Context, string) error { return nil })
+	if _, err := fetcher2(context.Background(), &auth.AuthorizationArgs{URL: testAuthorizeURL}); err == nil {
+		t.Log("second attempt completed via callback")
+	}
 }

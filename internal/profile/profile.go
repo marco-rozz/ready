@@ -57,9 +57,11 @@ func matchGlob(pattern, name string) bool {
 	return p == len(pattern)
 }
 
-// Allowed reports whether a tool name passes the allow/deny rules. Deny takes
-// precedence over allow. An empty allow list means "allow everything"; deny
-// still applies.
+// Allowed reports whether a tool name passes the allow/deny rules. The two
+// lists are mutually exclusive on one profile entry (config.Validate refuses
+// both on the same entry); an entry with only a deny list means "allow
+// everything except the denied names", and an empty allow list alone means
+// "allow everything". Within one call, if both were passed, deny still wins.
 func Allowed(name string, allow, deny []string) bool {
 	for _, d := range deny {
 		if matchGlob(d, name) {

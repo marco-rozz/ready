@@ -126,11 +126,12 @@ const (
 // its first chunk in time is never demoted for being slow.
 var ErrAttemptBudgetExceeded = errors.New("llm candidate attempt budget exceeded before first token")
 
-// IsRequestShapeError reports whether an error's rendered text contains an
-// HTTP 400 marker. Used only for the diagnostic WARN (task 2.6) — it never
-// changes either classification axis.
+// IsRequestShapeError reports whether an error's rendered text carries a
+// standalone HTTP 400 status (a longer number such as 4000 does not match). It
+// selects the diagnostic WARN and the request-rejected terminal message; it
+// never changes either classification axis.
 func IsRequestShapeError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), errSubstr400)
+	return err != nil && containsStatusSubstring(err.Error(), errSubstr400)
 }
 
 // containsStatusSubstring reports whether needle appears in msg as a STANDALONE

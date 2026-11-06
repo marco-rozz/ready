@@ -38,7 +38,6 @@ func newTestChannel(ctx context.Context, t *testing.T, sessionTimeout time.Durat
 
 	cfg := config.ZMQCLIChannelConfig{
 		Bind:                  "tcp://127.0.0.1:0",
-		AuthToken:             "test-secret",
 		ConnectionIdleTimeout: timeout,
 	}
 
@@ -93,9 +92,10 @@ func doHandshake(t *testing.T, req zmq4.Socket, sessionID, secret string) protoc
 
 	// Round 1: probe.
 	probe, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: sessionID,
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		ConnectionID:    sessionID,
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	})
 	raw := reqSendRecv(t, req, probe)
 
@@ -109,10 +109,11 @@ func doHandshake(t *testing.T, req zmq4.Socket, sessionID, secret string) protoc
 
 	// Round 2: verify.
 	verify, _ := protocol.Marshal(protocol.Request{
-		ConnectionID: sessionID,
-		Type:         protocol.RequestTypeSessionStart,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		AuthToken:    hmacHex(secret, challengeResp.Content),
+		ConnectionID:    sessionID,
+		Type:            protocol.RequestTypeSessionStart,
+		ProtocolVersion: protocol.Version,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339),
+		AuthToken:       hmacHex(secret, challengeResp.Content),
 	})
 	raw = reqSendRecv(t, req, verify)
 

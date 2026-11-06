@@ -20,11 +20,13 @@ import (
 	"github.com/marco-rozz/ready/internal/compaction"
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/formatter"
+	"github.com/marco-rozz/ready/internal/orchestrator"
 	"github.com/marco-rozz/ready/internal/persistence"
 	"github.com/marco-rozz/ready/internal/privacy"
 	"github.com/marco-rozz/ready/internal/protocol"
 	"github.com/marco-rozz/ready/internal/session"
 	"github.com/marco-rozz/ready/internal/skills"
+	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/usage"
 )
 
@@ -227,6 +229,8 @@ func usageDelta(before, after *usage.Totals) persistence.UsageRecord {
 // per address, so every Session transition is executed by the address's
 // worker only and FIFO transcript ordering holds.
 type sessionRuntime struct {
+	genMu sync.RWMutex
+
 	mgr          *channel.Manager
 	agentReg     *agentRegistry
 	fmtr         *formatter.Formatter
@@ -252,8 +256,17 @@ type sessionRuntime struct {
 
 	stdinResetOnce sync.Once
 
-	toolCharsOnce sync.Once
-	toolChars     int
+	toolCharsComputed atomic.Bool
+	toolChars         atomic.Int64
+
+	// cfgMgr is the current generation's config-manager (nil when disabled).
+	cfgMgr *tools.ConfigManager
+	// liveOrch is the current generation's orchestrator, readable without the
+	// generation lock (reply/usage hooks run inside workers that hold it).
+	liveOrch atomic.Pointer[orchestrator.Orchestrator]
+	// onAutoReload schedules an asynchronous Runtime reload after a save
+	// committed on a non-TUI channel (set by Serve).
+	onAutoReload func(context.Context, channel.Message)
 
 	stateMu sync.Mutex
 	states  map[string]*sessionState
@@ -298,6 +311,21 @@ func (rt *sessionRuntime) dropState(sessionID string) {
 	delete(rt.states, sessionID)
 }
 
+// resetForReload resets per-generation cached prompt state (toolChars and
+// per-Session pinnedApplied flags) so the next Turn of any existing Session
+// creates a fresh agentskills session in the new generation's skills.Manager
+// and re-marks any compaction-pinned skills Active.
+func (rt *sessionRuntime) resetForReload() {
+	rt.stateMu.Lock()
+	defer rt.stateMu.Unlock()
+
+	rt.toolChars.Store(0)
+	rt.toolCharsComputed.Store(false)
+	for _, st := range rt.states {
+		st.pinnedApplied.Store(false)
+	}
+}
+
 // onSessionEnd releases the Session-scoped state of an ended Session: its
 // agentskills session, usage totals (already snapshotted into the closing
 // record), and compaction state.
@@ -308,6 +336,9 @@ func (rt *sessionRuntime) onSessionEnd(ctx context.Context, ended *session.Sessi
 
 	rt.usageStore.Drop(ended.ID)
 	rt.dropState(ended.ID)
+	if rt.cfgMgr != nil {
+		rt.cfgMgr.ReleaseSession(ended.ID)
+	}
 }
 
 // resetRule returns a channel's reset rule.
@@ -319,6 +350,7 @@ func (rt *sessionRuntime) resetRule(channelName string) session.Rule {
 // evaluate the reset rule for the channel kind, then run a Session command
 // or a Turn followed by the post-reply compaction evaluation.
 func (rt *sessionRuntime) handleItem(ctx context.Context, msg channel.Message) {
+	rt.genMu.RLock()
 	addr := session.AddressOf(msg)
 
 	rt.sessions.ApplyPending(ctx, addr)
@@ -326,12 +358,19 @@ func (rt *sessionRuntime) handleItem(ctx context.Context, msg channel.Message) {
 
 	if cmd, arg, ok := parseSessionCommand(msg.Content); ok {
 		rt.handleCommand(ctx, addr, msg, cmd, arg)
+		rt.genMu.RUnlock()
 
 		return
 	}
 
 	info := rt.processMessage(ctx, addr, msg)
 	rt.afterReply(ctx, addr, msg, info)
+	onAutoReload := rt.onAutoReload
+	rt.genMu.RUnlock()
+
+	if info.autoReload && onAutoReload != nil {
+		onAutoReload(ctx, msg)
+	}
 }
 
 // evaluateReset evaluates the reset rule by channel kind: connection-
@@ -614,22 +653,31 @@ func (rt *sessionRuntime) collectPromptParts(ctx context.Context, sessionID stri
 }
 
 // toolCatalogChars sums each tool's marshalled ToolInfo JSON (the closest
-// analogue of what the wire format carries); computed once.
+// analogue of what the wire format carries); computed once per Runtime Generation.
 func (rt *sessionRuntime) toolCatalogChars(ctx context.Context) int {
-	rt.toolCharsOnce.Do(func() {
-		for _, t := range rt.agentTools {
-			info, err := t.Info(ctx)
-			if err != nil || info == nil {
-				continue
-			}
-
-			if b, err := json.Marshal(info); err == nil {
-				rt.toolChars += len(b)
-			}
+	if rt.toolCharsComputed.Load() {
+		return int(rt.toolChars.Load())
+	}
+	rt.stateMu.Lock()
+	defer rt.stateMu.Unlock()
+	if rt.toolCharsComputed.Load() {
+		return int(rt.toolChars.Load())
+	}
+	total := 0
+	for _, t := range rt.agentTools {
+		info, err := t.Info(ctx)
+		if err != nil || info == nil {
+			continue
 		}
-	})
 
-	return rt.toolChars
+		if b, err := json.Marshal(info); err == nil {
+			total += len(b)
+		}
+	}
+	rt.toolChars.Store(int64(total))
+	rt.toolCharsComputed.Store(true)
+
+	return total
 }
 
 // prefixMessages builds the stable prefix: 1. formatter inline wrap
@@ -781,6 +829,9 @@ type turnInfo struct {
 	measuredValid bool
 	// appendedTokens estimates the entries appended after that call.
 	appendedTokens int
+	// autoReload is true when ConfigManager.Save committed during this Turn
+	// on a non-loopback-TUI channel (e.g. Telegram or --exec).
+	autoReload bool
 }
 
 // afterReply evaluates the automatic compaction trigger in the address's

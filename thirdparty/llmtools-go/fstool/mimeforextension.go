@@ -33,6 +33,25 @@ var mimeForExtensionTool = spec.Tool{
 "required": ["extension"],
 "additionalProperties": false
 }`),
+
+	OutputSchema: spec.JSONSchema(`{
+"$schema": "http://json-schema.org/draft-07/schema#",
+"type": "object",
+"properties": {
+	"extension": {"type": "string"},
+	"normalizedExtension": {"type": "string"},
+	"mimeType": {"type": "string"},
+	"baseMIMEType": {"type": "string"},
+	"mode": {
+		"type": "string",
+		"enum": ["text", "image", "document", "default"]
+	},
+	"known": {"type": "boolean"}
+},
+"required": ["extension", "normalizedExtension", "mimeType", "baseMIMEType", "mode", "known"],
+"additionalProperties": false
+}`),
+
 	GoImpl: spec.GoToolImpl{FuncID: mimeForExtensionFuncID},
 
 	CreatedAt:  spec.SchemaStartTime,

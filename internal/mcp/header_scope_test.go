@@ -105,7 +105,7 @@ func TestHeaderScope_CrossHostRedirectDropsHeader(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	cfg := &config.MCPServerConfig{URL: origin.URL, Headers: map[string]string{testAuthHeader: "Bearer secret"}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: origin.URL}, ResolvedHeaders: map[string]string{testAuthHeader: "Bearer secret"}}
 	client := NewScopedHTTPClient(cfg)
 
 	getViaClient(t, client, origin.URL+"/start")
@@ -128,7 +128,7 @@ func TestHeaderScope_SamePortDifferentPortHeaderApplied(t *testing.T) {
 	}))
 	defer target.Close()
 
-	cfg := &config.MCPServerConfig{URL: "http://127.0.0.1:1/", Headers: map[string]string{"X-Test": "v"}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "http://127.0.0.1:1/"}, ResolvedHeaders: map[string]string{"X-Test": "v"}}
 	client := NewScopedHTTPClient(cfg)
 
 	getViaClient(t, client, target.URL)
@@ -140,7 +140,7 @@ func TestHeaderScope_SamePortDifferentPortHeaderApplied(t *testing.T) {
 
 // TestHeaderScope_SubdomainInScope checks a subdomain stays in scope.
 func TestHeaderScope_SubdomainInScope(t *testing.T) {
-	cfg := &config.MCPServerConfig{URL: "https://example.com", Headers: map[string]string{testAuthHeader: testBearerT}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "https://example.com"}, ResolvedHeaders: map[string]string{testAuthHeader: testBearerT}}
 
 	h := capturedHeaders(t, cfg, "https://api.example.com/mcp", nil)
 	if h.Get(testAuthHeader) != testBearerT {
@@ -150,7 +150,7 @@ func TestHeaderScope_SubdomainInScope(t *testing.T) {
 
 // TestHeaderScope_SchemeDowngradeDropsHeader checks a scheme downgrade drops the header.
 func TestHeaderScope_SchemeDowngradeDropsHeader(t *testing.T) {
-	cfg := &config.MCPServerConfig{URL: "https://example.com", Headers: map[string]string{testAuthHeader: testBearerT}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "https://example.com"}, ResolvedHeaders: map[string]string{testAuthHeader: testBearerT}}
 
 	h := capturedHeaders(t, cfg, "http://example.com/mcp", nil)
 	if h.Get(testAuthHeader) != "" {
@@ -161,7 +161,7 @@ func TestHeaderScope_SchemeDowngradeDropsHeader(t *testing.T) {
 // TestHeaderScope_PlaintextServerUnaffected checks that an http://
 // configured server behaves exactly as before this change.
 func TestHeaderScope_PlaintextServerUnaffected(t *testing.T) {
-	cfg := &config.MCPServerConfig{URL: "http://homeassistant.local:8123", Headers: map[string]string{testAuthHeader: testBearerT}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "http://homeassistant.local:8123"}, ResolvedHeaders: map[string]string{testAuthHeader: testBearerT}}
 
 	h := capturedHeaders(t, cfg, "http://homeassistant.local:8123/api/mcp", nil)
 	if h.Get(testAuthHeader) != testBearerT {
@@ -171,7 +171,7 @@ func TestHeaderScope_PlaintextServerUnaffected(t *testing.T) {
 
 // TestHeaderScope_ExistingHeaderPreserved checks an existing header is preserved.
 func TestHeaderScope_ExistingHeaderPreserved(t *testing.T) {
-	cfg := &config.MCPServerConfig{URL: "http://homeassistant.local:8123", Headers: map[string]string{testAuthHeader: "Bearer configured"}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "http://homeassistant.local:8123"}, ResolvedHeaders: map[string]string{testAuthHeader: "Bearer configured"}}
 
 	h := capturedHeaders(t, cfg, "http://homeassistant.local:8123/api/mcp", map[string]string{testAuthHeader: "Bearer original"})
 	if h.Get(testAuthHeader) != "Bearer original" {
@@ -192,7 +192,7 @@ func TestHeaderScope_HandshakeRequestsCarryHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &config.MCPServerConfig{URL: srv.URL, Headers: map[string]string{testAuthHeader: testBearerT}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}, ResolvedHeaders: map[string]string{testAuthHeader: testBearerT}}
 
 	_, _ = connectToServer(context.Background(), cfg, 2*time.Second, nil, nil)
 
@@ -217,7 +217,7 @@ func TestHeaderScope_InjectedHTTPClientIsUsed(t *testing.T) {
 		return http.DefaultTransport.RoundTrip(req)
 	})}
 
-	cfg := &config.MCPServerConfig{URL: srv.URL}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: srv.URL}}
 
 	_, _ = connectToServer(context.Background(), cfg, 2*time.Second, injected, nil)
 
@@ -229,7 +229,7 @@ func TestHeaderScope_InjectedHTTPClientIsUsed(t *testing.T) {
 // TestHeaderScope_UnparseableURLFailsClosed checks that
 // an unparseable configured URL must never fail open.
 func TestHeaderScope_UnparseableURLFailsClosed(t *testing.T) {
-	cfg := &config.MCPServerConfig{URL: "http://example.com/\tinvalid", Headers: map[string]string{testAuthHeader: testBearerT}}
+	cfg := &config.MCPServerConfig{URL: config.SecretString{Value: "http://example.com/\tinvalid"}, ResolvedHeaders: map[string]string{testAuthHeader: testBearerT}}
 
 	h := capturedHeaders(t, cfg, "http://example.com/mcp", nil)
 	if h.Get(testAuthHeader) != "" {
