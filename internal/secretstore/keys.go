@@ -17,8 +17,6 @@ const (
 	prevSuffix    = ".prev"
 	KeyFileName   = "secrets.key"
 	lockFileName  = ".secrets.lock"
-
-	vaultService = "ready"
 )
 
 var (
