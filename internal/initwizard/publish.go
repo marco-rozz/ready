@@ -337,9 +337,7 @@ func freshAgentID(ctx context.Context, agentDir string, storeExisted bool) (stri
 
 // hostName proposes the agent display name.
 func hostName() string {
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h
-	}
+	host, _ := os.Hostname()
 
-	return "ready"
+	return config.DefaultAgentName(host)
 }

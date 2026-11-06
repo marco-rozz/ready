@@ -41,6 +41,19 @@ type SecretsConfig struct {
 // `ready secrets` refuse it and point at the init repair.
 var ErrAgentIDMissing = errors.New("agent.id is missing: run `ready init` to repair the agent identity")
 
+// DefaultAgentName derives a valid default display name from the host name.
+// Explicit operator-authored names remain subject to normal validation.
+func DefaultAgentName(hostname string) string {
+	if hostname == "" {
+		return "ready"
+	}
+	if utf8.RuneCountInString(hostname) > maxAgentNameLen {
+		return string([]rune(hostname)[:maxAgentNameLen])
+	}
+
+	return hostname
+}
+
 // RequireAgentID returns the validated agent.id, or ErrAgentIDMissing.
 func (c *Config) RequireAgentID() (string, error) {
 	if c.Agent.ID == "" {
@@ -55,11 +68,9 @@ func (c *Config) AgentDisplayName() string {
 	if c.Agent.Name != "" {
 		return c.Agent.Name
 	}
-	if h, err := os.Hostname(); err == nil {
-		return h
-	}
+	host, _ := os.Hostname()
 
-	return ""
+	return DefaultAgentName(host)
 }
 
 // StoreKeySpec maps the secrets block onto the store's key location.

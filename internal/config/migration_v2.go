@@ -250,7 +250,7 @@ func (migrationV2) PlanImport(doc *yaml.Node, ic ImportContext) (ImportPlan, err
 			{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: "id"},
 			{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: id},
 			{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: "name"},
-			{Kind: yaml.ScalarNode, Tag: yamlStrTag, Style: yaml.DoubleQuotedStyle, Value: host},
+			{Kind: yaml.ScalarNode, Tag: yamlStrTag, Style: yaml.DoubleQuotedStyle, Value: DefaultAgentName(host)},
 		}}
 		pos := mapIndex(root, versionKey)
 		at := len(root.Content)

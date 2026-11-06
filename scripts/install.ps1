@@ -413,7 +413,7 @@ function Uninstall {
                 throw "no default agent directory at $agentDir — nothing to purge"
             }
             if ((Get-Item $agentDir -Force).LinkType) {
-                throw "refusing to purge $agentDir: it is a link (the real directory it points to is never traversed for deletion)"
+                throw "refusing to purge ${agentDir}: it is a link (the real directory it points to is never traversed for deletion)"
             }
             $holder = Invoke-MaintenanceHolder -BodyPath $launcher -AgentDir $agentDir -TempDir $tempDir
             try {

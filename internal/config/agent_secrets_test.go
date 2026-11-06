@@ -14,6 +14,31 @@ import (
 
 const testAgentID = "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001"
 
+func TestDefaultAgentNameFitsIdentityValidation(t *testing.T) {
+	cases := []struct {
+		host string
+		want string
+	}{
+		{host: "", want: "ready"},
+		{host: "home-server", want: "home-server"},
+		{host: strings.Repeat("a", 64), want: strings.Repeat("a", 64)},
+		{host: strings.Repeat("runner-", 20), want: strings.Repeat("runner-", 20)[:64]},
+		{host: strings.Repeat("家", 65), want: strings.Repeat("家", 64)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			name := DefaultAgentName(tc.host)
+			if name != tc.want {
+				t.Errorf("default name = %q, want %q", name, tc.want)
+			}
+			cfg := &Config{Agent: AgentConfig{ID: testAgentID, Name: name}}
+			if err := cfg.validateAgentAndSecrets(); err != nil {
+				t.Fatalf("generated name fails identity validation: %v", err)
+			}
+		})
+	}
+}
+
 func TestSecretSourceLookup(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{RuntimeHome: dir, Agent: AgentConfig{ID: testAgentID}}

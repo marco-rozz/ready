@@ -19,7 +19,8 @@ config_version: 2 # Configuration schema, independent of the READY release versi
 #
 # agent.id is a required, immutable UUID (it also names the vault entry when
 # the key lives in the OS vault); `ready init` writes it. agent.name is a free
-# label shown in the chat UI (the host name is used when absent).
+# label shown in the chat UI (the host name, limited to 64 characters, is
+# used when absent; an unavailable hostname falls back to "ready").
 agent:
   id: 00000000-0000-7000-8000-000000000000   # `ready init` generates a real one
   name: "example host"

@@ -38,6 +38,10 @@ alternative filename.
 - Copying a whole agent directory copies its identity: give the copy its own
   with `ready init --agent-dir <copy> --new-identity`.
 
+Generated agent names use the host name, truncated to 64 Unicode characters,
+or `ready` if unavailable. Explicit `agent.name` values over 64 characters
+are rejected rather than silently shortened.
+
 ## Running and selecting
 
 Only `ready init` creates a missing agent directory. The installer places

@@ -101,8 +101,10 @@ after a committed value.
 
 `agent.id` is a required, immutable UUID; it is bound into `secrets.age` (a
 config whose id differs from the store's refuses boot, naming both) and names
-the vault entry. `agent.name` is a free label (host name by default) shown in
-the chat info block and status line.
+the vault entry. `agent.name` is a free label shown in the chat info block and status line.
+The generated default is the host name truncated to 64 Unicode characters
+(or `ready` when the host name is unavailable); an explicit name longer than
+64 characters is rejected.
 
 Copying the whole directory yields a second agent with the **same** id, key
 and tokens (and, for `os_vault`, the same vault entry). Give the copy its own
