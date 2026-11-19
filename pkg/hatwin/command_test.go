@@ -181,7 +181,14 @@ func TestPingAfterCommandHasGreaterID(t *testing.T) {
 		_, _ = twin.CallService(context.Background(), "light", "turn_on", nil, nil)
 	}()
 
-	msg := serverConn.readCmd(t)
+	// The 20ms ping loop may emit a ping before the command frame; skip those.
+	var msg map[string]any
+	for {
+		msg = serverConn.readCmd(t)
+		if msg["type"] != "ping" {
+			break
+		}
+	}
 	if msg["type"] != "call_service" {
 		t.Fatalf("expected call_service, got %v", msg["type"])
 	}

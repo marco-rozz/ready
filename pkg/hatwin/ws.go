@@ -239,10 +239,13 @@ func (t *Twin) newBootstrapTracker(onComplete func()) func(int) {
 			}
 		}
 		done = true
-		t.markReady()
+		// Set the session's write-barrier flag before signalling readiness:
+		// WaitReady returns on readyCh, and a caller that commands right after
+		// it must already see bootstrapComplete() == true.
 		if onComplete != nil {
 			onComplete()
 		}
+		t.markReady()
 	}
 }
 
