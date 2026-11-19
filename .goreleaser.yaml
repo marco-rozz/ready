@@ -75,7 +75,7 @@ archives:
       - src: config.example.yaml
       - src: "resources/skills/**/*"
         dst: skills
-      - src: "resources/subagents/**/*"
+      - src: "resources/subagents/*"
         dst: subagents
 
 checksum:
