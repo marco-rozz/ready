@@ -12,9 +12,9 @@ import (
 
 func secretItems() []protocol.PendingSecret {
 	return []protocol.PendingSecret{
-		{Name: "mcp_s_x_key", Fields: []string{"mcp_servers.s.headers.X.Key"}, State: protocol.SecretStatePending},
-		{Name: "telegram_token", Fields: []string{"channels.telegram.token"}, State: protocol.SecretStatePending},
-		{Name: "p_api_key", Fields: []string{"llm.providers.p.api_key"}, State: protocol.SecretStatePending},
+		{Name: "mcp_s_x_key", Fields: [][]string{{"mcp_servers.s.headers.X.Key"}}, State: protocol.SecretStatePending},
+		{Name: "telegram_token", Fields: [][]string{{"channels.telegram.token"}}, State: protocol.SecretStatePending},
+		{Name: "p_api_key", Fields: [][]string{{"llm.providers.p.api_key"}}, State: protocol.SecretStatePending},
 	}
 }
 
@@ -24,7 +24,7 @@ func acceptSecrets(t *testing.T, m *Model, items []protocol.PendingSecret) {
 	if m.secretRequestAction != protocol.SecretEntryActionList {
 		t.Fatal("begin must first list from disk")
 	}
-	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed, Secrets: items}})
+	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, Secrets: items, SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed}})
 	if m.secretRequestAction != protocol.SecretEntryActionBegin {
 		t.Fatal("list did not request begin")
 	}
@@ -177,11 +177,11 @@ func TestSecretEditorExternalResolutionReListsAndReleasesOldSource(t *testing.T)
 	m, _ := steeringTestModel(t)
 	acceptSecrets(t, m, secretItems())
 	m.ta.SetValue("abandoned-secret-canary")
-	m.handleControl(protocol.Response{Status: protocol.ResponseStatusOK, Content: "pending_secrets_changed", PendingSecrets: []protocol.PendingSecret{}})
+	m.handleControl(protocol.Response{Status: protocol.ResponseStatusOK, Content: "pending_secrets_changed", Secrets: []protocol.PendingSecret{}})
 	if m.secretRequestAction != protocol.SecretEntryActionList || len(m.secretPending) != 3 {
 		t.Fatal("event trusted instead of re-listing disk")
 	}
-	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed, Secrets: []protocol.PendingSecret{{Name: "x", State: protocol.SecretStateSet}}}})
+	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, Secrets: []protocol.PendingSecret{{Name: "x", State: protocol.SecretStateSet}}, SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed}})
 	if m.secretMode || m.secretRequestAction != protocol.SecretEntryActionEnd || len(m.secretPending) != 0 || strings.Contains(m.ta.Value(), "canary") {
 		t.Fatal("external resolution left obsolete editor/operation")
 	}
@@ -203,7 +203,7 @@ func TestSecretEditorOwnCommitNotificationPreservesPass(t *testing.T) {
 			m.ta.SetValue("second-unsubmitted-value")
 			if !beforeReply {
 				m.handleControl(notification)
-				m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed, Secrets: items[1:]}})
+				m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, Secrets: items[1:], SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed}})
 			}
 			if !m.secretMode || m.secretIndex != 1 || m.ta.Value() != "second-unsubmitted-value" {
 				t.Fatal("own notification interrupted the pass or cleared the next value")

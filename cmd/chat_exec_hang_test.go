@@ -131,7 +131,7 @@ func (d *fakeChatDaemon) serve() {
 					RequestID:       req.RequestID,
 					ResponseType:    protocol.ResponseTypeControl,
 					ProtocolVersion: protocol.Version,
-					PendingSecrets:  d.pending,
+					Secrets:         d.pending,
 				})
 			default:
 				d.reply(identity, protocol.Response{

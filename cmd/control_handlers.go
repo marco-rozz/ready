@@ -139,8 +139,12 @@ func (rt *sessionRuntime) contextUsageMarkdown(ctx context.Context) string {
 	var b strings.Builder
 	b.WriteString("## Context usage (estimated)\n\n")
 
-	if snap.ActiveRef != "" {
-		fmt.Fprintf(&b, "**Model:** `%s`\n", snap.ActiveRef)
+	fmt.Fprintf(&b, "**Active profile:** `%s`\n", rt.activeProfileName)
+	fmt.Fprintf(&b, "**Channel:** `%s`\n", rt.effectiveChannel(zmqcli.ChannelName))
+	if snap.ActiveRef != "" && snap.State != orchestrator.StateUnavailable {
+		fmt.Fprintf(&b, "**Global model:** `%s` (%s)\n", snap.ActiveRef, snap.State)
+	} else {
+		b.WriteString("**Global model:** unavailable\n")
 	}
 	fmt.Fprintf(&b, "**Layout:** %s — per-section numbers are characters÷4 estimates\n", layout)
 

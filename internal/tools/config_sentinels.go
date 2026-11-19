@@ -23,6 +23,8 @@ var (
 	// ErrConfigInvalidEdit marks an unusable edit batch (empty or
 	// ambiguous old_text, marker placement violations).
 	ErrConfigInvalidEdit = errors.New("invalid config edit batch")
+	// ErrConfigExactMatch marks an absent or ambiguous old_text.
+	ErrConfigExactMatch = errors.New("config edit old_text did not match uniquely")
 	// ErrConfigUnsupportedYAML marks anchors, aliases, merge keys,
 	// unsupported scalar spans or a non-current config_version. This
 	// restriction belongs to the tool, not to ordinary config loading.

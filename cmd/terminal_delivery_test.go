@@ -20,6 +20,7 @@ import (
 	"github.com/marco-rozz/ready/internal/channel/telegram"
 	"github.com/marco-rozz/ready/internal/channel/zmqcli"
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/errdigest"
 	"github.com/marco-rozz/ready/internal/formatter"
 	"github.com/marco-rozz/ready/internal/llm"
 	"github.com/marco-rozz/ready/internal/privacy"
@@ -357,6 +358,24 @@ func TestTerminalMessageFor(t *testing.T) {
 				t.Errorf("terminalMessageFor(%+v, %v) = %q, want %q", tc.outcome, tc.runErr, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGuardTerminalDeliveryKeepsSessionUsable(t *testing.T) {
+	var buf termBuffer
+	env := newTermEnv(t, channelFormatterCfg{}, newTestCLIChannel(&buf))
+	env.runner.err = fmt.Errorf("tool node: %w", errdigest.ErrGuardRepeated)
+	env.runner.outcome = agent.TurnOutcome{ToolCallCompleted: true}
+	env.run(channel.Message{Content: "guarded turn", ChannelName: testCLIChannelName})
+	if !strings.Contains(buf.String(), "tool could not make progress") || strings.Contains(buf.String(), msgLLMUnavailable) {
+		t.Fatalf("unexpected guard message: %q", buf.String())
+	}
+	env.runner.err = nil
+	env.runner.deliverChunk = "still available"
+	env.runner.outcome = agent.TurnOutcome{Reply: "still available", ContentDelivered: true}
+	env.run(channel.Message{Content: "next", ChannelName: testCLIChannelName})
+	if !strings.Contains(buf.String(), "still available") {
+		t.Fatalf("next turn failed: %q", buf.String())
 	}
 }
 

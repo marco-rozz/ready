@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,10 +13,14 @@ import (
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/errdigest"
 )
 
 // jsTypeString is the JSON-schema primitive type used by the arg schema.
-const jsTypeString = "string"
+const (
+	jsTypeString    = "string"
+	configActionKey = "action"
+)
 
 // Compile-time assertion that ConfigManagerTool implements InvokableTool.
 var _ tool.InvokableTool = (*ConfigManagerTool)(nil)
@@ -25,8 +30,7 @@ var _ tool.InvokableTool = (*ConfigManagerTool)(nil)
 // the tool always agree.
 const ConfigManagerToolName = config.ConfigManagerToolKey
 
-// ConfigManagerTool exposes exactly four actions — read, update, save and
-// discard — over the elected configuration's single staging buffer.
+// ConfigManagerTool exposes saved-file inspection and Session-owned drafts.
 type ConfigManagerTool struct {
 	mgr *ConfigManager
 }
@@ -52,9 +56,9 @@ func (t *ConfigManagerTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 		"CRITICAL privacy rules: NEVER ask anyone for a secret value (device tokens, API keys, shared secrets) in chat, and never write a secret value into the file — the file holds only references. " +
 		"A sensitive field (api_key, tokens, client_secret, every MCP header value) takes `!secret <name>` (a Secret kept in the agent's encrypted store) or `!secret_file /absolute/path`; write the reference with a descriptive lowercase name (e.g. `api_key: !secret openai_api_key`) and tell the operator the value is entered in the TUI secret editor (opens automatically at the end of the turn) or with `ready secrets set <name>`. A literal in a sensitive field is refused. " +
 		"agent.id is immutable. " +
-		"Recommended flow (see the ready-guide skill): 1) read to open staging (returns the text, a stage_id and a revision); 2) discuss with the operator what to change; 3) update with a list of exact old_text/new_text edits (each old_text must match the staged text exactly once); 4) show the operator the resulting diff and ask for explicit confirmation; 5) only after the operator confirms, save — this writes the new file and activates it automatically at the end of the turn (on the loopback ZMQ TUI: RED secret editor for pending secrets -> in-TUI OAuth login -> in-process runtime reload; on other channels: immediate in-process runtime reload at turn end, with any pending secrets or OAuth logins completed later in the local TUI or via `ready secrets set` / `ready login`; no manual daemon restart is needed). " +
+		"Recommended flow (see the ready-guide skill): read inspects the saved file without opening a draft; begin opens your Session's draft and returns stage_id and revision; inspect returns your draft. Discuss the changes, update with exact old_text/new_text edits, show the diff and request explicit confirmation before save. A save activates automatically at the end of the turn; use the loopback TUI or `ready secrets set` / `ready login` for pending credentials. " +
 		"Foreign sessions cannot see or change another session's staging and will be refused. " +
-		"If a save reports the editing base changed externally, discard the staging, read again and reapply the operator's intent. " +
+		"If save reports a source conflict, retain the draft and use reconcile with its stage_id and revision. Show its complete diff and ask the user to send the exact /confirm-config command returned by the tool; a model assertion is not approval. If reconciliation reports overlap, ask the user for direction. " +
 		"Never edit any other configuration file: this tool refuses paths — you edit the elected configuration only."
 	params := configManagerSchema()
 
@@ -81,14 +85,14 @@ func configManagerSchema() *jsonschema.Schema {
 
 	action := &jsonschema.Schema{
 		Type:        "string",
-		Enum:        enumValues("read", "update", "save", "discard"),
-		Description: "read opens/returns staging; update applies an edit batch; save validates and commits (or records no changes); discard releases staging without writing",
+		Enum:        enumValues("read", "begin", "inspect", "update", "reconcile", "save", "discard"),
+		Description: "read inspects saved configuration; begin opens a private draft; inspect returns it; update edits; reconcile prepares a review after conflict; save commits; discard releases it",
 	}
-	stageID := &jsonschema.Schema{Type: jsTypeString, Description: "Current staging identifier from the last read/update result"}
-	expectedRevision := &jsonschema.Schema{Type: "integer", Description: "Current revision from the last read/update result; refused when stale"}
+	stageID := &jsonschema.Schema{Type: jsTypeString, Description: "Current draft identifier from begin or inspect"}
+	expectedRevision := &jsonschema.Schema{Type: "integer", Description: "Current revision from begin, inspect or update; refused when stale"}
 
 	props := orderedmap.New[string, *jsonschema.Schema]()
-	props.Set("action", action)
+	props.Set(configActionKey, action)
 	props.Set("stage_id", stageID)
 	props.Set("expected_revision", expectedRevision)
 	props.Set("edits", &jsonschema.Schema{
@@ -101,7 +105,7 @@ func configManagerSchema() *jsonschema.Schema {
 		Type:        "object",
 		Description: "config-manager argument object",
 		Properties:  props,
-		Required:    []string{"action"},
+		Required:    []string{configActionKey},
 	}
 }
 
@@ -118,7 +122,7 @@ func enumValues(values ...string) []any {
 	return out
 }
 
-// InvokableRun dispatches the four actions. Every identity/ownership/revision
+// InvokableRun dispatches the actions. Every identity/ownership/revision
 // check runs inside the manager's mutex before effects; invalid arguments
 // fail before any state change.
 func (t *ConfigManagerTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
@@ -127,22 +131,35 @@ func (t *ConfigManagerTool) InvokableRun(ctx context.Context, argumentsInJSON st
 		return "", fmt.Errorf("%w: arguments do not parse as the expected object (action, stage_id, expected_revision, edits)", ErrConfigInvalidEdit)
 	}
 
-	switch strings.ToLower(strings.TrimSpace(args.Action)) {
+	args.Action = strings.ToLower(strings.TrimSpace(args.Action))
+	switch args.Action {
 	case "read":
 		if args.StageID != "" || args.ExpectedRevision != nil || len(args.Edits) > 0 {
 			return "", fmt.Errorf("%w: read takes no arguments — call it with action:'read' only", ErrConfigInvalidEdit)
 		}
 
-		return t.mgr.Read(ctx)
-	case "update":
-		if len(args.Edits) == 0 {
-			return "", fmt.Errorf("%w: update requires a non-empty edits array", ErrConfigInvalidEdit)
+		return t.mgr.ReadSaved(ctx)
+	case "begin", "inspect":
+		if args.StageID != "" || args.ExpectedRevision != nil || len(args.Edits) > 0 {
+			return "", fmt.Errorf("%w: %s takes no additional arguments", ErrConfigInvalidEdit, args.Action)
 		}
-		if args.ExpectedRevision == nil {
-			return "", fmt.Errorf("%w: update requires the current expected_revision from the staged view", ErrConfigInvalidEdit)
+		mgr, err := t.mgr.sessionManager(ctx, args.Action == "begin")
+		if err != nil {
+			return "", err
+		}
+		if args.Action == "inspect" {
+			return mgr.InspectDraft(ctx)
+		}
+		result, err := mgr.Read(ctx)
+		if err == nil {
+			// A newly available draft specifically repairs an earlier inspect
+			// refusal for the argument-free inspect action.
+			errdigest.RecoverInvocation(ctx, ConfigManagerToolName, `{"action":"inspect"}`)
 		}
 
-		return t.mgr.Update(ctx, args.StageID, *args.ExpectedRevision, args.Edits)
+		return result, err
+	case "update":
+		return t.correctableUpdate(ctx, args)
 	case "save":
 		if len(args.Edits) > 0 {
 			return "", fmt.Errorf("%w: save takes no edits — commit the current staged state", ErrConfigInvalidEdit)
@@ -151,16 +168,64 @@ func (t *ConfigManagerTool) InvokableRun(ctx context.Context, argumentsInJSON st
 			return "", fmt.Errorf("%w: save requires the current expected_revision from the staged view", ErrConfigInvalidEdit)
 		}
 
-		return t.mgr.Save(ctx, args.StageID, *args.ExpectedRevision)
+		mgr, err := t.mgr.sessionManager(ctx, false)
+		if err != nil {
+			return "", err
+		}
+
+		return mgr.Save(ctx, args.StageID, *args.ExpectedRevision)
+	case "reconcile":
+		if args.ExpectedRevision == nil || len(args.Edits) != 0 {
+			return "", fmt.Errorf("%w: reconcile requires stage_id and expected_revision and takes no edits", ErrConfigInvalidEdit)
+		}
+		mgr, err := t.mgr.sessionManager(ctx, false)
+		if err != nil {
+			return "", err
+		}
+
+		return mgr.Reconcile(ctx, args.StageID, *args.ExpectedRevision)
 	case "discard":
 		if args.ExpectedRevision == nil {
 			return "", fmt.Errorf("%w: discard requires the current expected_revision from the staged view", ErrConfigInvalidEdit)
 		}
 
-		return t.mgr.Discard(ctx, args.StageID, *args.ExpectedRevision)
+		mgr, err := t.mgr.sessionManager(ctx, false)
+		if err != nil {
+			return "", err
+		}
+
+		return mgr.Discard(ctx, args.StageID, *args.ExpectedRevision)
 	case "":
-		return "", fmt.Errorf("%w: the action field is required (read|update|save|discard)", ErrConfigInvalidEdit)
+		return "", fmt.Errorf("%w: the action field is required (read|begin|inspect|update|reconcile|save|discard)", ErrConfigInvalidEdit)
 	default:
-		return "", fmt.Errorf("%w: unknown action %q — supported: read, update, save, discard", ErrConfigInvalidEdit, args.Action)
+		return "", fmt.Errorf("%w: unknown action %q — supported: read, begin, inspect, update, reconcile, save, discard", ErrConfigInvalidEdit, args.Action)
 	}
+}
+
+func (t *ConfigManagerTool) correctableUpdate(ctx context.Context, args configManagerArgs) (result string, err error) {
+	if err = errdigest.BeginConfigCorrection(ctx); err != nil {
+		return "", err
+	}
+	defer func() {
+		if guardErr := errdigest.EndConfigCorrection(ctx, errors.Is(err, ErrConfigExactMatch), err == nil); guardErr != nil {
+			result, err = "", guardErr
+		}
+	}()
+
+	return t.update(ctx, args)
+}
+
+func (t *ConfigManagerTool) update(ctx context.Context, args configManagerArgs) (string, error) {
+	if len(args.Edits) == 0 {
+		return "", fmt.Errorf("%w: update requires a non-empty edits array", ErrConfigInvalidEdit)
+	}
+	if args.ExpectedRevision == nil {
+		return "", fmt.Errorf("%w: update requires the current expected_revision from the staged view", ErrConfigInvalidEdit)
+	}
+	mgr, err := t.mgr.sessionManager(ctx, false)
+	if err != nil {
+		return "", err
+	}
+
+	return mgr.Update(ctx, args.StageID, *args.ExpectedRevision, args.Edits)
 }

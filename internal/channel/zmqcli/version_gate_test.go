@@ -23,7 +23,7 @@ func TestVersionGate_MismatchIssuesNoNonce(t *testing.T) {
 		ConnectionID:    "conn",
 		Type:            protocol.RequestTypeSessionStart,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
-		ProtocolVersion: protocol.Version + 1,
+		ProtocolVersion: protocol.Version - 1,
 	})
 
 	resp, ok := recvDealerResponse(t, dealer, 2*time.Second)

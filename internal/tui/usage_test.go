@@ -150,13 +150,13 @@ func TestStatusLineDropsSessionAndCwd(t *testing.T) {
 func TestStatusLineAlwaysShowsLabel(t *testing.T) {
 	m := newUsageTestModel(t, Options{ConnectionID: testSession, Sanitizer: privacy.New(nil)})
 
-	if got := m.statusLine(); !strings.Contains(got, "idle") {
-		t.Errorf("idle footer must show the state label: %q", got)
+	if got := m.statusLine(); strings.Contains(got, "idle") {
+		t.Errorf("idle footer must omit the state label: %q", got)
 	}
 
 	m.state = stateStreaming
-	if got := m.statusLine(); !strings.Contains(got, "streaming") {
-		t.Errorf("working footer must keep the state label: %q", got)
+	if got := m.statusLine(); strings.Contains(got, "streaming") {
+		t.Errorf("working footer must omit the state label: %q", got)
 	}
 }
 
@@ -236,8 +236,8 @@ func TestInputBarsSpinnerWithIndicator(t *testing.T) {
 		t.Fatalf("top bar must carry the scroll indicator during a turn, got %q", top)
 	}
 	// Both fit on an 80-col bar: full spinner + indicator.
-	if !strings.Contains(top, "READY.") {
-		t.Errorf("top bar must embed the working spinner when both fit, got %q", top)
+	if !strings.Contains(top, "streaming…") {
+		t.Errorf("top bar must show the working state, got %q", top)
 	}
 	// Pi layout: the spinner block is left-aligned, not centered.
 	if !strings.HasPrefix(top, "── ") {
@@ -249,11 +249,8 @@ func TestInputBarsSpinnerWithIndicator(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 24, Height: 24})
 	m.applyLayout()
 	top, _ = m.inputBars()
-	if strings.Contains(top, "READY.") {
-		t.Errorf("spinner must drop to compact form when both do not fit, got %q", top)
-	}
-	if !strings.Contains(top, "↑") {
-		t.Errorf("scroll indicator must survive the compact fallback, got %q", top)
+	if !strings.Contains(top, "streaming…") || strings.Contains(top, "↑") {
+		t.Errorf("state must take priority over the scroll indicator, got %q", top)
 	}
 
 	// Very narrow terminal: even the compact frame cannot host the indicator

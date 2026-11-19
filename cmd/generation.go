@@ -100,10 +100,6 @@ func (g *runtimeGeneration) shutdown(ctx context.Context, logger zerolog.Logger)
 			logger.Error().Err(err).Msg("error closing skills manager")
 		}
 	}
-	// config-manager staging carries secret material: released with its generation.
-	if g.cfgMgr != nil {
-		g.cfgMgr.Close()
-	}
 	if g.orch != nil {
 		g.orch.Wait()
 	}
@@ -112,11 +108,12 @@ func (g *runtimeGeneration) shutdown(ctx context.Context, logger zerolog.Logger)
 // serveShell is the Process Shell: it lives for the whole OS process and owns
 // every resource a Runtime reload must not drop.
 type serveShell struct {
-	ctx        context.Context
-	opts       ServeOptions
-	resolution config.Resolution
-	rootLogger zerolog.Logger
-	logger     zerolog.Logger
+	ctx         context.Context
+	opts        ServeOptions
+	resolution  config.Resolution
+	rootLogger  zerolog.Logger
+	logger      zerolog.Logger
+	configState *tools.ConfigManagerState
 
 	mgr      *channel.Manager
 	rt       *sessionRuntime
@@ -211,7 +208,7 @@ func (s *serveShell) buildGeneration(cfg *config.Config) (g *runtimeGeneration, 
 	g.haTwin = haTwin
 
 	agentTools, mcpRuntime, blockedTools, cfgMgr := buildTools(genCtx, bootCfg, skillsMgr, skillCache, s.opts.MockMCP, profileName, haTwin, s.rootLogger,
-		config.ProfileOverrideInputs{Flag: s.opts.Profile, Env: os.Getenv(config.ProfileEnvName)})
+		config.ProfileOverrideInputs{Flag: s.opts.Profile, Env: os.Getenv(config.ProfileEnvName)}, s.configState)
 	g.mcpRuntime, g.cfgMgr = mcpRuntime, cfgMgr
 
 	discloseDenied := activeProfile.DiscloseDeniedTools
@@ -286,6 +283,7 @@ func (s *serveShell) buildGeneration(cfg *config.Config) (g *runtimeGeneration, 
 // rt.genMu for writing (or owns rt exclusively at boot).
 func (rt *sessionRuntime) applyGeneration(g *runtimeGeneration) {
 	rt.agentReg = g.agentReg
+	rt.activeProfileName = g.activeProfileName
 	rt.fmtr = g.fmtr
 	rt.reg = g.fmtRegistry
 	rt.bootstrapper = g.bootstrapper
@@ -294,6 +292,7 @@ func (rt *sessionRuntime) applyGeneration(g *runtimeGeneration) {
 	rt.skillCache = g.skillCache
 	rt.agentTools = g.agentTools
 	rt.cfgMgr = g.cfgMgr
+	rt.configManagerAllowed = isConfigManagerAllowed(g.bootCfg, g.activeProfileName)
 	if g.agentReg != nil {
 		rt.liveOrch.Store(g.agentReg.orch)
 	}
@@ -383,6 +382,14 @@ func (s *serveShell) wireZMQ(g *runtimeGeneration) {
 // updated in place. A changed listener is rebuilt shortly AFTER the reload
 // reply has been delivered over the old one.
 func (s *serveShell) swapChannels(g *runtimeGeneration) {
+	// A reload landing during the daemon shutdown (SIGINT racing the
+	// config-save reload) must never (re)start channels: the manager is
+	// stopping, and a channel built here would keep its own poller alive
+	// behind the teardown path.
+	if s.ctx.Err() != nil {
+		return
+	}
+
 	cfg := g.bootCfg
 
 	if s.mgr.Channel(telegram.ChannelName) != nil {
@@ -426,6 +433,12 @@ func (s *serveShell) currentBind() string {
 // rebuildCLISlot replaces whatever owns the shared "cli" channel name with
 // what the CURRENT generation's configuration asks for.
 func (s *serveShell) rebuildCLISlot() {
+	// Deferred rebuild (time.AfterFunc) firing after the shutdown began:
+	// never rebuild the listener behind the teardown path.
+	if s.ctx.Err() != nil {
+		return
+	}
+
 	g := s.coord.currentGen()
 	if g == nil {
 		return

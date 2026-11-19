@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marco-rozz/ready/internal/channel"
@@ -61,6 +62,7 @@ var (
 // lock methods that callers could misuse.
 type sessionState struct {
 	mu           sync.Mutex
+	generation   uint64    // distinguishes reconnections even when identifiers are reused
 	connectionID string    // empty when no session is active
 	identity     []byte    // ZMQ identity of the connected peer
 	openedAt     time.Time // used for duration logging on close
@@ -80,6 +82,7 @@ func (ss *sessionState) tryAcquire(connectionID string, identity []byte) bool {
 	}
 
 	now := time.Now()
+	ss.generation++
 	ss.connectionID = connectionID
 	ss.identity = identity
 	ss.openedAt = now
@@ -100,6 +103,31 @@ func (ss *sessionState) releaseConnection(connectionID string) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	if connectionID != "" && ss.connectionID != connectionID {
+		return
+	}
+	ss.connectionID = ""
+	ss.identity = nil
+	ss.openedAt = time.Time{}
+	ss.lastActivity = time.Time{}
+	ss.lastPing = time.Time{}
+}
+
+// generationFor captures the exact active connection lifetime.
+func (ss *sessionState) generationFor(connectionID string, identity []byte) uint64 {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.connectionID != connectionID || !bytes.Equal(ss.identity, identity) {
+		return 0
+	}
+
+	return ss.generation
+}
+
+// releaseGeneration ignores a failure from a previous connection lifetime.
+func (ss *sessionState) releaseGeneration(generation uint64) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if generation == 0 || ss.generation != generation {
 		return
 	}
 	ss.connectionID = ""
@@ -147,6 +175,11 @@ func (ss *sessionState) lastPingTime() time.Time {
 	return ss.lastPing
 }
 
+type activityKey struct{ failed atomic.Bool }
+
+// activityWriteTimeout bounds an in-flight activity frame on a stalled peer.
+const activityWriteTimeout = 250 * time.Millisecond
+
 // Channel is the daemon-side ZMQ CLI channel. It embeds a *zmq.Listener for
 // raw ROUTER-socket I/O and owns the session lock, the reply-pending map, and
 // the internal goroutines (dispatch loop and idle watchdog).
@@ -172,8 +205,9 @@ const defaultLivenessTimeout = 45 * time.Second
 // pendingEntry holds the information needed to route replies and notifications
 // back to the client for a given in-flight request.
 type pendingEntry struct {
-	identity  []byte
-	requestID string
+	identity    []byte
+	requestID   string
+	activityKey *activityKey
 }
 
 // Channel is the daemon-side ZMQ CLI channel. It embeds a *zmq.Listener for
@@ -809,7 +843,7 @@ func (c *Channel) Send(_ context.Context, msg channel.Message) error {
 			Msg("response_payload")
 	}
 
-	if sendErr := c.listener.Send(entry.identity, resp); sendErr != nil {
+	if sendErr := c.listener.SendChecked(entry.identity, resp, func() bool { return entry.activityKey == nil || !entry.activityKey.failed.Load() }); sendErr != nil {
 		// The peer is unreachable — the client disconnected (timeout, kill,
 		// network loss). There is no point in retrying: the reply is lost.
 		// Release the session immediately so the next client can connect
@@ -837,6 +871,55 @@ func (c *Channel) Send(_ context.Context, msg channel.Message) error {
 	c.sess.touchActivity()
 
 	return nil
+}
+
+// ActivitySender captures the pending request's identity and lifetime.
+// A late callback cannot attach to a later request even if its ID is reused.
+func (c *Channel) ActivitySender(connectionID, requestID string) func(protocol.Activity) error {
+	if connectionID == "" || requestID == "" {
+		return nil
+	}
+	c.pendingMu.Lock()
+	captured, ok := c.pending[connectionID]
+	c.pendingMu.Unlock()
+	if !ok || captured.requestID != requestID || captured.activityKey == nil {
+		return nil
+	}
+	generation := c.sess.generationFor(connectionID, captured.identity)
+	if generation == 0 {
+		return nil
+	}
+
+	return func(snapshot protocol.Activity) error {
+		c.pendingMu.Lock()
+		current, pending := c.pending[connectionID]
+		c.pendingMu.Unlock()
+		if !pending || current.activityKey != captured.activityKey {
+			return nil
+		}
+		activeID, identity, _, _ := c.sess.snapshot()
+		if activeID != connectionID || !bytes.Equal(identity, captured.identity) {
+			return nil
+		}
+		payload, err := protocol.Marshal(protocol.Response{ConnectionID: connectionID, RequestID: requestID, Status: protocol.ResponseStatusOK, ResponseType: protocol.ResponseTypeControl, Activity: &snapshot})
+		if err != nil {
+			return fmt.Errorf("zmqcli: marshal activity: %w", err)
+		}
+		valid := func() bool {
+			c.pendingMu.Lock()
+			current, pending := c.pending[connectionID]
+			c.pendingMu.Unlock()
+
+			return pending && current.activityKey == captured.activityKey && c.sess.generationFor(connectionID, captured.identity) == generation
+		}
+		if err := c.listener.SendActivity(captured.identity, payload, activityWriteTimeout, valid, func() { captured.activityKey.failed.Store(true) }); err != nil {
+			c.sess.releaseConnection(connectionID)
+
+			return fmt.Errorf("zmqcli: send activity: %w", err)
+		}
+
+		return nil
+	}
 }
 
 // SendNotification sends an intermediate progress notification to the active
@@ -1136,7 +1219,7 @@ func (c *Channel) sendHandshakeOK(ctx context.Context, identity []byte, okResp p
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if pending, available := c.pendingSnapshot(ctx); available && ctx.Err() == nil {
-		okResp.PendingSecrets = pending
+		okResp.Secrets = pending
 	}
 	if creds := c.credentialsSnapshot(ctx); len(creds) > 0 && ctx.Err() == nil {
 		okResp.Credentials = creds
@@ -1233,8 +1316,9 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 
 	c.pendingMu.Lock()
 	c.pending[req.ConnectionID] = pendingEntry{
-		identity:  identity,
-		requestID: req.RequestID,
+		identity:    identity,
+		requestID:   req.RequestID,
+		activityKey: &activityKey{},
 	}
 	c.pendingMu.Unlock()
 	c.secretMu.Unlock()

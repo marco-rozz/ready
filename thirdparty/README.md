@@ -33,3 +33,30 @@ possible so upstream diffs stay reviewable.
   5. If upstream ships a composable registry or build tags that make the patch
      unnecessary (see the filed upstream issue), drop the `replace` and delete
      this tree.
+
+## Eino
+
+- **Upstream**: `github.com/cloudwego/eino` at **v0.9.22**.
+- **Why patched**: READY needs to end tool activity as soon as the consumer
+  closes a streaming tool result, including when the upstream stream is idle.
+- **Exact patch** (`schema/stream.go`): add `StreamReader.OnClose` (callbacks compose in registration order) and invoke
+  its callbacks from `Close`. Existing reader and tool interfaces are otherwise
+  unchanged. The callback is registered before the reader is handed off.
+- **Refresh**: copy the pinned upstream module, reapply the patch, run the
+  activity lifecycle tests and full Go test suite. Remove the replacement when
+  upstream exposes an equivalent close notification.
+
+## go-zeromq/zmq4
+
+- **Upstream**: `github.com/go-zeromq/zmq4` at **v0.17.0**.
+- **Why patched**: a stalled peer must not hold a READY activity frame open
+  indefinitely or receive a later frame after an incomplete one.
+- **Exact patch** (`router.go`): add bounded `SendActivity` and guarded
+  `SendChecked` methods. Both serialize with the ROUTER writer. Activity
+  validates the request immediately before writing; a write failure closes
+  the peer before releasing the writer lock, and checked final replies reject
+  that failed request. `ready_activity_test.go` exercises a stalled peer.
+- **Refresh**: copy the pinned upstream module, reapply the patch, run
+  `go test -race -run TestReadyActivity` in `thirdparty/zmq4`, followed by the
+  READY ZMQ integration tests. Remove the replacement if upstream provides
+  equivalent bounded writes and guarded final delivery.

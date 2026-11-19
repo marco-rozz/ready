@@ -4,7 +4,7 @@ go 1.27
 
 // Pinned so CI (setup-go with go-version-file: go.mod), goreleaser and local
 // builds all use the exact same Go patch release.
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	charm.land/bubbles/v2 v2.2.1
@@ -163,3 +163,9 @@ replace github.com/bytedance/sonic => ./sonic-shim
 // registers as agent tools, worth ~12% of the release binary size.
 // See thirdparty/README.md for the exact patch and refresh procedure.
 replace github.com/flexigpt/llmtools-go => ./thirdparty/llmtools-go
+
+// READY patches StreamReader to observe explicit consumer closure.
+replace github.com/cloudwego/eino => ./thirdparty/eino
+
+// READY bounds observational ROUTER writes and protects final-reply framing.
+replace github.com/go-zeromq/zmq4 => ./thirdparty/zmq4

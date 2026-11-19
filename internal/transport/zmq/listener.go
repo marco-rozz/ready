@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-zeromq/zmq4"
 	"github.com/rs/zerolog"
@@ -192,6 +193,43 @@ func (l *Listener) Send(identity, payload []byte) error {
 
 	if err := l.socket.Send(msg); err != nil {
 		return fmt.Errorf("zmq listener: send: %w", err)
+	}
+
+	return nil
+}
+
+// SendActivity writes a best-effort activity frame with a bounded deadline.
+// valid is checked under the ROUTER writer lock; failed runs before it unlocks.
+func (l *Listener) SendActivity(identity, payload []byte, timeout time.Duration, valid func() bool, failed func()) error {
+	if l.isClosed() {
+		return ErrListenerClosed
+	}
+	sender, ok := l.socket.(interface {
+		SendActivity(zmq4.Msg, time.Duration, func() bool, func()) error
+	})
+	if !ok {
+		return errors.New("zmq listener: bounded activity unsupported")
+	}
+	if err := sender.SendActivity(zmq4.NewMsgFrom(identity, []byte{}, payload), timeout, valid, failed); err != nil {
+		return fmt.Errorf("zmq listener: activity send: %w", err)
+	}
+
+	return nil
+}
+
+// SendChecked checks validity after prior activity writes have completed.
+func (l *Listener) SendChecked(identity, payload []byte, valid func() bool) error {
+	if l.isClosed() {
+		return ErrListenerClosed
+	}
+	sender, ok := l.socket.(interface {
+		SendChecked(zmq4.Msg, func() bool) error
+	})
+	if !ok {
+		return errors.New("zmq listener: checked send unsupported")
+	}
+	if err := sender.SendChecked(zmq4.NewMsgFrom(identity, []byte{}, payload), valid); err != nil {
+		return fmt.Errorf("zmq listener: checked send: %w", err)
 	}
 
 	return nil

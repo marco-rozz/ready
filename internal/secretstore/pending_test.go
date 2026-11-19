@@ -152,3 +152,15 @@ func TestPermissionWarnings(t *testing.T) {
 		t.Fatalf("warnings = %v", w)
 	}
 }
+
+func TestDerivePreservesDottedPathSegments(t *testing.T) {
+	refs := []Reference{{Name: "shared", Field: "mcp_servers.home.headers.X.Key", Path: []string{"mcp_servers", "home", "headers", "X.Key"}}}
+	report := Derive(nil, refs, nil)
+	if len(report.Secrets) != 1 || len(report.Secrets[0].FieldPaths) != 1 {
+		t.Fatalf("report: %+v", report)
+	}
+	got := report.Secrets[0].FieldPaths[0]
+	if len(got) != 4 || got[3] != "X.Key" {
+		t.Fatalf("segments lost: %#v", got)
+	}
+}

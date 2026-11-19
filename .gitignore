@@ -62,3 +62,5 @@ scratch/
 # goreleaser build output — must be invisible to Go's VCS stamping, otherwise
 # every release build stamps vcs.modified=true (+dirty on the module version).
 /dist/
+
+ready-architecture.*

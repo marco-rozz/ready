@@ -14,7 +14,7 @@ import (
 	"github.com/marco-rozz/ready/internal/llm"
 )
 
-func staticAssemble(llm.PromptLayout) []*schema.Message {
+func staticAssemble(llm.PromptLayout, string) []*schema.Message {
 	return []*schema.Message{schema.UserMessage("hi")}
 }
 
@@ -31,16 +31,18 @@ func TestRunTurn_ResumeAfterRecordedGroups(t *testing.T) {
 
 	o := newTestOrch(newFakeClock(),
 		mkCand(testRefA0, "a", "ollama", llm.LayoutTailDynamic, r0, nil),
-		mkCand(testRefB1, "b", "chat_completions", llm.LayoutTailDynamic, r1, nil),
+		mkCand(testRefB1, "b", "responses", llm.LayoutTailDynamic, r1, nil),
 	)
 
 	assembled := 0
+	var refs []string
 	outcome, err := o.RunTurn(context.Background(), TurnRequest{
 		SessionKey: testTurnChannel,
-		Assemble: func(l llm.PromptLayout) []*schema.Message {
+		Assemble: func(l llm.PromptLayout, ref string) []*schema.Message {
 			assembled++
+			refs = append(refs, ref)
 
-			return staticAssemble(l)
+			return staticAssemble(l, ref)
 		},
 		ResumeReady: func() bool { return true },
 	}, func(string) {})
@@ -49,6 +51,9 @@ func TestRunTurn_ResumeAfterRecordedGroups(t *testing.T) {
 	}
 	if outcome.Reply != "resumed" || r1.callCount() != 1 || assembled != 2 {
 		t.Fatalf("reply=%q fallback calls=%d assembles=%d", outcome.Reply, r1.callCount(), assembled)
+	}
+	if len(refs) != 2 || refs[0] != testRefA0 || refs[1] != testRefB1 {
+		t.Fatalf("attempt refs = %v", refs)
 	}
 	if !outcome.ToolCallStarted || !outcome.ToolCallCompleted {
 		t.Errorf("expected the earlier attempt's tool activity merged into the outcome, got %+v", outcome)
@@ -229,7 +234,7 @@ func TestRunTurn_OllamaGroupsFailOverToStrictProtocol(t *testing.T) {
 		defer mu.Unlock()
 		recorded = append(recorded, &m)
 	})
-	assemble := func(llm.PromptLayout) []*schema.Message {
+	assemble := func(llm.PromptLayout, string) []*schema.Message {
 		mu.Lock()
 		defer mu.Unlock()
 

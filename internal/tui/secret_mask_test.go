@@ -81,15 +81,13 @@ func TestSecretsCommandListsRotatesAndDeletesWithConfirmation(t *testing.T) {
 	}
 	m.handleReply(protocol.Response{
 		RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK,
-		SecretEntry: &protocol.SecretEntryResponse{
-			Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed,
-			Secrets: []protocol.PendingSecret{
-				{Name: "ok_key", Fields: []string{"llm.providers.p.api_key"}, State: protocol.SecretStateSet},
-				{Name: "orphan", State: protocol.SecretStateUnused},
-				{Name: "/run/ext", Fields: []string{"channels.telegram.token"}, State: protocol.SecretStateExternal},
-			},
-			Credentials: []protocol.CredentialInfo{{Target: "mcp:ha", State: "stored"}},
+		SecretEntry: &protocol.SecretEntryResponse{Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed},
+		Secrets: []protocol.PendingSecret{
+			{Name: "ok_key", Fields: [][]string{{"llm.providers.p.api_key"}}, State: protocol.SecretStateSet},
+			{Name: "orphan", State: protocol.SecretStateUnused},
+			{Name: "/run/ext", Fields: [][]string{{"channels.telegram.token"}}, State: protocol.SecretStateExternal},
 		},
+		Credentials: []protocol.CredentialInfo{{Target: "mcp:ha", State: "stored"}},
 	})
 	var table string
 	for _, c := range m.completed {

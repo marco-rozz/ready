@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"github.com/marco-rozz/ready/internal/activity"
 )
 
 // PolicyBlockToolName is the registered, advertised name of the sentinel
@@ -92,7 +93,8 @@ func (p *PolicyBlockTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 // argument (the rewritten blocked call) it renders the fixed block message;
 // a direct call without one returns the fixed informational text. Either way
 // the result is a normal, non-error tool result and the turn continues.
-func (p *PolicyBlockTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+func (p *PolicyBlockTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	defer activity.Start(ctx, PolicyBlockToolName)()
 	args := parseBlockArgs(argumentsInJSON)
 	if args.Tool == "" {
 		return directCallMessage, nil

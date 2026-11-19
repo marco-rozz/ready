@@ -6,21 +6,22 @@ interview), then stages the edits mechanically with the `config-manager`
 tool. The configuration file holds **references only** — never a secret value
 — and nothing is written until you confirm.
 
-## The assisted flow (read → discuss → update → confirm → save)
+## The assisted flow (read → begin → discuss → update → confirm → save)
 
-1. **read** — the agent opens staging: it receives the configuration text, a
-   `stage_id` and a `revision`. Sensitive fields appear as references such as
-   `api_key: !secret openai_api_key`. The stage is owned by the current
-   Session: another Session's actions are refused.
+1. **read and begin** — `read` inspects the saved configuration without
+   opening a draft. `begin` opens this Session's private draft and returns its
+   text, `stage_id` and `revision`. Other Sessions can open their own drafts;
+   they cannot inspect or change yours. Sensitive fields appear as references
+   such as `api_key: !secret openai_api_key`.
 2. **discuss** — the agent asks what to change, exactly as in the config
    interview protocol.
 3. **update** — the agent applies a batch of exact `old_text` → `new_text`
    edits against the staged text and gets back a diff and the new revision.
    A batch is atomic: any refused edit commits nothing.
 4. **confirm** — the agent shows you the diff and asks you to confirm before
-   saving. This confirmation is a procedural rule of the guided flow, not a
-   technical authorization: the tool itself never asks for a human
-   approval token.
+   saving. After reconciliation, confirmation is enforced: review the proposal
+   and send the exact `/confirm-config <proposal-id>` command in a new message.
+   A claim by the model that you confirmed does not authorize the save.
 5. **save** — the tool validates the candidate with the same rules boot uses,
    writes a backup of the current file and replaces it atomically.
    **Activation is automatic** (post-save activation): in the local
@@ -43,8 +44,12 @@ and request confirmation. After save, use the tool's reported outcome:
   next step, and do not retry the save.
 - No changes: say there were no changes to save.
 - Refused or failed before commit: say the changes were not saved and
-  explain the next step. If the tool is unavailable, identify the file the
-  user must edit/save manually; never imply a shown YAML block was written.
+  explain the next step. If the tool is unavailable, say the proposal was not
+  applied; never imply a shown YAML block was written.
+- Unknown commit outcome: say the save status is unknown and check the saved
+  configuration before recommending another attempt. Do not claim rollback.
+- Reload failed after a committed save: say the file was saved but the previous
+  runtime remains active; report the reload failure separately.
 
 ## How secrets are handled (no secret in chat, none in the file)
 
@@ -188,12 +193,14 @@ retroactively clean a transcript.
 
 ## Staging recovery
 
-- `read` again as the owning Session returns your current staged state —
-  edits and diff context intact.
-- If the file was changed externally (by you or another writer) between read
-  and save, save refuses and marks the staging conflicted: discard the
-  staging, `read` fresh and reapply your intent. Nothing is overwritten on
-  conflict.
+- `inspect` returns your current staged state; `read` returns the saved file
+  without changing the draft.
+- If the file changed externally before save, the draft remains available and
+  save refuses. Use `reconcile` with the draft ID and revision; review its diff
+  and send the exact confirmation command it returns in a new message. If the
+  changes overlap or are ambiguous, discuss the conflict with the user; do not
+  force a save. The commit uses an advisory lock, so an unrelated editor that
+  ignores that lock can still race the final source check.
 - Ending the Session (`/new`, a reset rule) releases staging; a ZMQ client
   reconnect alone does not. Discarding releases it without touching the
   file.
@@ -210,13 +217,6 @@ and `edit` profiles and only the other internal tools are exposed. To use it,
 declare a profile (e.g. `admin`) with a `builtin_tools` allow rule that
 includes it — and remember profiles never inherit: every other policy owner
 needs its own rules for that profile or contributes nothing under it.
-
-## There are no `*_file` keys any more
-
-`api_key_file`, `auth_token_file`, `token_file` and `client_secret_file` are
-removed from the schema (a config using them is refused with a pointer to
-`!secret_file`). Every sensitive field, including the Telegram token and each
-MCP header value, takes `!secret` or `!secret_file`.
 
 ## Small local models: keep the guide in context
 

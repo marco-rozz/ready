@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -40,6 +41,12 @@ type Manager struct {
 	// lifecycle): a second call must be a no-op —
 	// close(m.incoming) would otherwise panic on the second Stop.
 	stopOnce sync.Once
+
+	// stopping is set before Stop releases any channel: AddOrReplace must
+	// refuse registrations (and close the refused channel) from that moment
+	// on, so a concurrent registration cannot leave a self-starting channel
+	// polling behind the shutdown path.
+	stopping atomic.Bool
 }
 
 // NewManager creates a Manager with the given set of channels.
@@ -97,6 +104,16 @@ func (m *Manager) startChannelLocked(ch Channel) {
 func (m *Manager) AddOrReplace(ch Channel) {
 	name := ch.Name()
 	m.mu.Lock()
+	if m.stopping.Load() {
+		m.mu.Unlock()
+
+		// The manager is shutting down: never register — and never leave a
+		// self-starting channel (e.g. Telegram's construction-time poller)
+		// running behind the shutdown path.
+		_ = ch.Close()
+
+		return
+	}
 	oldCh := m.channels[name]
 	if oldCh == ch {
 		if m.started && m.running[name] == nil {
@@ -229,6 +246,7 @@ func (m *Manager) Stop() error {
 	// second call is a no-op instead of panicking on the double channel
 	// close.
 	m.stopOnce.Do(func() {
+		m.stopping.Store(true)
 		m.cancel()
 		m.mu.RLock()
 		for _, entry := range m.running {

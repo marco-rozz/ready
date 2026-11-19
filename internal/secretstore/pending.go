@@ -2,6 +2,7 @@ package secretstore
 
 import (
 	"sort"
+	"strings"
 )
 
 // Reference is one configured sensitive field's reference, expressed without
@@ -9,6 +10,7 @@ import (
 type Reference struct {
 	// Field is the dotted config path, e.g. "llm.providers.main.api_key".
 	Field string
+	Path  []string
 	// Name is the Secret name of a `!secret` reference.
 	Name string
 	// File is the absolute path of a `!secret_file` reference.
@@ -31,18 +33,20 @@ const (
 
 // SecretStatus is the state of one Secret name. Value is never reported.
 type SecretStatus struct {
-	Name   string
-	Fields []string
-	State  State
+	Name       string
+	Fields     []string
+	FieldPaths [][]string
+	State      State
 	// Rule is the violated rule code when a present value is non-conforming.
 	Rule string
 }
 
 // ExternalStatus is the state of one `!secret_file` reference.
 type ExternalStatus struct {
-	Field string
-	Path  string
-	State State
+	Field     string
+	FieldPath []string
+	Path      string
+	State     State
 }
 
 // Report is the daemon-derived view of every Secret and external reference.
@@ -89,11 +93,11 @@ func Derive(p *Payload, refs []Reference, readFile func(string) (string, bool, e
 	if readFile == nil {
 		readFile = ReadFileSecret
 	}
-	byName := map[string][]string{}
+	byName := map[string][]Reference{}
 	var report Report
 	for _, r := range refs {
 		if r.Name != "" {
-			byName[r.Name] = append(byName[r.Name], r.Field)
+			byName[r.Name] = append(byName[r.Name], r)
 
 			continue
 		}
@@ -101,7 +105,7 @@ func Derive(p *Payload, refs []Reference, readFile func(string) (string, bool, e
 		if _, ok, err := readFile(r.File); err != nil || !ok {
 			st = StatePendingExternal
 		}
-		report.External = append(report.External, ExternalStatus{Field: r.Field, Path: r.File, State: st})
+		report.External = append(report.External, ExternalStatus{Field: r.Field, FieldPath: referencePath(r), Path: r.File, State: st})
 	}
 	if p != nil {
 		for name := range p.Secrets {
@@ -110,9 +114,15 @@ func Derive(p *Payload, refs []Reference, readFile func(string) (string, bool, e
 			}
 		}
 	}
-	for name, fields := range byName {
-		sort.Strings(fields)
-		st := SecretStatus{Name: name, Fields: fields, State: StatePending}
+	for name, references := range byName {
+		sort.Slice(references, func(i, j int) bool { return references[i].Field < references[j].Field })
+		fields := make([]string, 0, len(references))
+		paths := make([][]string, 0, len(references))
+		for _, ref := range references {
+			fields = append(fields, ref.Field)
+			paths = append(paths, referencePath(ref))
+		}
+		st := SecretStatus{Name: name, Fields: fields, FieldPaths: paths, State: StatePending}
 		if p != nil {
 			if sec, ok := p.Secrets[name]; ok {
 				if err := CheckValue(fields, sec.Value); err != nil {
@@ -128,4 +138,13 @@ func Derive(p *Payload, refs []Reference, readFile func(string) (string, bool, e
 	sort.Slice(report.External, func(i, j int) bool { return report.External[i].Field < report.External[j].Field })
 
 	return report
+}
+
+// referencePath preserves map keys containing dots; older callers may supply only Field.
+func referencePath(ref Reference) []string {
+	if ref.Path != nil {
+		return append([]string(nil), ref.Path...)
+	}
+
+	return strings.Split(ref.Field, ".")
 }

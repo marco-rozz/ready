@@ -282,7 +282,7 @@ assert seen[-1] in joined, f"last turn marker {seen[-1]!r} not visible on the fi
 # 100% fill: the status line sits on the BOTTOM row and the input bars are
 # directly above the bottom — the frame spans the whole terminal.
 last = display[rows - 1].strip()
-assert last.startswith("idle"), f"status line not on the bottom row: {last!r}"
+assert "thinking" not in last and "streaming" not in last, f"unexpected turn state in footer: {last!r}"
 bar_rows = [i for i, l in enumerate(display) if "─" in l]
 assert len(bar_rows) >= 2, f"input border bars missing ({len(bar_rows)} bar lines)"
 assert bar_rows[-1] == rows - 2, f"bottom bar is row {bar_rows[-1]}, want row {rows - 2} (not bottom-anchored)"

@@ -68,6 +68,8 @@ type SecretEntryResult struct {
 	External    []secretstore.ExternalStatus
 	Credentials []CredentialSummary
 	RuleCode    string
+	Name        string
+	Field       []string
 }
 
 // Outcome vocabulary shared with the wire protocol.
@@ -215,7 +217,22 @@ func (e *SecretEntry) Submit(ctx context.Context, owner, opID, name, value strin
 		return SecretEntryResult{}, ErrUnknownName
 	}
 	if vErr := secretstore.CheckValue(e.fieldsOf(rep, name), value); vErr != nil {
-		return SecretEntryResult{RuleCode: secretstore.RuleCode(vErr)}, fmt.Errorf("%w: %w", ErrInvalidValue, vErr)
+		result := SecretEntryResult{Name: name, RuleCode: secretstore.RuleCode(vErr)}
+		if violation, ok := errors.AsType[*secretstore.RuleViolation](vErr); ok {
+			for _, status := range rep.Secrets {
+				if status.Name == name {
+					for i, field := range status.Fields {
+						if field == violation.Field && i < len(status.FieldPaths) {
+							result.Field = status.FieldPaths[i]
+
+							break
+						}
+					}
+				}
+			}
+		}
+
+		return result, fmt.Errorf("%w: %w", ErrInvalidValue, vErr)
 	}
 	err = e.opts.Store.Update(ctx, func(p *secretstore.Payload) error {
 		p.Secrets[name] = secretstore.Secret{Value: value, UpdatedAt: e.opts.Now().UTC()}

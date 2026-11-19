@@ -32,6 +32,10 @@ const msgReloadFailed = "The configuration was saved, but the runtime reload fai
 // then releases the old one.
 type reloadCoordinator struct {
 	rt *sessionRuntime
+	// daemonCtx is the process-lifetime context: a reload racing the daemon
+	// shutdown must be refused instead of swapping a generation (and
+	// restarting channels) behind the teardown path.
+	daemonCtx context.Context
 	// build constructs the next generation. It owns its context lifetime.
 	build func(context.Context) (*runtimeGeneration, error)
 	// afterSwap runs after the swap, outside the generation lock.
@@ -60,7 +64,7 @@ func (c *reloadCoordinator) Reload(ctx context.Context, fromTUI bool) (*runtimeG
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.closed {
+	if c.closed || c.daemonCtx.Err() != nil {
 		return nil, errReloadClosed
 	}
 
@@ -69,6 +73,14 @@ func (c *reloadCoordinator) Reload(ctx context.Context, fromTUI bool) (*runtimeG
 		c.logger.Error().Err(err).Msg("runtime reload failed; the previous generation stays active")
 
 		return nil, fmt.Errorf("runtime reload failed; the previous configuration stays active: %w", err)
+	}
+
+	// The daemon began shutting down while the generation was being built:
+	// release it instead of installing it behind the shutdown path.
+	if c.daemonCtx.Err() != nil {
+		next.shutdown(ctx, c.logger)
+
+		return nil, errReloadClosed
 	}
 
 	if err = c.rt.swapGeneration(ctx, next, c.grace); err != nil {

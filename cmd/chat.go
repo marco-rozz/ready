@@ -6,7 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -441,7 +440,7 @@ func runChat(ctx context.Context, c *cli.Command, stdout, stderr io.Writer, stdi
 		ClientVersion:  clientVersion(),
 		AgentName:      authResp.AgentName,
 		AgentID:        authResp.AgentID,
-		PendingSecrets: authResp.PendingSecrets,
+		PendingSecrets: authResp.Secrets,
 		Credentials:    authResp.Credentials,
 	})
 
@@ -660,8 +659,8 @@ func recvDirect(dealer zmq4.Socket, timeout time.Duration, sigIntFired chan stru
 			return
 		}
 
-		var resp protocol.Response
-		if parseErr := json.Unmarshal(msg.Frames[len(msg.Frames)-1], &resp); parseErr != nil {
+		resp, parseErr := protocol.UnmarshalResponse(msg.Frames[len(msg.Frames)-1])
+		if parseErr != nil {
 			ch <- result{err: parseErr}
 
 			return
@@ -723,8 +722,8 @@ func (r *recvLoop) run(ctx context.Context, sigIntFired chan struct{}) {
 
 		raw := msg.Frames[len(msg.Frames)-1]
 
-		var resp protocol.Response
-		if parseErr := json.Unmarshal(raw, &resp); parseErr != nil {
+		resp, parseErr := protocol.UnmarshalResponse(raw)
+		if parseErr != nil {
 			continue
 		}
 
@@ -805,7 +804,7 @@ func isModelStatusControl(resp protocol.Response) bool {
 		return false
 	}
 
-	return resp.ModelState != "" ||
+	return resp.Activity != nil || resp.ModelState != "" ||
 		resp.Content == protocol.ControlSessionChanged ||
 		resp.Content == protocol.ControlCompacted
 }
@@ -815,8 +814,13 @@ func isModelStatusControl(resp protocol.Response) bool {
 // for the non-TUI paths, so the wait resumes instead of surfacing them as
 // errControlAfter (which would exit the client).
 func waitReplyIgnoringModelStatus(ctx context.Context, recv *recvLoop, timeout time.Duration, sigIntFired chan struct{}) (protocol.Response, error) {
+	deadline := time.Now().Add(timeout)
 	for {
-		resp, err := recv.waitReply(ctx, timeout, sigIntFired)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return protocol.Response{}, context.DeadlineExceeded
+		}
+		resp, err := recv.waitReply(ctx, remaining, sigIntFired)
 		if err == nil || !errors.Is(err, errControlAfter) || !isModelStatusControl(resp) {
 			return resp, err
 		}

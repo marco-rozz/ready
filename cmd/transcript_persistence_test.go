@@ -228,6 +228,46 @@ func cliMsg(text string) channel.Message {
 	return channel.Message{ChannelName: testCLIChannelName, Content: text}
 }
 
+type guardedFailureTool struct{ runs atomic.Int32 }
+
+func (t *guardedFailureTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: lampToolName}, nil
+}
+
+func (t *guardedFailureTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	t.runs.Add(1)
+
+	return "", config.ErrConfigSourceConflict
+}
+
+func TestTranscriptGuardClosesToolGroupWithoutRepeatingSideEffect(t *testing.T) {
+	buf := &termBuffer{}
+	env := newTermEnv(t, channelFormatterCfg{}, newTestCLIChannel(buf))
+	inner := &guardedFailureTool{}
+	m := &transcriptModel{steps: []func([]*schema.Message) (*schema.Message, error){func([]*schema.Message) (*schema.Message, error) { return lampCall() }}}
+	wrapped := wrapWithErrorDigest([]tool.BaseTool{inner}, zerolog.Nop())
+	a, err := agent.New(context.Background(), agent.Config{ChatModel: m, Tools: wrapped}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orch := orchestrator.New(orchestrator.Config{Candidates: []orchestrator.Candidate{{
+		CandidateDescriptor: llm.CandidateDescriptor{Ref: "o::m", Provider: "o", ModelID: "m", API: "ollama", Layout: llm.LayoutTailDynamic}, Runner: a,
+	}}, Recovery: config.LLMRecoveryConfig{Soft: config.LadderConfig{InitialCooldown: time.Minute, MaxCooldown: time.Hour}, Hard: config.LadderConfig{InitialCooldown: time.Minute, MaxCooldown: time.Hour}, BackoffFactor: 2, ProbeTimeout: time.Second, IdleProbeWindow: time.Minute}}, zerolog.Nop())
+	env.agentReg = &agentRegistry{exec: orch, orch: orch, layout: llm.LayoutTailDynamic}
+	env.run(cliMsg("run a failing tool"))
+	if inner.runs.Load() != 1 {
+		t.Fatalf("tool executed %d times", inner.runs.Load())
+	}
+	if !strings.Contains(buf.String(), "tool could not make progress") {
+		t.Fatalf("terminal output: %s", buf.String())
+	}
+	history := env.restoredHistory(t)
+	if history.HasOpenToolCallGroup() {
+		t.Fatal("guard left a tool call open")
+	}
+	assertStrictPairing(t, toSchemaMessages(history.Messages()))
+}
+
 // A tool iteration is persisted as it happens: the completed group is on
 // disk before the next model call begins; the final reply closes the turn.
 func TestTranscript_StreamingToolTurnPersistsGroupsMidTurn(t *testing.T) {

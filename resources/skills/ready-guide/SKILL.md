@@ -142,7 +142,7 @@ Interview rules:
 - After each agreed block, compose the new YAML section in the style of
   `config.example.yaml` (comments and all), then move to the next block.
 - When the change should actually be applied to the selected agent's configuration,
-  use the staged-editing flow of `assets/config-manager.md` (read, discuss,
+  use the staged-editing flow of `assets/config-manager.md` (read, begin, discuss,
   update, show the diff, ask for explicit confirmation, then save) instead of
   asking the user to paste a whole new file — and never write a secret value
   into the file from chat.

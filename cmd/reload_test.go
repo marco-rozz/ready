@@ -25,7 +25,7 @@ func newTestCoordinator(t *testing.T, rt *sessionRuntime, build func(context.Con
 	first := testGeneration()
 	rt.applyGeneration(first)
 
-	return &reloadCoordinator{rt: rt, build: build, grace: grace, logger: zerolog.Nop(), current: first}
+	return &reloadCoordinator{rt: rt, build: build, grace: grace, logger: zerolog.Nop(), current: first, daemonCtx: context.Background()}
 }
 
 // A save committed from a worker (Telegram, --exec) schedules an asynchronous
@@ -34,6 +34,7 @@ func newTestCoordinator(t *testing.T, rt *sessionRuntime, build func(context.Con
 func TestReloadCoordinator_AutoReloadFromWorkerDoesNotDeadlock(t *testing.T) {
 	rt := &sessionRuntime{logger: zerolog.Nop()}
 	next := testGeneration(tools.NewWaitTool())
+	next.activeProfileName = rejectedChatProfileName
 	coord := newTestCoordinator(t, rt, func(context.Context) (*runtimeGeneration, error) { return next, nil }, 5*time.Second)
 	rt.onAutoReload = coord.RequestAutoReload
 
@@ -77,6 +78,9 @@ func TestReloadCoordinator_AutoReloadFromWorkerDoesNotDeadlock(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("rt.agentTools = %d tools, want the new generation's 1", len(got))
 	}
+	if rt.activeProfileName != rejectedChatProfileName {
+		t.Fatalf("reloaded active profile = %q, want admin", rt.activeProfileName)
+	}
 	coord.Close()
 }
 
@@ -104,6 +108,8 @@ func TestReloadCoordinator_BuildFailureRetainsPreviousGeneration(t *testing.T) {
 	rt := &sessionRuntime{logger: zerolog.Nop()}
 	coord := newTestCoordinator(t, rt, func(context.Context) (*runtimeGeneration, error) { return nil, errors.New("boom") }, time.Second)
 	prev := coord.currentGen()
+	prev.activeProfileName = activeProfileTestName
+	rt.activeProfileName = prev.activeProfileName
 
 	if _, err := coord.Reload(t.Context(), true); err == nil {
 		t.Fatal("expected the build failure to be returned")
@@ -113,6 +119,12 @@ func TestReloadCoordinator_BuildFailureRetainsPreviousGeneration(t *testing.T) {
 	}
 	if prev.ctx.Err() != nil {
 		t.Fatal("the previous generation must not be cancelled")
+	}
+	rt.genMu.RLock()
+	profile := rt.activeProfileName
+	rt.genMu.RUnlock()
+	if profile != prev.activeProfileName {
+		t.Fatalf("failed reload changed active profile to %q", profile)
 	}
 }
 
@@ -170,4 +182,67 @@ func TestReloadCoordinator_SerializedAndClosed(t *testing.T) {
 	if _, err := coord.Reload(context.Background(), true); !errors.Is(err, errReloadClosed) {
 		t.Fatalf("after Close: %v", err)
 	}
+}
+
+// A reload must be refused outright once the daemon is shutting down (the
+// process context is cancelled): the build stage must never run.
+func TestReloadCoordinator_ReloadRefusedWhenDaemonShuttingDown(t *testing.T) {
+	rt := &sessionRuntime{logger: zerolog.Nop()}
+	builds := 0
+	coord := newTestCoordinator(t, rt, func(context.Context) (*runtimeGeneration, error) {
+		builds++
+
+		return testGeneration(), nil
+	}, time.Second)
+	daemonCtx, cancelDaemon := context.WithCancel(context.Background())
+	coord.daemonCtx = daemonCtx
+	cancelDaemon()
+
+	if _, err := coord.Reload(context.Background(), true); !errors.Is(err, errReloadClosed) {
+		t.Fatalf("Reload with cancelled daemon context = %v, want errReloadClosed", err)
+	}
+	if builds != 0 {
+		t.Fatalf("builds = %d, want 0", builds)
+	}
+	coord.Close()
+}
+
+// The daemon can begin shutting down while a reload is mid-flight (SIGINT
+// racing a config-save reload): the freshly built generation must be shut
+// down and never installed, and afterSwap must never restart channels.
+func TestReloadCoordinator_ReloadAbortedWhenDaemonShutsDownMidBuild(t *testing.T) {
+	rt := &sessionRuntime{logger: zerolog.Nop()}
+	daemonCtx, cancelDaemon := context.WithCancel(context.Background())
+
+	built := testGeneration()
+	swapped := false
+	afterSwapRan := false
+	coord := newTestCoordinator(t, rt, func(context.Context) (*runtimeGeneration, error) {
+		cancelDaemon() // SIGINT lands while the generation is being built
+
+		return built, nil
+	}, time.Second)
+	coord.daemonCtx = daemonCtx
+	coord.afterSwap = func(*runtimeGeneration, bool) { afterSwapRan = true }
+
+	// Track the swap through the runtime: a successful swapGeneration
+	// replaces the applied generation. Pin a marker via the generation's
+	// tool list.
+	first := coord.currentGen()
+	_ = swapped // swap detection below compares the current generation
+
+	_, err := coord.Reload(context.Background(), true)
+	if !errors.Is(err, errReloadClosed) {
+		t.Fatalf("Reload aborted mid-build = %v, want errReloadClosed", err)
+	}
+	if afterSwapRan {
+		t.Fatal("afterSwap must not run after daemon shutdown begins")
+	}
+	if coord.currentGen() != first {
+		t.Fatal("the aborted generation must not become current")
+	}
+	if built.ctx.Err() == nil {
+		t.Fatal("the aborted generation must be shut down (context cancelled)")
+	}
+	coord.Close()
 }

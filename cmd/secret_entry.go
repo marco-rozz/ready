@@ -170,11 +170,15 @@ func newSecretEntry(cfg *config.Config, state *bootSecretState, adopt func(strin
 func protocolSecrets(rep secretstore.Report) []protocol.PendingSecret {
 	out := make([]protocol.PendingSecret, 0, len(rep.Secrets)+len(rep.External))
 	for _, s := range rep.Secrets {
-		out = append(out, protocol.PendingSecret{Name: s.Name, Fields: s.Fields, State: protocol.SecretState(s.State), Rule: s.Rule})
+		paths := s.FieldPaths
+		if paths == nil {
+			paths = [][]string{}
+		}
+		out = append(out, protocol.PendingSecret{Name: s.Name, Fields: paths, State: protocol.SecretState(s.State)})
 	}
 	for _, e := range rep.External {
 		if e.State == secretstore.StatePendingExternal {
-			out = append(out, protocol.PendingSecret{Name: e.Path, Fields: []string{e.Field}, State: protocol.SecretStateExternal})
+			out = append(out, protocol.PendingSecret{Name: e.Path, Fields: [][]string{e.FieldPath}, State: protocol.SecretStateExternal})
 		}
 	}
 
@@ -289,18 +293,21 @@ func secretEntryResponse(result tools.SecretEntryResult, err error, action proto
 		case errors.Is(err, tools.ErrInvalidValue):
 			return protocol.Response{
 				Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: protocol.ErrorCodeInvalidValue,
-				SecretEntry: &protocol.SecretEntryResponse{Action: action, Outcome: protocol.SecretEntryOutcomeRefused, RuleCode: result.RuleCode},
+				SecretEntry: &protocol.SecretEntryResponse{Action: action, Outcome: protocol.SecretEntryOutcomeRefused, Name: result.Name, Field: result.Field, Rule: result.RuleCode},
 			}
 		}
 
 		return protocol.Response{Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: code}
 	}
 
-	return protocol.Response{
+	response := protocol.Response{
 		Status: protocol.ResponseStatusOK, ResponseType: protocol.ResponseTypeReply,
-		SecretEntry: &protocol.SecretEntryResponse{
-			Action: action, OperationID: result.OperationID, Outcome: protocol.SecretEntryOutcome(result.Outcome),
-			Secrets: protocolSecrets(secretstore.Report{Secrets: result.Secrets, External: result.External}), Credentials: protocolCredentials(result.Credentials),
-		},
+		SecretEntry: &protocol.SecretEntryResponse{Action: action, OperationID: result.OperationID, Outcome: protocol.SecretEntryOutcome(result.Outcome)},
 	}
+	if action == protocol.SecretEntryActionList {
+		response.Secrets = protocolSecrets(secretstore.Report{Secrets: result.Secrets, External: result.External})
+		response.Credentials = protocolCredentials(result.Credentials)
+	}
+
+	return response
 }

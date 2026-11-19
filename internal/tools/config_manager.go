@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"github.com/marco-rozz/ready/internal/config"
@@ -24,9 +25,21 @@ const (
 // elected configuration and trusted Session identity. All identity and
 // persistence inputs are injected so the tool cannot choose another config.
 type ConfigManagerOptions struct {
+	// State, when provided, survives replacement of the runtime generation.
+	// Each manager retains its own generation-specific validation options.
+	State *ConfigManagerState
 	// ElectedPath is the config file elected at daemon boot — the tool's
 	// ONLY editable configuration. It accepts no config target path.
 	ElectedPath string
+	// ConfiguredDefaultProfile is the profile named by default_profile in the
+	// elected configuration. It is a fallback, not necessarily the profile
+	// serving the current runtime.
+	ConfiguredDefaultProfile string
+	// EffectiveProfileName is the profile resolved for the serving generation.
+	EffectiveProfileName string
+	// EffectiveProfileSource identifies which precedence input won: flag,
+	// environment, or configuration.
+	EffectiveProfileSource string
 	// ProfileOverrides captures the boot --profile flag and
 	// READY_DEFAULT_PROFILE env values for candidate validation precedence.
 	ProfileOverrides config.ProfileOverrideInputs
@@ -59,7 +72,7 @@ type ConfigManagerOptions struct {
 	readSource func(ctx context.Context) (config.SourceState, error)
 	commit     func(ctx context.Context, state config.SourceState, candidate []byte) (config.CommitReport, error)
 	// nextStageID yields fresh staging identifiers (uuid in production).
-	nextStageID func() string
+	nextStageID func() (string, error)
 }
 
 // ConfigManager owns the daemon's single config staging buffer (design D5).
@@ -67,10 +80,25 @@ type ConfigManagerOptions struct {
 // revision are checked atomically with each action.
 type ConfigManager struct {
 	opts ConfigManagerOptions
+	*ConfigManagerState
+}
 
-	mu      sync.Mutex
-	stage   *stageState
-	receipt *saveReceipt
+// ConfigManagerState owns staging state independently of runtime adapters.
+// Close it only after all generations and in-flight Sessions have stopped.
+type ConfigManagerState struct {
+	mu       sync.Mutex
+	stage    *stageState
+	receipt  *saveReceipt
+	sessions map[string]*ConfigManagerState
+}
+
+// Close releases process-owned staging and receipts.
+func (s *ConfigManagerState) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stage = nil
+	s.receipt = nil
+	s.sessions = nil
 }
 
 // stageState is the single staging buffer: the staged text (references only;
@@ -96,6 +124,10 @@ type stageState struct {
 	conflicted bool
 	// validation runs against the private candidate at the elected path.
 	validation candidateValidationRef
+	edits      []editPair
+	editBytes  int
+	proposalID string
+	confirmed  bool
 }
 
 // candidateValidationRef records the last known validation status.
@@ -140,20 +172,27 @@ func NewConfigManager(opts ConfigManagerOptions) (*ConfigManager, error) {
 		opts.commit = config.CommitCandidate
 	}
 	if opts.nextStageID == nil {
-		opts.nextStageID = func() string {
-			return "stage-" + randomHexID()
+		opts.nextStageID = func() (string, error) {
+			id, err := uuid.NewRandom()
+			if err != nil {
+				return "", fmt.Errorf("generate draft identifier: %w", err)
+			}
+
+			return id.String(), nil
 		}
 	}
 
-	return &ConfigManager{opts: opts}, nil
+	state := opts.State
+	if state == nil {
+		state = &ConfigManagerState{}
+	}
+
+	return &ConfigManager{opts: opts, ConfigManagerState: state}, nil
 }
 
 // Close releases all staging state (daemon shutdown). No takeover, no save.
 func (m *ConfigManager) Close() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stage = nil
-	m.receipt = nil
+	m.ConfigManagerState.Close()
 }
 
 // ReleaseSession releases the staging and receipt owned by sessionID, after
@@ -161,6 +200,10 @@ func (m *ConfigManager) Close() {
 func (m *ConfigManager) ReleaseSession(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if child := m.sessions[sessionID]; child != nil {
+		child.Close()
+		delete(m.sessions, sessionID)
+	}
 
 	if m.stage != nil && m.stage.owner == sessionID {
 		m.stage = nil
@@ -169,6 +212,66 @@ func (m *ConfigManager) ReleaseSession(sessionID string) {
 	if m.receipt != nil && m.receipt.owner == sessionID {
 		m.receipt = nil
 	}
+}
+
+const (
+	maxConfigDraftSessions = 128
+	maxConfigDraftBytes    = 1 << 20
+)
+
+// sessionManager returns a generation-specific adapter over one Session's
+// state. The parent registry never evicts a Session's unsaved work.
+func (m *ConfigManager) sessionManager(ctx context.Context, create bool) (*ConfigManager, error) {
+	id, err := m.identity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.sessions[id]
+	if state == nil && create {
+		if len(m.sessions) >= maxConfigDraftSessions {
+			return nil, fmt.Errorf("%w: draft capacity reached; end an unused Session before beginning another", ErrConfigNoStaging)
+		}
+		state = &ConfigManagerState{}
+		if m.sessions == nil {
+			m.sessions = make(map[string]*ConfigManagerState)
+		}
+		m.sessions[id] = state
+	}
+	if state == nil {
+		return nil, fmt.Errorf("%w: begin a draft first", ErrConfigNoStaging)
+	}
+
+	return &ConfigManager{opts: m.opts, ConfigManagerState: state}, nil
+}
+
+// ReadSaved returns the current elected file without allocating a draft.
+func (m *ConfigManager) ReadSaved(ctx context.Context) (string, error) {
+	if _, err := m.identity(ctx); err != nil {
+		return "", err
+	}
+	state, err := m.opts.readSource(ctx)
+	if err != nil {
+		return "", wrapUncommittedIO("reading the elected configuration failed", err)
+	}
+	text, _, err := maskLiterals(state.Data)
+	if err != nil {
+		return "", wrapCensusRefusal(err)
+	}
+
+	return marshalJSON(map[string]string{configActionKey: actionRead, "config": m.opts.ElectedPath, "text": string(text)}), nil
+}
+
+// InspectDraft returns the owner's draft without allocating one.
+func (m *ConfigManager) InspectDraft(ctx context.Context) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.checkOwner(ctx); err != nil {
+		return "", err
+	}
+
+	return m.renderStaged("inspect"), nil
 }
 
 // identity resolves the trusted Session identity or fails closed.
@@ -192,7 +295,7 @@ func (m *ConfigManager) checkOwner(ctx context.Context) error {
 		return err
 	}
 	if m.stage == nil {
-		return fmt.Errorf("%w: read the configuration first", ErrConfigNoStaging)
+		return fmt.Errorf("%w: begin a draft first", ErrConfigNoStaging)
 	}
 	if m.stage.owner != id {
 		return ErrConfigStagingBusy
@@ -208,7 +311,7 @@ func (m *ConfigManager) checkMutation(ctx context.Context, stageID string, expec
 		return err
 	}
 	if m.stage.conflicted {
-		return fmt.Errorf("%w: the staged editing base was invalidated by an external change — discard this staging and read again to reapply your intent", ErrConfigInvalidCandidate)
+		return fmt.Errorf("%w: the draft's source changed — inspect the draft and reconcile before saving", ErrConfigInvalidCandidate)
 	}
 
 	return nil
@@ -242,14 +345,18 @@ func (m *ConfigManager) checkStageIdentity(ctx context.Context, stageID string, 
 // stagedView is the owner-facing view of the current staging returned by
 // every successful read.
 type stagedView struct {
-	Action     string           `json:"action"`
-	Config     string           `json:"config"`
-	StageID    string           `json:"stage_id"`
-	Revision   int              `json:"revision"`
-	Text       string           `json:"text"`
-	Dirty      bool             `json:"dirty"`
-	Conflicted bool             `json:"conflicted"`
-	Validation validationStatus `json:"validation"`
+	Action                   string           `json:"action"`
+	Config                   string           `json:"config"`
+	ConfiguredDefaultProfile string           `json:"configured_default_profile,omitempty"`
+	EffectiveProfile         string           `json:"effective_profile,omitempty"`
+	ProfileSource            string           `json:"profile_source,omitempty"`
+	StageID                  string           `json:"stage_id"`
+	Revision                 int              `json:"revision"`
+	Text                     string           `json:"text"`
+	Dirty                    bool             `json:"dirty"`
+	Conflicted               bool             `json:"conflicted"`
+	Validation               validationStatus `json:"validation"`
+	ProposalID               string           `json:"proposal_id,omitempty"`
 }
 
 // Read implements the read action.
@@ -266,7 +373,7 @@ func (m *ConfigManager) Read(ctx context.Context) (string, error) {
 			return "", ErrConfigStagingBusy
 		}
 
-		return m.renderStaged(), nil
+		return m.renderStaged("begin"), nil
 	}
 
 	// Open staging: read the elected file with its source protections. A
@@ -276,12 +383,18 @@ func (m *ConfigManager) Read(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", wrapUncommittedIO("reading the elected configuration failed", err)
 	}
+	if len(state.Data) > maxConfigDraftBytes {
+		return "", fmt.Errorf("%w: configuration exceeds the draft size limit", ErrConfigInvalidCandidate)
+	}
 	staged, literals, err := maskLiterals(state.Data)
 	if err != nil {
 		return "", wrapCensusRefusal(err)
 	}
 
-	stageID := m.opts.nextStageID()
+	stageID, err := m.opts.nextStageID()
+	if err != nil {
+		return "", fmt.Errorf("open config draft: %w", err)
+	}
 	address := id
 	if m.opts.SessionAddress != nil && m.opts.SessionAddress(ctx) != "" {
 		address = m.opts.SessionAddress(ctx)
@@ -304,21 +417,25 @@ func (m *ConfigManager) Read(ctx context.Context) (string, error) {
 		Int("literals_masked", literals).
 		Msg("config staging opened")
 
-	return m.renderStaged(), nil
+	return m.renderStaged("begin"), nil
 }
 
 // renderStaged renders the owner's current staged view.
-func (m *ConfigManager) renderStaged() string {
+func (m *ConfigManager) renderStaged(action string) string {
 	st := m.stage
 	view := stagedView{
-		Action:     actionRead,
-		Config:     m.opts.ElectedPath,
-		StageID:    st.stageID,
-		Revision:   st.revision,
-		Text:       string(st.text),
-		Dirty:      st.dirty,
-		Conflicted: st.conflicted,
-		Validation: validationStatus{Complete: st.validation.ran && !st.conflicted},
+		Action:                   action,
+		Config:                   m.opts.ElectedPath,
+		ConfiguredDefaultProfile: m.opts.ConfiguredDefaultProfile,
+		EffectiveProfile:         m.opts.EffectiveProfileName,
+		ProfileSource:            m.opts.EffectiveProfileSource,
+		StageID:                  st.stageID,
+		Revision:                 st.revision,
+		Text:                     string(st.text),
+		Dirty:                    st.dirty,
+		Conflicted:               st.conflicted,
+		Validation:               validationStatus{Complete: st.validation.ran && !st.conflicted},
+		ProposalID:               st.proposalID,
 	}
 
 	return marshalJSON(view)
@@ -335,6 +452,8 @@ type updateResult struct {
 	Validation      validationStatus `json:"validation"`
 	ValidationError string           `json:"validation_error,omitempty"`
 	Complete        bool             `json:"-"`
+	ProposalID      string           `json:"proposal_id,omitempty"`
+	Instruction     string           `json:"instruction,omitempty"`
 }
 
 // editPair is one sequential exact-match replacement of a batch.
@@ -354,7 +473,7 @@ func (m *ConfigManager) Update(ctx context.Context, stageID string, expectedRevi
 		return "", err
 	}
 	if len(edits) == 0 {
-		return "", fmt.Errorf("%w: the update carries no edits — use discard, or read to re-inspect", ErrConfigInvalidEdit)
+		return "", fmt.Errorf("%w: the update carries no edits — use discard, or inspect the draft", ErrConfigInvalidEdit)
 	}
 
 	current := m.stage.text
@@ -374,10 +493,10 @@ func (m *ConfigManager) Update(ctx context.Context, stageID string, expectedRevi
 		default:
 			hint := "matches multiple locations; add surrounding context to make it unique"
 			if count == 0 {
-				hint = "does not appear in the staged text; re-read the staging and adjust"
+				hint = "does not appear in the staged text; inspect the draft and adjust"
 			}
 
-			return "", fmt.Errorf("%w: edit %d old_text %s", ErrConfigInvalidEdit, idx, hint)
+			return "", fmt.Errorf("%w: %w: edit %d old_text %s", ErrConfigInvalidEdit, ErrConfigExactMatch, idx, hint)
 		}
 	}
 
@@ -393,6 +512,16 @@ func (m *ConfigManager) Update(ctx context.Context, stageID string, expectedRevi
 		}
 
 		return marshalJSON(result), nil
+	}
+	if len(working) > maxConfigDraftBytes {
+		return "", fmt.Errorf("%w: draft exceeds the size limit", ErrConfigInvalidEdit)
+	}
+	addedBytes := 0
+	for _, edit := range edits {
+		addedBytes += len(edit.OldText) + len(edit.NewText)
+	}
+	if m.stage.editBytes+addedBytes > 2*maxConfigDraftBytes || len(m.stage.edits)+len(edits) > 512 {
+		return "", fmt.Errorf("%w: draft edit history limit reached; save or discard this draft", ErrConfigInvalidEdit)
 	}
 
 	if paths, litErr := newLiterals(working); litErr != nil {
@@ -417,10 +546,24 @@ func (m *ConfigManager) Update(ctx context.Context, stageID string, expectedRevi
 		return "", fmt.Errorf("%w: %w", ErrConfigInvalidCandidate, valErr)
 	}
 
+	proposalID := m.stage.proposalID
+	if proposalID != "" {
+		var err error
+		proposalID, err = newProposalID()
+		if err != nil {
+			return "", err
+		}
+	}
 	m.stage.text = append([]byte(nil), working...)
 	m.stage.revision++
 	m.stage.dirty = true
 	m.stage.validation = candidateValidationRef{ran: true}
+	m.stage.edits = append(m.stage.edits, edits...)
+	m.stage.editBytes += addedBytes
+	if m.stage.proposalID != "" {
+		m.stage.proposalID = proposalID
+		m.stage.confirmed = false
+	}
 
 	result := updateResult{
 		Action:     actionUpdate,
@@ -429,6 +572,11 @@ func (m *ConfigManager) Update(ctx context.Context, stageID string, expectedRevi
 		Revision:   m.stage.revision,
 		Diff:       unifiedDiff(current, working),
 		Validation: validationStatus{Complete: true},
+		ProposalID: m.stage.proposalID,
+	}
+	if result.ProposalID != "" {
+		result.Diff = unifiedDiff(m.stage.source.Data, working)
+		result.Instruction = "Show the revised diff and ask the user to send /confirm-config " + result.ProposalID + " in a new message before saving."
 	}
 
 	return marshalJSON(result), nil
@@ -484,7 +632,7 @@ func (m *ConfigManager) Save(ctx context.Context, stageID string, expectedRevisi
 	defer m.mu.Unlock()
 
 	// Completed-save replay first: no staging interaction, no second commit.
-	if m.stage == nil && m.receipt != nil && m.receipt.owner == id &&
+	if m.receipt != nil && m.receipt.owner == id &&
 		m.receipt.stageID == stageID && m.receipt.expectedRevision == expectedRevision {
 		return m.receipt.result, nil
 	}
@@ -494,6 +642,9 @@ func (m *ConfigManager) Save(ctx context.Context, stageID string, expectedRevisi
 		// already refuses before any receipt comparison.
 
 		return "", err
+	}
+	if m.stage.proposalID != "" && !m.stage.confirmed {
+		return "", fmt.Errorf("%w: review the reconciled proposal and send /confirm-config %s in a new user message before saving", ErrConfigInvalidCandidate, m.stage.proposalID)
 	}
 
 	// A literal credential (masked or not) must be adopted before saving:
@@ -517,11 +668,12 @@ func (m *ConfigManager) Save(ctx context.Context, stageID string, expectedRevisi
 		if err != nil {
 			return "", wrapUncommittedIO("verifying the elected configuration failed", err)
 		}
-		if !bytesEqual(current.Data, m.stage.source.Data) || current.Mode != m.stage.source.Mode {
+		if !m.stage.source.Matches(current) {
 			m.stage.conflicted = true
+			m.stage.confirmed = false
 
 			return "", fmt.Errorf(
-				"%w: the elected configuration changed since the staging was opened — discard this staging and read again to reapply your intent",
+				"%w: the elected configuration changed since the draft was opened — inspect and reconcile the draft",
 				config.ErrConfigSourceConflict,
 			)
 		}
@@ -533,7 +685,7 @@ func (m *ConfigManager) Save(ctx context.Context, stageID string, expectedRevisi
 			Config:      m.opts.ElectedPath,
 			Outcome:     "no_changes",
 			Revision:    revision,
-			Instruction: "No changes to save: the staged state matches the elected configuration. Re-run read to open fresh staging.",
+			Instruction: "No changes to save: the staged state matches the elected configuration. Begin a new draft to make changes.",
 		}))
 
 		return m.receipt.result, nil
@@ -549,9 +701,10 @@ func (m *ConfigManager) Save(ctx context.Context, stageID string, expectedRevisi
 		report.Warnings = append(report.Warnings, safeCommitWarning(commitErr))
 	case errors.Is(commitErr, config.ErrConfigSourceConflict):
 		m.stage.conflicted = true
+		m.stage.confirmed = false
 
 		return "", fmt.Errorf(
-			"%w: the elected configuration changed since the staging was opened (identity/mode/bytes) — discard this staging and read again to reapply your intent",
+			"%w: the elected configuration changed since the draft was opened (identity/mode/bytes) — inspect and reconcile the draft",
 			config.ErrConfigSourceConflict,
 		)
 	case isTransientCommit(commitErr):
@@ -560,7 +713,7 @@ func (m *ConfigManager) Save(ctx context.Context, stageID string, expectedRevisi
 
 		return "", fmt.Errorf("the configuration was NOT saved (retry is safe against the same revision): %w", commitErr)
 	default:
-		return "", fmt.Errorf("saving the configuration failed: %w", commitErr)
+		return "", fmt.Errorf("configuration save outcome is unknown; inspect the saved configuration before retrying: %w", commitErr)
 	}
 
 	stageIDStr := m.stage.stageID
@@ -632,10 +785,10 @@ func (m *ConfigManager) Discard(ctx context.Context, stageID string, expectedRev
 	m.opts.Logger.Info().Str("session", id).Str("stage_id", stageID).Msg("config staging discarded")
 
 	return marshalJSON(map[string]string{
-		"action":      "discard",
-		"stage_id":    stageID,
-		"outcome":     "discarded",
-		"instruction": "Staging released without touching the elected configuration. Run read to open fresh staging.",
+		configActionKey: "discard",
+		"stage_id":      stageID,
+		"outcome":       "discarded",
+		"instruction":   "Draft released without touching the elected configuration. Begin a new draft to make changes.",
 	}), nil
 }
 

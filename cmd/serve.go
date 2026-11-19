@@ -18,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"github.com/marco-rozz/ready/internal/activity"
 	"github.com/marco-rozz/ready/internal/agent"
 	"github.com/marco-rozz/ready/internal/agent/toolnames"
 	"github.com/marco-rozz/ready/internal/bootstrap"
@@ -80,7 +81,7 @@ type turnExecutor interface {
 	ExecuteTurn(
 		ctx context.Context,
 		sessionKey string,
-		assemble func(llm.PromptLayout) []*schema.Message,
+		assemble func(llm.PromptLayout, string) []*schema.Message,
 		resumeReady func() bool,
 		onChunk func(string),
 	) (agent.TurnOutcome, error)
@@ -101,11 +102,11 @@ var _ turnExecutor = (*plainRunnerExec)(nil)
 func (p *plainRunnerExec) ExecuteTurn(
 	ctx context.Context,
 	sessionKey string,
-	assemble func(llm.PromptLayout) []*schema.Message,
+	assemble func(llm.PromptLayout, string) []*schema.Message,
 	_ func() bool,
 	onChunk func(string),
 ) (agent.TurnOutcome, error) {
-	return p.runner.RunMessagesStreaming(ctx, sessionKey, assemble(p.layout), onChunk)
+	return p.runner.RunMessagesStreaming(ctx, sessionKey, assemble(p.layout, ""), onChunk)
 }
 
 // agentRegistry holds the turn executor shared by all channels. In
@@ -224,7 +225,9 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	// context or out to the user.
 	sanitizer := privacy.FromRun(cfg.RuntimeHome, nil)
 
-	shell := &serveShell{ctx: ctx, opts: opts, resolution: resolution, rootLogger: rootLogger, logger: logger}
+	configState := &tools.ConfigManagerState{}
+	defer configState.Close()
+	shell := &serveShell{ctx: ctx, opts: opts, resolution: resolution, rootLogger: rootLogger, logger: logger, configState: configState}
 
 	// First Runtime Generation: LLM orchestrator + runners, MCP, Twin, skills,
 	// tools, bootstrapper. A boot failure here is fatal; later generations
@@ -280,11 +283,12 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	shell.rt = rt
 
 	coord := &reloadCoordinator{
-		rt:      rt,
-		build:   shell.reloadBuild,
-		grace:   dispatcherWaitGrace,
-		logger:  rootLogger.With().Str("component", "reload").Logger(),
-		current: gen,
+		rt:        rt,
+		build:     shell.reloadBuild,
+		grace:     dispatcherWaitGrace,
+		logger:    rootLogger.With().Str("component", "reload").Logger(),
+		current:   gen,
+		daemonCtx: ctx,
 	}
 	coord.afterSwap = func(g *runtimeGeneration, fromTUI bool) { shell.afterSwap(g, fromTUI) }
 	shell.coord = coord
@@ -706,6 +710,7 @@ func buildTools(
 	haTwin *hatwin.Twin,
 	rootLogger zerolog.Logger,
 	profileOverrides config.ProfileOverrideInputs,
+	sharedState ...*tools.ConfigManagerState,
 ) ([]tool.BaseTool, homemcp.Runtime, []profile.BlockedTool, *tools.ConfigManager) {
 	logger := rootLogger.With().Str("component", "tools").Logger()
 	decisionLog := cfg.Logging.ProfileDecisions
@@ -717,9 +722,12 @@ func buildTools(
 	var cfgMgr *tools.ConfigManager
 	{
 		mgrOpts := tools.ConfigManagerOptions{
-			ElectedPath:      cfg.ElectedPath,
-			ProfileOverrides: profileOverrides,
-			ServeLocalChecks: validateServeLocalConfig(ServeOptions{Profile: profileOverrides.Flag}),
+			ElectedPath:              cfg.ElectedPath,
+			ConfiguredDefaultProfile: cfg.DefaultProfile,
+			EffectiveProfileName:     activeProfileName,
+			EffectiveProfileSource:   profileSource(profileOverrides),
+			ProfileOverrides:         profileOverrides,
+			ServeLocalChecks:         validateServeLocalConfig(ServeOptions{Profile: profileOverrides.Flag}),
 			SessionIdentity: func(ctx context.Context) (string, bool) {
 				id, ok := ctx.Value(toolSessionKeyCtxKey{}).(string)
 				if !ok {
@@ -754,6 +762,9 @@ func buildTools(
 				}
 			},
 			Logger: rootLogger.With().Str("component", "config-manager").Logger(),
+		}
+		if len(sharedState) > 0 {
+			mgrOpts.State = sharedState[0]
 		}
 		var err error
 		if cfgMgr, err = tools.NewConfigManager(mgrOpts); err != nil {
@@ -799,6 +810,17 @@ func buildTools(
 	}
 
 	return wrapWithErrorDigest(agentTools, rootLogger), runtime, blocked, cfgMgr
+}
+
+func profileSource(overrides config.ProfileOverrideInputs) string {
+	if overrides.Flag != "" {
+		return "flag"
+	}
+	if overrides.Env != "" {
+		return "environment"
+	}
+
+	return "configuration"
 }
 
 // wrapWithErrorDigest wraps all tools with the error-digestion layer
@@ -1406,6 +1428,12 @@ const (
 // Only when nothing ran does the error decide between an HTTP 400 request
 // rejection (a configuration/compatibility bug, not an outage) and an outage.
 func terminalMessageFor(outcome agent.TurnOutcome, runErr error) string {
+	if errors.Is(runErr, errdigest.ErrGuardEditRetries) {
+		return "The attempted configuration edit was not applied after repeated corrections. Any earlier draft changes remain unsaved; inspect the draft before continuing."
+	}
+	if errors.Is(runErr, errdigest.ErrGuardRepeated) || errors.Is(runErr, errdigest.ErrGuardCapacity) {
+		return "The turn stopped because a tool could not make progress. Some earlier actions may have completed; check their state before retrying."
+	}
 	if outcome.ToolCallStarted || outcome.ToolCallCompleted || outcome.ContentDelivered {
 		return msgIncompleteResponse
 	}
@@ -1583,6 +1611,9 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	// before the history is loaded; everything conversational below (history,
 	// agentskills session, usage) is keyed by the Session ID.
 	cur, history := rt.sessions.History(ctx, addr)
+	if rt.cfgMgr != nil && rt.configManagerAllowed {
+		rt.cfgMgr.ConfirmConfigInput(ctx, cur.ID, msg.Content)
+	}
 
 	// criticalities-remediation (M14): dispose the streaming support loops
 	// even when the turn panics — cleanup/terminal may never run, and the
@@ -1608,6 +1639,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	defer stopTyping()
 
 	msgCtx := skills.WithSessionID(ctx, agentSkillsSID)
+	msgCtx = errdigest.WithTurnGuard(msgCtx, 256)
 	// Carry the Session ID into tools (error-digestion logging).
 	msgCtx = context.WithValue(msgCtx, toolSessionKeyCtxKey{}, cur.ID)
 	msgCtx = context.WithValue(msgCtx, toolSessionAddressCtxKey{}, string(addr))
@@ -1623,6 +1655,27 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		msg.Metadata["request_type"] != string(protocol.RequestTypeExec) &&
 		zch.IsNumericLoopback() {
 		msgCtx = context.WithValue(msgCtx, toolLoopbackTUICtxKey{}, true)
+	}
+	// Activity is scoped to the authenticated ZMQ request; other turns and probes have no tracker.
+	var activityTracker *activity.Tracker
+	if zch := getZMQChannel(rt.mgr, msg.ChannelName); zch != nil && msg.Metadata["transport"] == "zmq" && msg.Metadata[zmqcli.RequestID] != "" {
+		sender := zch.ActivitySender(msg.Metadata[zmqcli.ConnectionID], msg.Metadata[zmqcli.RequestID])
+		if sender != nil {
+			activityTracker = activity.New()
+			go func() {
+				for snapshot := range activityTracker.Updates() {
+					event := protocol.Activity{State: "thinking", Sequence: snapshot.Sequence}
+					if snapshot.ToolName != "" {
+						event.State = "using_tool"
+						event.ToolName = snapshot.ToolName
+						n := snapshot.AdditionalTools
+						event.AdditionalTools = &n
+					}
+					_ = sender(event)
+				}
+			}()
+			defer activityTracker.Close()
+		}
 	}
 	// tui-usage-observability: every LLM call under this turn context —
 	// ReAct iterations, failover attempts, formatter post-step — attributes
@@ -1641,6 +1694,9 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	// Wrap the agent call with a timeout so a hanging LLM cannot block the loop.
 	runCtx, runCancel := context.WithTimeout(msgCtx, agentRunTimeout)
 	defer runCancel()
+	if activityTracker != nil {
+		runCtx = activity.WithTracker(runCtx, activityTracker)
+	}
 
 	// The turn context (turnID,
 	// timestamp, reminder/directive) is rendered ONCE per turn and recorded
@@ -1672,19 +1728,22 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	// compaction.
 	omit, extraSkills := rt.turnStartGuard(runCtx, cur, history, parts, agentSkillsSID, msg.ChannelName)
 	lead := rt.leadMessage(runCtx, history, extraSkills)
-	prefix = withLead(prefix, lead)
-
 	// Per-attempt assembly:
 	// the closure re-reads the LIVE history each attempt, so a same-candidate
 	// retry or a failover continues the ReAct loop from the last complete
 	// tool-call group recorded by the failed attempt — no tool re-executes.
-	assemble := func(candidateLayout llm.PromptLayout) []*schema.Message {
+	assemble := func(candidateLayout llm.PromptLayout, ref string) []*schema.Message {
+		attemptPrefix := append([]*schema.Message(nil), prefix...)
+		if block := runtimePromptContext("current_llm_model", ref); block != "" {
+			attemptPrefix = append(attemptPrefix, schema.SystemMessage(block))
+		}
+		attemptPrefix = withLead(attemptPrefix, lead)
 		view := persistence.OmitOldestTurns(history.Messages(), omit)
 		if candidateLayout == llm.LayoutTailDynamic {
-			return assembleTailDynamic(prefix, view)
+			return assembleTailDynamic(attemptPrefix, view)
 		}
 
-		return assembleHeadSafe(prefix, view, headTurnContext)
+		return assembleHeadSafe(attemptPrefix, view, headTurnContext)
 	}
 
 	// Transcript sink: every materialized assistant tool-call message
@@ -1722,6 +1781,9 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	// production (per-attempt candidate selection, attempt budget, chain
 	// walking), or the plain-runner adapter in tests.
 	outcome, runErr := rt.agentReg.exec.ExecuteTurn(runCtx, sKey, assemble, resumeReady, onChunk)
+	if activityTracker != nil {
+		activityTracker.Close()
+	}
 	stopTyping()
 
 	// A configuration save committed during this Turn: on a loopback TUI the

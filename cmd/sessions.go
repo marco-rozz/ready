@@ -17,6 +17,7 @@ import (
 	"github.com/marco-rozz/ready/internal/bootstrap"
 	"github.com/marco-rozz/ready/internal/channel"
 	"github.com/marco-rozz/ready/internal/channel/cli"
+	"github.com/marco-rozz/ready/internal/channel/zmqcli"
 	"github.com/marco-rozz/ready/internal/compaction"
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/formatter"
@@ -231,20 +232,24 @@ func usageDelta(before, after *usage.Totals) persistence.UsageRecord {
 type sessionRuntime struct {
 	genMu sync.RWMutex
 
-	mgr          *channel.Manager
-	agentReg     *agentRegistry
-	fmtr         *formatter.Formatter
-	reg          formatterRegistry
-	bootstrapper *bootstrap.Bootstrapper
-	bootstrapCfg map[string][]string
-	skillsMgr    *skills.Manager
-	skillCache   formatter.ContentLoader
-	agentTools   []tool.BaseTool
-	hist         *historyStore
-	sessions     *session.Manager
-	usageStore   *usage.Store
-	sanitizer    *privacy.Sanitizer
-	logger       zerolog.Logger
+	mgr      *channel.Manager
+	agentReg *agentRegistry
+	// activeProfileName is copied from the generation under genMu and is used
+	// only for informational prompt context. Tool authorization remains owned
+	// by the generation's already-gated tool catalog.
+	activeProfileName string
+	fmtr              *formatter.Formatter
+	reg               formatterRegistry
+	bootstrapper      *bootstrap.Bootstrapper
+	bootstrapCfg      map[string][]string
+	skillsMgr         *skills.Manager
+	skillCache        formatter.ContentLoader
+	agentTools        []tool.BaseTool
+	hist              *historyStore
+	sessions          *session.Manager
+	usageStore        *usage.Store
+	sanitizer         *privacy.Sanitizer
+	logger            zerolog.Logger
 
 	// resets maps a channel name to its effective reset rule (zero rule =
 	// never reset).
@@ -260,7 +265,8 @@ type sessionRuntime struct {
 	toolChars         atomic.Int64
 
 	// cfgMgr is the current generation's config-manager (nil when disabled).
-	cfgMgr *tools.ConfigManager
+	cfgMgr               *tools.ConfigManager
+	configManagerAllowed bool
 	// liveOrch is the current generation's orchestrator, readable without the
 	// generation lock (reply/usage hooks run inside workers that hold it).
 	liveOrch atomic.Pointer[orchestrator.Orchestrator]
@@ -617,7 +623,51 @@ type promptParts struct {
 	staticShell   string
 	dynamic       string
 	skillsMeta    string // redacted
+	profile       string // current active profile, informational only
+	channel       string
+	modelEstimate string
 	toolChars     int
+}
+
+// activeProfilePromptContext renders generation-scoped profile state as data
+// in a stable system section. JSON quoting prevents a configured name from
+// changing the instruction structure while keeping the representation
+// deterministic for the same effective name.
+func activeProfilePromptContext(name string) string {
+	if name == "" {
+		return ""
+	}
+
+	quoted, err := json.Marshal(name)
+	if err != nil {
+		return ""
+	}
+
+	return "<current_active_profile>\n" +
+		"The runtime-resolved current active profile is " + string(quoted) + ". " +
+		"The configuration field default_profile is only a fallback and is not necessarily active. " +
+		"Report this runtime profile when asked; do not infer permissions from its name. Tool policy is authoritative.\n" +
+		"</current_active_profile>"
+}
+
+// runtimePromptContext renders current runtime values as safely quoted data.
+func runtimePromptContext(tag, value string) string {
+	if value == "" {
+		return ""
+	}
+	quoted, _ := json.Marshal(value)
+
+	return "<" + tag + ">\nThe current runtime value is " + string(quoted) + ". Report this current value when asked; it supersedes historical statements.\n</" + tag + ">"
+}
+
+func (rt *sessionRuntime) effectiveChannel(name string) string {
+	if rt.mgr != nil {
+		if _, ok := rt.mgr.Channel(name).(*zmqcli.Channel); ok {
+			return "zmqcli"
+		}
+	}
+
+	return name
 }
 
 // collectPromptParts gathers the stable-prefix sections of a Session's
@@ -638,6 +688,16 @@ func (rt *sessionRuntime) collectPromptParts(ctx context.Context, sessionID stri
 	}
 
 	p.dynamic = rt.bootstrapper.DynamicContent(ctx, sessionID)
+	p.profile = activeProfilePromptContext(rt.activeProfileName)
+	p.channel = runtimePromptContext("current_channel", rt.effectiveChannel(channelName))
+	if rt.agentReg != nil && rt.agentReg.orch != nil {
+		for _, candidate := range rt.agentReg.orch.Snapshot().Candidates {
+			block := runtimePromptContext("current_llm_model", candidate.Ref)
+			if len(block) > len(p.modelEstimate) {
+				p.modelEstimate = block
+			}
+		}
+	}
 
 	if agentSkillsSID != "" {
 		if meta, err := rt.skillsMgr.GetMetadataPrompt(ctx, agentSkillsSID); err == nil {
@@ -680,13 +740,14 @@ func (rt *sessionRuntime) toolCatalogChars(ctx context.Context) int {
 	return total
 }
 
-// prefixMessages builds the stable prefix: 1. formatter inline wrap
-// (position 1), 2. static shell, 3. dynamic assets, 4. skills metadata —
-// byte-identical across Turns and independent of the prompt layout.
+// prefixMessages builds the stable prefix: formatter inline wrap, static
+// shell, dynamic assets, skills metadata, and the informational current
+// profile context. All sections are byte-identical across Turns and
+// independent of the prompt layout.
 func (rt *sessionRuntime) prefixMessages(ctx context.Context, p promptParts, channelName string) []*schema.Message {
 	var prefix []*schema.Message
 
-	for _, section := range []string{p.staticShell, p.dynamic, p.skillsMeta} {
+	for _, section := range []string{p.staticShell, p.dynamic, p.skillsMeta, p.profile, p.channel} {
 		if section != "" {
 			prefix = append(prefix, schema.SystemMessage(section))
 		}
@@ -711,6 +772,9 @@ func promptSections(p promptParts, lead string, history []persistence.HistoryMes
 	add("static shell", len(p.staticShell))
 	add("dynamic assets", len(p.dynamic))
 	add("skills metadata", len(p.skillsMeta))
+	add("active profile", len(p.profile))
+	add("channel", len(p.channel))
+	add("model context (conservative candidate estimate)", len(p.modelEstimate))
 	add("tool catalog", p.toolChars)
 	add("compaction summary", len(lead))
 

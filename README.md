@@ -310,8 +310,7 @@ command. Values are entered in the authenticated ZMQ TUI under a profile
 that exposes `config-manager` (e.g. `--profile admin`) on a numeric loopback listener (use SSH forwarding for
 remote access; the editor opens by itself at the end of a turn that left
 something pending), or offline with `ready secrets set <name>`. Select the admin
-profile on `ready serve`, not on `ready chat`. The ZMQ protocol version is 3
-and must match on both ends.
+profile on `ready serve`, not on `ready chat`. The ZMQ protocol version is 4 and must match exactly on both ends. Upgrade the daemon and all chat clients together; rollback likewise requires matching older binaries on both ends. No data migration is needed.
 
 The RED editor masks the input (bullets and a character count); **Ctrl+R**
 shows the current field, a value with leading/trailing whitespace is flagged
@@ -394,6 +393,7 @@ launcher environment accordingly.
 - **`ready chat [--agent-dir <directory>] [--address <addr>] [--token T] [--token-file F] [--exec MSG] [--reply-timeout 900s] [--raw]`**
   — the terminal client (Bubble Tea TUI, markdown rendering, usage and model
   status in the status line; `/session`, `/context` and `/secrets` are reserved commands).
+  The input border shows waiting, active READY-managed tools, streaming or reload status; quick tool calls may be too brief to read. Tool activity exposes names and parallel counts only, not arguments or results. Provider-hosted tools outside READY are not shown, and a silent long-running tool can still reach the reply timeout. An activity frame already being written may precede the final reply; if its bounded write fails, the connection closes to protect framing and the reply may not arrive. `/context` reports the active profile, channel, global model state and estimated prompt sections. Raw, piped and `--exec` output remains undecorated.
   Start the server with `serve --profile admin` to manage configuration;
   the chat client has no profile flag. With no token flags, chat reads the
   selected agent's chat secret itself (read-only, no locks: `--agent-dir`,
@@ -477,7 +477,14 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
   in-process runtime reload (no restart; only `logging.*` needs one). A
   reference without a value is completed in the
   admin TUI's secret editor or with `ready secrets set`; the model never sees
-  or writes a value.
+  or writes a value. Sessions can edit independent drafts; reading the saved
+  configuration does not reserve one. If the file changes, the tool preserves
+  the draft and prepares a conservative reconciliation for review. Confirm a
+  reconciled proposal by sending its exact `/confirm-config <proposal-id>`
+  command in a new message. Overlapping changes require user direction. The
+  advisory commit lock coordinates cooperating writers; an editor that ignores
+  it can race the final source check. Drafts are in memory, but tool inputs and
+  results can remain in Session transcripts.
 
 ## Secrets
 

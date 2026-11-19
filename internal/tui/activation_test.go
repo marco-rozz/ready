@@ -10,8 +10,8 @@ import (
 )
 
 func listReply(m *Model, secrets []protocol.PendingSecret, creds []protocol.CredentialInfo) {
-	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, SecretEntry: &protocol.SecretEntryResponse{
-		Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed, Secrets: secrets, Credentials: creds,
+	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, Secrets: secrets, Credentials: creds, SecretEntry: &protocol.SecretEntryResponse{
+		Action: protocol.SecretEntryActionList, Outcome: protocol.SecretEntryOutcomeListed,
 	}})
 }
 
@@ -179,7 +179,7 @@ func TestActivation_StartupWithSkippedItemsDoesNotReload(t *testing.T) {
 
 func TestActivation_OnDemandRotationTriggersReload(t *testing.T) {
 	m, _ := steeringTestModel(t)
-	all := []protocol.PendingSecret{{Name: "telegram_token", Fields: []string{"channels.telegram.token"}, State: protocol.SecretStateSet}}
+	all := []protocol.PendingSecret{{Name: "telegram_token", Fields: [][]string{{"channels.telegram.token"}}, State: protocol.SecretStateSet}}
 	m.secretAll = all
 	_ = m.secretsCommand([]string{"set", "telegram_token"})
 	m.handleReply(protocol.Response{RequestID: m.secretRequestID, Status: protocol.ResponseStatusOK, SecretEntry: &protocol.SecretEntryResponse{

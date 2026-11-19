@@ -244,7 +244,7 @@ func (c *Config) SecretStoreReferences() []secretstore.Reference {
 	refs := c.SecretReferences()
 	out := make([]secretstore.Reference, 0, len(refs))
 	for _, r := range refs {
-		item := secretstore.Reference{Field: r.DottedPath()}
+		item := secretstore.Reference{Field: r.DottedPath(), Path: append([]string(nil), r.Path...)}
 		switch r.Ref.Kind {
 		case SecretRefName:
 			item.Name = r.Ref.Name

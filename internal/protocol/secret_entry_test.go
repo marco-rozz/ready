@@ -11,6 +11,9 @@ func TestSecretEntryMalformedCanaryNeverAppearsInDiagnostics(t *testing.T) {
 	const canary = "unique-secret-canary-ü-value"
 	base := `{"connection_id":"c","type":"secret_entry","timestamp":"2026-10-26T12:00:00Z","request_id":"r","secret_entry":{"action":"submit","operation_id":"o","name":"n","value":"` + canary + `"}}`
 	for _, data := range []string{
+		`{"status":"ok","pending_secrets":[]}`,
+		`{"status":"ok","secret_entry":{"action":"list","outcome":"listed","secrets":[]}}`,
+		`{"status":"ok","secret_entry":{"action":"submit","outcome":"refused","rule_code":"canary"}}`,
 		strings.Replace(base, `"submit"`, `"`+canary+`"`, 1),
 		strings.Replace(base, `"value":`, `"`+canary+`":`, 1),
 		strings.Replace(base, `"value":"`+canary+`"`, `"value":{"`+canary+`":true}`, 1),
@@ -40,7 +43,7 @@ func TestSecretEntryResponseStrictShapeAndAuthoritativeEmpty(t *testing.T) {
 	for _, available := range []bool{false, true} {
 		resp := Response{Status: ResponseStatusOK}
 		if available {
-			resp.PendingSecrets = []PendingSecret{}
+			resp.Secrets = []PendingSecret{}
 		}
 		data, err := Marshal(resp)
 		if err != nil {
@@ -50,11 +53,11 @@ func TestSecretEntryResponseStrictShapeAndAuthoritativeEmpty(t *testing.T) {
 		if err = json.Unmarshal(data, &raw); err != nil {
 			t.Fatal(err)
 		}
-		_, present := raw["pending_secrets"]
+		_, present := raw["secrets"]
 		if present != available {
 			t.Fatalf("pending omission lost authority: %s", data)
 		}
-		if available && string(raw["pending_secrets"]) != "[]" {
+		if available && string(raw["secrets"]) != "[]" {
 			t.Fatalf("empty pending set=%s", data)
 		}
 	}

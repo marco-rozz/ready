@@ -112,6 +112,11 @@ type oauthTarget struct {
 
 func (t oauthTarget) String() string { return string(t.Kind) + ":" + t.Name }
 
+// LoginLabel is the human-readable config identity shown before starting an
+// interactive login. Dots keep the namespace visually separate from the
+// target syntax accepted by the CLI (mcp:<name> / llm:<name>).
+func (t oauthTarget) LoginLabel() string { return string(t.Kind) + "." + t.Name }
+
 // validateLoginModes rejects combinations of --status, --forget and
 // --device-code that cannot run together (and a --forget without a target).
 func validateLoginModes(status, forget, deviceCode bool, requested string) error {
@@ -572,6 +577,7 @@ func runForgetTarget(ctx context.Context, mcpStore oauth.Store, cfg *config.Conf
 func runOAuthTargets(ctx context.Context, cfg *config.Config, mcpStore oauth.Store, targets []oauthTarget, deviceCode bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	var firstErr error
 	for _, target := range targets {
+		_, _ = fmt.Fprintf(stdout, "logging in to %s\n", target.LoginLabel())
 		err := runSingleOAuthTarget(ctx, cfg, mcpStore, target, deviceCode, stdin, stdout)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "%s: %v\n", target.String(), err)

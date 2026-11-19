@@ -10,7 +10,7 @@ import (
 	"github.com/marco-rozz/ready/internal/config"
 )
 
-// randomHexID yields a fresh random identifier for staging allocations.
+// randomHexID yields a fresh random identifier for secret-entry operations.
 func randomHexID() string {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {

@@ -93,8 +93,8 @@ func TestVersionResponseFieldRoundTrip(t *testing.T) {
 }
 
 func TestErrorCodeConstants(t *testing.T) {
-	if Version != 3 {
-		t.Fatalf("oauth_login and runtime_reload are protocol 3, got %d", Version)
+	if Version != 4 {
+		t.Fatalf("activity is protocol 4, got %d", Version)
 	}
 	if ErrorCodeProtocolMismatch != "protocol_mismatch" {
 		t.Fatalf("unexpected mismatch code %q", ErrorCodeProtocolMismatch)

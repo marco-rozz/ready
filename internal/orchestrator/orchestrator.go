@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/marco-rozz/ready/internal/agent"
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/errdigest"
 	"github.com/marco-rozz/ready/internal/llm"
 	"github.com/marco-rozz/ready/internal/usage"
 	"github.com/rs/zerolog"
@@ -238,7 +239,7 @@ type TurnRequest struct {
 	// SessionKey is the dispatcher's partitioned session key ("cli",
 	// "telegram-<chat_id>"), forwarded verbatim to every attempt's runner.
 	SessionKey  string
-	Assemble    func(layout llm.PromptLayout) []*schema.Message
+	Assemble    func(layout llm.PromptLayout, ref string) []*schema.Message
 	ResumeReady func() bool
 }
 
@@ -277,7 +278,7 @@ func mergeAttempt(acc *agent.TurnOutcome, outcome agent.TurnOutcome) agent.TurnO
 func (o *Orchestrator) ExecuteTurn(
 	ctx context.Context,
 	sessionKey string,
-	assemble func(llm.PromptLayout) []*schema.Message,
+	assemble func(llm.PromptLayout, string) []*schema.Message,
 	resumeReady func() bool,
 	onChunk func(string),
 ) (agent.TurnOutcome, error) {
@@ -332,7 +333,7 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 				Int("attempt", attempt+1).
 				Msg("LLM candidate turn attempt")
 
-			conversation := req.Assemble(cand.Layout)
+			conversation := req.Assemble(cand.Layout, cand.Ref)
 			outcome, err := o.attemptRunner(candidateCtx, cand, req.SessionKey, conversation, onChunk)
 			outcome = mergeAttempt(&acc, outcome)
 			if err == nil {
@@ -343,6 +344,11 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 			}
 
 			lastErr, lastOutcome = err, outcome
+			if errors.Is(err, errdigest.ErrGuardRepeated) || errors.Is(err, errdigest.ErrGuardCapacity) || errors.Is(err, errdigest.ErrGuardEditRetries) {
+				candidateCancel()
+
+				return outcome, err
+			}
 
 			// Parent cancellation/deadline is a property of the turn, not the
 			// candidate. Never retry, advance, or demote for it.

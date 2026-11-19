@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/marco-rozz/ready/internal/agent"
 	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/errdigest"
 	"github.com/marco-rozz/ready/internal/llm"
 	"github.com/rs/zerolog"
 )
@@ -301,13 +302,34 @@ func okOutcome(text string) agent.TurnOutcome {
 	return agent.TurnOutcome{Reply: text, ContentDelivered: true}
 }
 
-func assembleRecorder(seen *[]llm.PromptLayout, msgs *[][]*schema.Message) func(llm.PromptLayout) []*schema.Message {
-	return func(layout llm.PromptLayout) []*schema.Message {
+func assembleRecorder(seen *[]llm.PromptLayout, msgs *[][]*schema.Message) func(llm.PromptLayout, string) []*schema.Message {
+	return func(layout llm.PromptLayout, _ string) []*schema.Message {
 		*seen = append(*seen, layout)
 		msg := []*schema.Message{schema.SystemMessage("PREFIX"), schema.UserMessage("u")}
 		*msgs = append(*msgs, msg)
 
 		return msg
+	}
+}
+
+func TestRunTurn_AssembleReceivesAttemptReference(t *testing.T) {
+	first := &fakeRunner{steps: []runnerStep{{err: errors.New("error 401: unauthorized")}}}
+	second := &fakeRunner{steps: []runnerStep{{outcome: okOutcome("ok")}}}
+	o := newTestOrch(newFakeClock(),
+		mkCand(testRefA0, "a", "ollama", llm.LayoutTailDynamic, first, nil),
+		mkCand(testRefB1, "b", "chat_completions", llm.LayoutTailDynamic, second, nil),
+	)
+	var refs []string
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(_ llm.PromptLayout, ref string) []*schema.Message {
+		refs = append(refs, ref)
+
+		return []*schema.Message{schema.UserMessage("hi")}
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 || refs[0] != testRefA0 || refs[1] != testRefB1 {
+		t.Fatalf("attempt references = %v", refs)
 	}
 }
 
@@ -327,7 +349,7 @@ func TestRunTurn_ChainExhaustedInOneTurn(t *testing.T) {
 		mkCand(testRefC2, "c", "chat_completions", llm.LayoutTailDynamic, r2, nil),
 	)
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err == nil {
@@ -366,7 +388,7 @@ func TestRunTurn_SecondFallbackServesInSameTurn(t *testing.T) {
 		mkCand(testRefC2, "c", "chat_completions", llm.LayoutTailDynamic, r2, nil),
 	)
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -398,7 +420,7 @@ func TestRunTurn_PromotionOnlyAfterSuccess(t *testing.T) {
 		mkCand(testRefC2, "c", "chat_completions", llm.LayoutTailDynamic, r2, nil),
 	)
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -411,7 +433,7 @@ func TestRunTurn_PromotionOnlyAfterSuccess(t *testing.T) {
 
 	// Next turn: candidates 0 and 1 are cooling, so 2 serves directly.
 	before := r2.callCount()
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -435,7 +457,7 @@ func TestRunTurn_MixedProtocolChainNotFiltered(t *testing.T) {
 		mkCand("resp::m", "resp", "responses", llm.LayoutTailDynamic, rResponses, nil),
 	)
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -460,7 +482,7 @@ func TestRunTurn_NoRetryAfterCompletedToolCall(t *testing.T) {
 		mkCand(testRefB1, "b", "chat_completions", llm.LayoutTailDynamic, r1, nil),
 	)
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err == nil {
@@ -486,7 +508,7 @@ func TestRunTurn_NoRetryAfterToolCallStartedWithoutResult(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err == nil {
@@ -515,7 +537,7 @@ func TestRunTurn_TransientBlipRetriesSameCandidate(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -553,7 +575,7 @@ func TestRunTurn_EmptyCompletionRetriesThenAdvances(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -587,7 +609,7 @@ func TestRunTurn_PermanentFailureSkipsSameCandidateRetry(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("RunTurn() error = %v", err)
@@ -613,7 +635,7 @@ func TestRunTurn_QuotaFailsFastAndSkipsProviderSiblings(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -637,7 +659,7 @@ func TestRunTurn_ZeroRetriesRestoresSingleAttempt(t *testing.T) {
 		Retries:        0,
 	}, zerolog.Nop())
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("RunTurn() error = %v", err)
@@ -663,7 +685,7 @@ func TestRunTurn_NonStreamingRetriesShareCandidateDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if _, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("RunTurn() error = %v", err)
@@ -686,7 +708,7 @@ func TestRunTurn_DeadlineDuringBackoffDoesNotDemote(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, func(string) {})
 	if err == nil {
@@ -716,7 +738,7 @@ func TestRunTurn_ConcurrentDemotionStopsPendingRetry(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+		_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 			return []*schema.Message{schema.UserMessage("hi")}
 		}}, nil)
 		done <- err
@@ -759,7 +781,7 @@ func TestRunTurn_RetriesExhaustedDemotesOnce(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("RunTurn() error = %v", err)
@@ -789,7 +811,7 @@ func TestRunTurn_OuterDeadlineDoesNotDemoteOrAdvance(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, func(string) {})
 	if err == nil {
@@ -814,7 +836,7 @@ func TestRunTurn_NoRetryAfterDeliveredContent(t *testing.T) {
 		mkCand(testRefB1, "b", "chat_completions", llm.LayoutTailDynamic, r1, nil),
 	)
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, func(string) {})
 	if err == nil {
@@ -843,7 +865,7 @@ func TestRunTurn_RequestShape400NoAdvanceNoDemote(t *testing.T) {
 		Clock:          newFakeClock().Now,
 	}, logger)
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err == nil {
@@ -897,7 +919,7 @@ func TestRunTurn_TTFTBudgetSilentCandidate(t *testing.T) {
 		mkCand(testRefB1, "b", "chat_completions", llm.LayoutTailDynamic, r1, nil),
 	)
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, func(string) {})
 	if err != nil {
@@ -926,7 +948,7 @@ func TestRunTurn_SlowButWorkingNotDemoted(t *testing.T) {
 		mkCand(testRefB1, "b", "chat_completions", llm.LayoutTailDynamic, r1, nil),
 	)
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, func(string) {})
 	if err != nil {
@@ -1027,7 +1049,7 @@ func TestRunTurn_SeventeenToolIterationsDisarmBudgetWithThoughtTap(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	started := time.Now()
-	outcome, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("run the sequence")}
 	}}, func(string) {})
 	if err != nil {
@@ -1082,7 +1104,7 @@ func TestRunTurn_NonStreamingProportionalShare(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	if _, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1120,7 +1142,7 @@ func TestRunTurn_NonStreamingBudgetExpiryAdvances(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	outcome, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -1207,7 +1229,7 @@ func TestDemote_ProviderScopedQuota(t *testing.T) {
 		mkCand("oc::m2", "oc", "responses", llm.LayoutTailDynamic, r1, nil),
 	)
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1333,7 +1355,7 @@ func TestRunTurn_ForcedAttemptThroughCooldown(t *testing.T) {
 
 	allCooling(o, 2)
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if !errors.Is(err, llm.ErrChainExhausted) {
@@ -1360,7 +1382,7 @@ func TestRunTurn_ForcedAttemptAtMostOncePerTurn(t *testing.T) {
 
 	allCooling(o, 1)
 
-	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if !errors.Is(err, llm.ErrChainExhausted) {
@@ -1445,7 +1467,7 @@ func TestRunTurn_UnprovenCandidateAttemptedDirectly(t *testing.T) {
 	o.cands[0].health.verified = true
 	o.recordSuccess(0, true, "boot")
 
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil {
@@ -1645,7 +1667,7 @@ func TestConstructionFailureIsolated(t *testing.T) {
 	}
 
 	// The turn is served by the constructed candidate only.
-	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err != nil || outcome.Reply != "x" {
@@ -1664,7 +1686,7 @@ func TestRestartResetsHealth(t *testing.T) {
 	}
 
 	first := newTestOrch(clk, cands...)
-	if _, err := first.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := first.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1710,8 +1732,8 @@ func TestRunTurn_ConcurrentCallers(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 
-			outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
-				return []*schema.Message{schema.UserMessage("hi")}
+			outcome, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(_ llm.PromptLayout, ref string) []*schema.Message {
+				return []*schema.Message{schema.SystemMessage(ref), schema.UserMessage("hi")}
 			}}, nil)
 			if err != nil || outcome.Reply != "ok" {
 				errs[i] = fmt.Errorf("turn %d: %q, %w", i, outcome.Reply, err) // test
@@ -1726,6 +1748,16 @@ func TestRunTurn_ConcurrentCallers(t *testing.T) {
 		}
 	}
 
+	for _, item := range []struct {
+		runner *fakeRunner
+		ref    string
+	}{{r0, testRefA0}, {r1, testRefB1}} {
+		for i := 0; i < item.runner.callCount(); i++ {
+			if got := item.runner.call(i).msgs[0].Content; got != item.ref {
+				t.Errorf("candidate %s received %q", item.ref, got)
+			}
+		}
+	}
 	snap := o.Snapshot()
 	if snap.ActiveRef != testRefB1 {
 		t.Errorf("active = %q, want b::m1", snap.ActiveRef)
@@ -1748,7 +1780,7 @@ func TestSubscribe_Transitions(t *testing.T) {
 	ch, cancel := o.Subscribe()
 	defer cancel()
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1782,7 +1814,7 @@ func TestActiveLayout_TracksPromotion(t *testing.T) {
 		mkCand(testRefB1, "b", "anthropic", llm.LayoutHeadSafe, r1, nil),
 	)
 
-	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.RunTurn(context.Background(), TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1811,7 +1843,7 @@ func TestRunTurn_CallerCancellation(t *testing.T) {
 		cancel()
 	}()
 
-	_, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout) []*schema.Message {
+	_, err := o.RunTurn(ctx, TurnRequest{SessionKey: testTurnChannel, Assemble: func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}}, nil)
 	if err == nil {
@@ -1884,7 +1916,7 @@ func TestExecuteTurn_RetryAndFailoverKeepSessionKey(t *testing.T) {
 		RetryBackoff:   time.Millisecond,
 	}, zerolog.Nop())
 
-	if _, err := o.ExecuteTurn(context.Background(), sessionKey, func(llm.PromptLayout) []*schema.Message {
+	if _, err := o.ExecuteTurn(context.Background(), sessionKey, func(llm.PromptLayout, string) []*schema.Message {
 		return []*schema.Message{schema.UserMessage("hi")}
 	}, nil, nil); err != nil {
 		t.Fatalf("ExecuteTurn() error = %v", err)
@@ -1901,5 +1933,69 @@ func TestExecuteTurn_RetryAndFailoverKeepSessionKey(t *testing.T) {
 			}
 		}
 		r.mu.Unlock()
+	}
+}
+
+func TestGuardStopDoesNotFailOver(t *testing.T) {
+	first := &fakeRunner{steps: []runnerStep{{err: fmt.Errorf("tool: %w", errdigest.ErrGuardRepeated)}}}
+	second := &fakeRunner{steps: []runnerStep{{outcome: okOutcome("fallback")}}}
+	o := New(Config{
+		Candidates: []Candidate{
+			mkCand(testRefA0, "a", "ollama", llm.LayoutTailDynamic, first, nil),
+			mkCand(testRefB1, "b", "responses", llm.LayoutTailDynamic, second, nil),
+		},
+		Recovery: testRecovery(), Retries: 2, RetryBackoff: time.Millisecond,
+	}, zerolog.Nop())
+	_, err := o.ExecuteTurn(context.Background(), "cli", func(llm.PromptLayout, string) []*schema.Message { return []*schema.Message{schema.UserMessage("hi")} }, nil, nil)
+	if !errors.Is(err, errdigest.ErrGuardRepeated) || first.callCount() != 1 || second.callCount() != 0 {
+		t.Fatalf("guard outcome %v, calls %d/%d", err, first.callCount(), second.callCount())
+	}
+}
+
+type contextRunner struct{ run func(context.Context) error }
+
+func (r contextRunner) RunMessagesStreaming(ctx context.Context, _ string, _ []*schema.Message, _ func(string)) (agent.TurnOutcome, error) {
+	return agent.TurnOutcome{}, r.run(ctx)
+}
+
+type failoverGuardTool struct {
+	calls   atomic.Int32
+	failure error
+}
+
+func (t *failoverGuardTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "permanent_tool"}, nil
+}
+
+func (t *failoverGuardTool) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	t.calls.Add(1)
+
+	return "", t.failure
+}
+
+func TestGuardStateSurvivesFailover(t *testing.T) {
+	failure := errors.New("permanent failure")
+	inner := &failoverGuardTool{failure: failure}
+	wrapped := errdigest.NewTrackedTool(inner, errdigest.NewClassifier().Register(failure, errdigest.Permanent), func(context.Context) string { return "cli" }, zerolog.Nop())
+	first := contextRunner{run: func(ctx context.Context) error {
+		if _, err := wrapped.InvokableRun(ctx, `{}`); err != nil {
+			return err
+		}
+
+		return errors.New("error 429: too many requests")
+	}}
+	second := contextRunner{run: func(ctx context.Context) error {
+		_, err := wrapped.InvokableRun(ctx, `{}`)
+
+		return err
+	}}
+	o := New(Config{Candidates: []Candidate{
+		mkCand(testRefA0, "a", "ollama", llm.LayoutTailDynamic, first, nil),
+		mkCand(testRefB1, "b", "responses", llm.LayoutTailDynamic, second, nil),
+	}, Recovery: testRecovery()}, zerolog.Nop())
+	ctx := errdigest.WithTurnGuard(context.Background(), 32)
+	_, err := o.ExecuteTurn(ctx, "cli", func(llm.PromptLayout, string) []*schema.Message { return []*schema.Message{schema.UserMessage("hi")} }, nil, nil)
+	if !errors.Is(err, errdigest.ErrGuardRepeated) || inner.calls.Load() != 1 {
+		t.Fatalf("guard %v; calls %d", err, inner.calls.Load())
 	}
 }

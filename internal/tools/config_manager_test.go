@@ -4,11 +4,14 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/marco-rozz/ready/internal/config"
 )
 
@@ -20,7 +23,10 @@ const testAgentID = "0190aaaa-bbbb-7ccc-8ddd-eeeeffff0001"
 const aLiteral = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
 
 // testForeignSession is the stand-in identity for another Session.
-const testForeignSession = "session-b"
+const (
+	testForeignSession = "session-b"
+	testTransportZMQ   = "zmq"
+)
 
 // testZmqBind is the repeated bind line in the mini config.
 const testZmqBind = "bind: tcp://127.0.0.1:7600"
@@ -61,12 +67,15 @@ func newTestManager(t *testing.T, doc, initialSession string) (*fakeFS, *ConfigM
 	fs := &fakeFS{doc: doc, path: "/home/test/.ready/config.yaml", sessionID: initialSession}
 
 	mgr, err := NewConfigManager(ConfigManagerOptions{
-		ElectedPath:      "/home/test/.ready/config.yaml",
-		ProfileOverrides: config.ProfileOverrideInputs{},
+		ElectedPath:              "/home/test/.ready/config.yaml",
+		ConfiguredDefaultProfile: "default",
+		EffectiveProfileName:     "admin",
+		EffectiveProfileSource:   "flag",
+		ProfileOverrides:         config.ProfileOverrideInputs{},
 		SessionIdentity: func(_ context.Context) (string, bool) {
 			return fs.sessionID, fs.sessionID != ""
 		},
-		SessionTransport: func(context.Context) string { return "zmq" },
+		SessionTransport: func(context.Context) string { return testTransportZMQ },
 		SessionLoopback:  func(context.Context) bool { return true },
 		readSource: func(_ context.Context) (config.SourceState, error) {
 			return config.SourceState{Path: fs.path, Data: []byte(fs.doc), Mode: 0o600}, nil
@@ -87,10 +96,10 @@ func newTestManager(t *testing.T, doc, initialSession string) (*fakeFS, *ConfigM
 
 			return config.CommitReport{Committed: true, BackupPath: "/backup/path.bak.2030"}, nil
 		},
-		nextStageID: func() string {
+		nextStageID: func() (string, error) {
 			fs.stageN++
 
-			return fmt.Sprintf("stage-test-%d", fs.stageN)
+			return fmt.Sprintf("stage-test-%d", fs.stageN), nil
 		},
 	})
 	if err != nil {
@@ -114,6 +123,82 @@ func readAs(t *testing.T, mgr *ConfigManager) stagedView {
 	}
 
 	return view
+}
+
+func TestConfigManagerGeneratesFreshUUIDs(t *testing.T) {
+	_, template := newTestManager(t, validMiniConfig(), "owner")
+	opts := template.opts
+	opts.nextStageID = nil
+	mgr, err := NewConfigManager(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := readAs(t, mgr)
+	id, err := uuid.Parse(first.StageID)
+	if err != nil || id.Version() != 4 || id.Variant() != uuid.RFC4122 {
+		t.Fatalf("draft ID is not a random UUID: %q (%v)", first.StageID, err)
+	}
+	if _, err = mgr.Discard(context.Background(), first.StageID, first.Revision); err != nil {
+		t.Fatal(err)
+	}
+	second := readAs(t, mgr)
+	if second.StageID == first.StageID {
+		t.Fatal("new draft reused its predecessor's UUID")
+	}
+}
+
+func TestConfigManagerIdentifierFailureDoesNotOpenDraft(t *testing.T) {
+	_, mgr := newTestManager(t, validMiniConfig(), "owner")
+	failure := errors.New("random source unavailable")
+	mgr.opts.nextStageID = func() (string, error) { return "", failure }
+	if _, err := mgr.Read(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("expected identifier generation failure, got %v", err)
+	}
+	if mgr.stage != nil {
+		t.Fatal("identifier failure opened a draft")
+	}
+}
+
+func TestConfigManagerStateSurvivesAdapterReplacement(t *testing.T) {
+	_, first := newTestManager(t, validMiniConfig(), "owner")
+	view := readAs(t, first)
+	if _, err := first.Update(context.Background(), view.StageID, view.Revision, []editPair{{OldText: testZmqBind, NewText: testZmqBindChanged}}); err != nil {
+		t.Fatal(err)
+	}
+	opts := first.opts
+	opts.State = first.ConfigManagerState
+	second, err := NewConfigManager(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := readAs(t, second)
+	if restored.StageID != view.StageID || restored.Revision != 1 || !strings.Contains(restored.Text, testZmqBindChanged) {
+		t.Fatalf("stage changed across adapter replacement: %+v", restored)
+	}
+	second.ReleaseSession("owner")
+	if first.stage != nil {
+		t.Fatal("session cleanup did not release shared stage")
+	}
+}
+
+func TestConfigManagerSharedStateUsesCurrentValidation(t *testing.T) {
+	_, first := newTestManager(t, validMiniConfig(), "owner")
+	view := readAs(t, first)
+	denied := errors.New("new generation validation refused")
+	opts := first.opts
+	opts.State = first.ConfigManagerState
+	opts.ServeLocalChecks = func(*config.Config) error { return denied }
+	second, err := NewConfigManager(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = second.Update(context.Background(), view.StageID, view.Revision, []editPair{{OldText: testZmqBind, NewText: testZmqBindChanged}})
+	if !errors.Is(err, denied) {
+		t.Fatalf("new generation validation: %v", err)
+	}
+	if restored := readAs(t, first); restored.Revision != view.Revision || restored.Text != view.Text {
+		t.Fatal("rejected validation changed the shared draft")
+	}
 }
 
 func updateAs(t *testing.T, mgr *ConfigManager, _ string, view stagedView, edits []editPair) (string, error) {
@@ -149,6 +234,9 @@ func TestConfigManagerReadOpensStaging(t *testing.T) {
 	}
 	if !strings.Contains(view.Text, "auth_token: !secret zmqcli_auth_token") {
 		t.Fatalf("staged view must show the reference:\n%s", view.Text)
+	}
+	if view.ConfiguredDefaultProfile != "default" || view.EffectiveProfile != "admin" || view.ProfileSource != "flag" {
+		t.Fatalf("profile resolution metadata wrong: %+v", view)
 	}
 	_ = fs
 }
@@ -197,7 +285,7 @@ func TestConfigManagerUpdateWithoutStaging(t *testing.T) {
 
 	_, mgr := newTestManager(t, validMiniConfig(), "session-a")
 	_, err := mgr.Update(context.Background(), "stage-x", 0, []editPair{{OldText: "a", NewText: "b"}})
-	if err == nil || !strings.Contains(err.Error(), "read the configuration first") {
+	if err == nil || !strings.Contains(err.Error(), "begin a draft first") {
 		t.Fatalf("expected no-staging refusal, got: %v", err)
 	}
 }
@@ -288,7 +376,7 @@ func TestConfigManagerConflictInvalidatesBase(t *testing.T) {
 	fs.doc = strings.Replace(validMiniConfig(), testZmqBind, "bind: tcp://127.0.0.1:9999", 1)
 
 	_, err := saveAs(t, mgr, "a", view)
-	if err == nil || !strings.Contains(err.Error(), "changed since the staging was opened") {
+	if err == nil || !strings.Contains(err.Error(), "changed since the draft was opened") {
 		t.Fatalf("external change at save must refuse, got: %v", err)
 	}
 	if fs.commits != 0 {
@@ -309,7 +397,7 @@ func TestConfigManagerConflictInvalidatesBase(t *testing.T) {
 	}
 	// Further update/save refused.
 	_, err = mgr.Update(context.Background(), view.StageID, view.Revision, []editPair{{OldText: "bind", NewText: "bind2"}})
-	if err == nil || !strings.Contains(err.Error(), "invalidated") {
+	if err == nil || !strings.Contains(err.Error(), "source changed") {
 		t.Fatalf("update against invalidated base must refuse, got: %v", err)
 	}
 
@@ -320,6 +408,34 @@ func TestConfigManagerConflictInvalidatesBase(t *testing.T) {
 	fs.doc = validMiniConfig()
 	if _, err = mgr.Read(context.Background()); err != nil {
 		t.Fatalf("fresh read after conflict recovery: %v", err)
+	}
+}
+
+func TestConfigManagerNoOpDetectsReplacementWithIdenticalBytes(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte(validMiniConfig())
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewConfigManager(ConfigManagerOptions{
+		ElectedPath:     path,
+		SessionIdentity: func(context.Context) (string, bool) { return "owner", true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := readAs(t, mgr)
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Save(ctx, view.StageID, view.Revision); !errors.Is(err, config.ErrConfigSourceConflict) {
+		t.Fatalf("expected source identity conflict, got %v", err)
 	}
 }
 
@@ -387,7 +503,7 @@ func TestConfigManagerCommittedSaveReleasesAndReplays(t *testing.T) {
 		t.Fatal("replay must not re-commit")
 	}
 	fs.sessionID = testForeignSession
-	if _, err = mgr.Save(context.Background(), upd.StageID, upd.Revision); err == nil || !strings.Contains(err.Error(), "read the configuration first") {
+	if _, err = mgr.Save(context.Background(), upd.StageID, upd.Revision); err == nil || !strings.Contains(err.Error(), "begin a draft first") {
 		t.Fatalf("foreign replay must not surface receipt details, got: %v", err)
 	}
 }
@@ -495,7 +611,7 @@ func e2eConflictAndSavePhase(ctx context.Context, t *testing.T, fs *fakeFS, mgr 
 	t.Helper()
 
 	fs.doc = strings.Replace(doc, "7600", "9999", 1)
-	if _, err := mgr.Save(ctx, upd.StageID, upd.Revision); err == nil || !strings.Contains(err.Error(), "changed since the staging was opened") {
+	if _, err := mgr.Save(ctx, upd.StageID, upd.Revision); err == nil || !strings.Contains(err.Error(), "changed since the draft was opened") {
 		t.Fatalf("conflict expected, got: %v", err)
 	}
 	if _, err := mgr.Discard(ctx, upd.StageID, upd.Revision); err != nil {

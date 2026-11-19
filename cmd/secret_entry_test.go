@@ -15,6 +15,7 @@ import (
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/oauth"
 	"github.com/marco-rozz/ready/internal/protocol"
+	"github.com/marco-rozz/ready/internal/secretstore"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/rs/zerolog"
 	"github.com/urfave/cli/v3"
@@ -58,7 +59,7 @@ func TestSecretEntryHandlerAuthorizationAndZMQAdoption(t *testing.T) {
 	}
 	request.SecretEntry = &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionList}
 	listed := defaultHandler(context.Background(), nil, false, request)
-	if listed.Status != protocol.ResponseStatusOK || listed.SecretEntry == nil || len(listed.SecretEntry.Secrets) != 1 || listed.SecretEntry.Secrets[0].State != protocol.SecretStatePending {
+	if listed.Status != protocol.ResponseStatusOK || listed.SecretEntry == nil || len(listed.Secrets) != 1 || listed.Secrets[0].State != protocol.SecretStatePending {
 		t.Fatalf("pending metadata unavailable outside admin: %+v", listed)
 	}
 	request.SecretEntry = &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionBegin}
@@ -91,7 +92,7 @@ func TestSecretEntryHandlerAuthorizationAndZMQAdoption(t *testing.T) {
 	rotation := admin(context.Background(), nil, true, request)
 	request.SecretEntry = &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionSubmit, OperationID: rotation.SecretEntry.OperationID, Name: "zmqcli_auth_token", Value: &short}
 	refused := admin(context.Background(), nil, true, request)
-	if refused.ErrorCode != protocol.ErrorCodeInvalidValue || refused.SecretEntry == nil || refused.SecretEntry.RuleCode != "too_short" {
+	if refused.ErrorCode != protocol.ErrorCodeInvalidValue || refused.SecretEntry == nil || refused.SecretEntry.Rule != "too_short" {
 		t.Fatalf("a value rule must refuse with its rule code: %+v", refused)
 	}
 }
@@ -99,7 +100,7 @@ func TestSecretEntryHandlerAuthorizationAndZMQAdoption(t *testing.T) {
 func TestChatNonTUISurfacesNeverStartSecretEditor(t *testing.T) {
 	for _, mode := range []string{flagNameExec, flagNameRaw, "piped"} {
 		t.Run(mode, func(t *testing.T) {
-			d := newFakeChatDaemon(t, true, []protocol.PendingSecret{{Name: "telegram_token", Fields: []string{degradedChannelsKey + "." + degradedTelegramKey + "." + chatTokenFlag}, State: protocol.SecretStatePending}})
+			d := newFakeChatDaemon(t, true, []protocol.PendingSecret{{Name: "telegram_token", Fields: [][]string{{degradedChannelsKey + "." + degradedTelegramKey + "." + chatTokenFlag}}, State: protocol.SecretStatePending}})
 			command := newChatActionCmd(t, d)
 			if mode != flagNameExec {
 				if err := command.Set(flagNameExec, ""); err != nil {
@@ -285,5 +286,21 @@ mcp_servers:
 		if res.Credentials[i].Target != w.target || res.Credentials[i].State != w.state {
 			t.Fatalf("credentials[%d] = %+v, want target=%s state=%s", i, res.Credentials[i], w.target, w.state)
 		}
+	}
+}
+
+func TestProtocolSecretsPreservesPathSegments(t *testing.T) {
+	report := secretstore.Derive(nil, []secretstore.Reference{{Name: "token", Field: "mcp_servers.home.headers.X.Key", Path: []string{"mcp_servers", "home", "headers", "X.Key"}}}, nil)
+	items := protocolSecrets(report)
+	if len(items) != 1 || len(items[0].Fields) != 1 || len(items[0].Fields[0]) != 4 || items[0].Fields[0][3] != "X.Key" {
+		t.Fatalf("wire paths: %+v", items)
+	}
+	data, err := protocol.Marshal(protocol.Response{ConnectionID: "c", Status: protocol.ResponseStatusOK, Secrets: items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := protocol.UnmarshalResponse(data)
+	if err != nil || response.Secrets[0].Fields[0][3] != "X.Key" {
+		t.Fatalf("wire round trip: %+v %v", response, err)
 	}
 }

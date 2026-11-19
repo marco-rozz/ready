@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
@@ -178,13 +179,17 @@ type Model struct {
 	renderer      *mdrender.Renderer
 	echoRenderer  *mdrender.Renderer // Markdown renderer for the inset user echo (width - 2*inset)
 
-	state    turnState
-	buffer   strings.Builder
-	dirty    bool
-	waiting  bool
-	tickOn   bool
-	quitting bool
-	turnSeq  int // bumped per sent turn; timeoutMsg tags carry it (stale-timer fix)
+	activityRequestID  string
+	activitySeq        uint64
+	activityTool       string
+	activityAdditional int
+	state              turnState
+	buffer             strings.Builder
+	dirty              bool
+	waiting            bool
+	tickOn             bool
+	quitting           bool
+	turnSeq            int // bumped per sent turn; timeoutMsg tags carry it (stale-timer fix)
 	// timeoutSeq is bumped on every arm/re-arm of the per-turn reply timeout
 	// (tui-progress-rearm-timeout). timeoutMsg.armSeq captures it at arm
 	// time: since Bubble Tea commands cannot be cancelled, a turn that keeps
@@ -660,7 +665,15 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 
 // sendCmd builds and queues a protocol request with a fresh request ID.
 func (m *Model) sendCmd(reqType protocol.RequestType, content string) tea.Cmd {
-	return m.sendCmdWithID(reqType, content, uuid.New().String())
+	id := uuid.New().String()
+	if reqType == protocol.RequestTypeMessage {
+		m.activityRequestID = id
+		m.activitySeq = 0
+		m.activityTool = ""
+		m.activityAdditional = 0
+	}
+
+	return m.sendCmdWithID(reqType, content, id)
 }
 
 // sendCmdWithID builds and queues a protocol request carrying a caller-chosen
@@ -870,15 +883,15 @@ func (m *Model) handleSecretResponse(resp protocol.Response) (tea.Model, tea.Cmd
 		return m.quit(exitErr, "uncertain secret entry outcome; reconnect and list again")
 	}
 	if action == protocol.SecretEntryActionList {
-		if resp.SecretEntry.Credentials != nil {
-			m.credentials = resp.SecretEntry.Credentials
+		if resp.Credentials != nil {
+			m.credentials = resp.Credentials
 		}
 		m.secretKnown = true
-		m.secretPending = pendingOnly(resp.SecretEntry.Secrets)
-		m.secretAll = append([]protocol.PendingSecret(nil), resp.SecretEntry.Secrets...)
+		m.secretPending = pendingOnly(resp.Secrets)
+		m.secretAll = append([]protocol.PendingSecret(nil), resp.Secrets...)
 		if m.secretShowList {
 			m.secretShowList = false
-			m.completeCommandBlock(renderSecretTable(resp.SecretEntry.Secrets, resp.SecretEntry.Credentials))
+			m.completeCommandBlock(renderSecretTable(resp.Secrets, resp.Credentials))
 		}
 		if m.secretMode {
 			if len(m.secretPending) == 0 {
@@ -1032,6 +1045,8 @@ func (m *Model) completeCommandBlock(content string) {
 // llm_unavailable path. Returns the command that sends the first queued
 // steering prompt (nil when the queue is empty).
 func (m *Model) completeTurn(reply string) tea.Cmd {
+	m.activityTool = ""
+	m.activityRequestID = ""
 	m.completed = append(m.completed, completedTurn{echo: m.curEcho, reply: reply})
 	m.curEcho = ""
 	m.buffer.Reset()
@@ -1075,11 +1090,46 @@ func (m *Model) startNextQueuedTurn() tea.Cmd {
 	)
 }
 
+func (m *Model) handleActivity(resp protocol.Response) (tea.Model, tea.Cmd) {
+	a := resp.Activity
+	if !m.waiting || resp.ConnectionID != m.connectionID || resp.RequestID != m.activityRequestID || a.Sequence <= m.activitySeq {
+		return m, m.recvCmd()
+	}
+	m.activitySeq = a.Sequence
+	m.activityTool = ""
+	m.activityAdditional = 0
+	if a.State == "using_tool" {
+		m.activityTool = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+
+			return r
+		}, a.ToolName)
+		if a.AdditionalTools != nil {
+			m.activityAdditional = *a.AdditionalTools
+		}
+	}
+	if a.State == "thinking" {
+		if m.buffer.Len() > 0 {
+			m.state = stateStreaming
+		} else {
+			m.state = stateThinking
+		}
+	}
+	m.timeoutSeq++
+
+	return m, tea.Batch(m.recvCmd(), m.timeoutCmd())
+}
+
 // handleControl consumes a post-handshake control message (D10 / task 3.4).
 // Model-status events (llm-status-visibility) update only the model
 // presentation — turn state and transcript content are untouched and the
 // TUI keeps listening.
 func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
+	if resp.Activity != nil {
+		return m.handleActivity(resp)
+	}
 	if resp.Status == protocol.ResponseStatusError && resp.ErrorCode == protocol.ErrorCodeSecretEntryExpired {
 		m.leaveSecretEditor()
 		m.secretOperation = ""
@@ -1726,7 +1776,7 @@ func (m *Model) View() tea.View {
 	promptText := m.prompt
 	if m.secretMode && m.secretIndex < len(m.secretPass) {
 		item := m.secretPass[m.secretIndex]
-		promptText = fmt.Sprintf("❯ secret %q (%s) [%d/%d] ", item.Name, strings.Join(item.Fields, ", "), m.secretIndex+1, len(m.secretPass))
+		promptText = fmt.Sprintf("❯ secret %q (%s) [%d/%d] ", item.Name, formatSecretFields(item.Fields), m.secretIndex+1, len(m.secretPass))
 	}
 	promptStyle := lipgloss.NewStyle().Faint(!m.secretMode)
 	if m.secretMode {
@@ -1778,7 +1828,7 @@ func (m *Model) statusLine() string {
 	// The turn-state label is always present (bottom-left corner); while a
 	// turn is in flight the working spinner is additionally embedded in the
 	// input's top border.
-	parts = append(parts, m.state.Label())
+
 	if m.agentName != "" {
 		parts = append(parts, m.agentName)
 	}
@@ -1928,10 +1978,8 @@ func (m *Model) inputBars() (top, bottom string) {
 	switch {
 	case m.working():
 		top = m.workingTopBorder(hiddenAbove)
-	case hiddenAbove > 0:
-		top = scrollRule(m.width, "↑", hiddenAbove)
 	default:
-		top = strings.Repeat("─", max(m.width, 0))
+		top = m.workingTopBorder(hiddenAbove)
 	}
 
 	if hiddenBelow > 0 {
@@ -1952,7 +2000,7 @@ func (m *Model) inputBars() (top, bottom string) {
 // narrow terminals even the label is dropped in favour of a short dash
 // prefix followed by the frame.
 func (m *Model) workingTopBorder(hiddenAbove int) string {
-	status := m.spinnerLabel(false)
+	status := m.spinnerLabel()
 	statusWidth := lipgloss.Width(status)
 
 	overflow := ""
@@ -1967,8 +2015,8 @@ func (m *Model) workingTopBorder(hiddenAbove int) string {
 	}
 
 	if overflow != "" && !canFitOverflow() {
-		status = spinnerFrame(m.spinnerIdx) // compact: give the indicator a chance
-		statusWidth = lipgloss.Width(status)
+		overflow = ""
+		overflowWidth = 0
 	}
 
 	if canFitOverflow() {
@@ -1984,7 +2032,14 @@ func (m *Model) workingTopBorder(hiddenAbove int) string {
 	}
 
 	// Too narrow even for the full label — spinner only, short dash prefix.
-	status = spinnerFrame(m.spinnerIdx)
+	switch {
+	case m.working():
+		status = spinnerFrame(m.spinnerIdx)
+	case m.width >= lipgloss.Width("READY."):
+		status = readyBrand()
+	default:
+		status = truncateAnsi("READY.", max(0, m.width))
+	}
 	statusWidth = lipgloss.Width(status)
 	prefix := min(3, max(0, m.width-statusWidth))
 
@@ -2012,15 +2067,30 @@ func scrollRule(width int, direction string, hidden int) string {
 	return truncateAnsi(indicator, max(0, width-3)) + "..."
 }
 
-// spinnerLabel renders the embedded working spinner: braille frame + "READY."
-// (border colour), or the compact lone frame when mustCompact.
-func (m *Model) spinnerLabel(mustCompact bool) string {
+// readyBrand renders the idle brand on the input border: bold light READY
+// with the bold violet dot, colours unchanged.
+func readyBrand() string {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EBEBEB")).Render("READY") +
+		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8284D2")).Render(".")
+}
+
+// spinnerLabel renders the current turn state or the idle brand on the input border.
+func (m *Model) spinnerLabel() string {
 	frame := spinnerFrame(m.spinnerIdx)
-	if mustCompact {
-		return frame
+
+	if !m.working() {
+		return readyBrand()
+	}
+	if m.activityTool != "" {
+		label := "using tool " + truncateAnsi(m.activityTool, 48)
+		if m.activityAdditional > 0 {
+			label += fmt.Sprintf(" (+%d)", m.activityAdditional)
+		}
+
+		return frame + " " + label
 	}
 
-	return frame + " READY."
+	return frame + " " + m.state.Label()
 }
 
 // hiddenInputLines computes the lines hidden above/below the textarea's
@@ -2164,10 +2234,7 @@ func renderSecretTable(secrets []protocol.PendingSecret, creds []protocol.Creden
 	b.WriteString("**Secrets**\n\n| name | state | used by |\n|---|---|---|\n")
 	for _, s := range secrets {
 		state := string(s.State)
-		if s.Rule != "" {
-			state += " (" + s.Rule + ")"
-		}
-		b.WriteString("| " + s.Name + " | " + state + " | " + strings.Join(s.Fields, ", ") + " |\n")
+		b.WriteString("| " + s.Name + " | " + state + " | " + formatSecretFields(s.Fields) + " |\n")
 	}
 	if len(secrets) == 0 {
 		b.WriteString("| — | | |\n")
@@ -2219,8 +2286,8 @@ func (m *Model) handleSecretRefusal(resp protocol.Response) (tea.Model, tea.Cmd)
 	case protocol.ErrorCodeLoopbackRequired:
 		guidance = " — use a numeric loopback bind or SSH forwarding"
 	case protocol.ErrorCodeInvalidValue:
-		if resp.SecretEntry != nil && resp.SecretEntry.RuleCode != "" {
-			guidance = " — the value breaks rule " + resp.SecretEntry.RuleCode
+		if resp.SecretEntry != nil && resp.SecretEntry.Rule != "" {
+			guidance = " — the value breaks rule " + resp.SecretEntry.Rule
 		}
 	case protocol.ErrorCodeNameInUse:
 		guidance = " — a configuration field still references it"
@@ -2233,4 +2300,13 @@ func (m *Model) handleSecretRefusal(resp protocol.Response) (tea.Model, tea.Cmd)
 	}
 
 	return m, tea.Batch(m.recvCmd(), m.advanceActivation())
+}
+
+func formatSecretFields(fields [][]string) string {
+	names := make([]string, 0, len(fields))
+	for _, path := range fields {
+		names = append(names, strings.Join(path, "."))
+	}
+
+	return strings.Join(names, ", ")
 }

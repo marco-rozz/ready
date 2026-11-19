@@ -78,6 +78,32 @@ func (m *mockChannel) isClosed() bool {
 	return m.closed
 }
 
+// A channel registered with AddOrReplace after the Manager has begun
+// shutting down must be closed immediately and never registered — otherwise
+// a self-starting channel (e.g. Telegram's construction-time poller) keeps
+// polling behind the shutdown path forever.
+func TestManager_AddOrReplaceAfterStopClosesAndDoesNotRegister(t *testing.T) {
+	first := newMockChannel("telegram")
+	m := NewManager(testLogger(), first)
+	if err := m.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	second := newMockChannel("telegram")
+	m.AddOrReplace(second)
+
+	if !second.isClosed() {
+		t.Fatal("a channel registered during shutdown must be closed, not leaked")
+	}
+	if got := m.Channel("telegram"); got != nil {
+		t.Fatal("a channel registered during shutdown must not be registered")
+	}
+}
+
 func TestManager_NoChannels(t *testing.T) {
 	mgr := NewManager(testLogger())
 

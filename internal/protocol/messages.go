@@ -139,7 +139,7 @@ const (
 	ErrorCodeRequestInFlight    = "request_in_flight"
 	ErrorCodeSecretEntryActive  = "secret_entry_active"
 	ErrorCodeSecretEntryExpired = "secret_entry_expired"
-	ErrorCodeInvalidValue       = "invalid_value" // a value rule failed; the rule code rides SecretEntryResponse.RuleCode
+	ErrorCodeInvalidValue       = "invalid_value" // a value rule failed; the rule code rides SecretEntryResponse.Rule
 	ErrorCodeUnknownName        = "unknown_name"  // the Secret name is neither referenced nor stored
 	ErrorCodeNameInUse          = "name_in_use"   // delete refused: a configuration field still references the name
 	ErrorCodeWriteNotCommitted  = "write_not_committed"
@@ -189,7 +189,7 @@ const (
 // wire contract keeps this value (mixed releases still connect); a wire
 // change a strict previous-version peer would reject or misinterpret bumps
 // it. It applies to the ZMQ transport only; no other channel negotiates.
-const Version = 3
+const Version = 4
 
 // PredatesVersioningGuess is the client's message when a handshake response
 // cannot carry a protocol version at all — an unmarshal refusal or an error
@@ -290,10 +290,8 @@ const (
 // reference it and its derived state. It never carries a value.
 type PendingSecret struct {
 	Name   string      `json:"name"`
-	Fields []string    `json:"fields,omitempty"`
+	Fields [][]string  `json:"fields"`
 	State  SecretState `json:"state"`
-	// Rule is the violated value rule when a present value is non-conforming.
-	Rule string `json:"rule,omitempty"`
 }
 
 // CredentialInfo summarizes one login-managed OAuth Credential.
@@ -308,12 +306,9 @@ type SecretEntryResponse struct {
 	OperationID string             `json:"operation_id,omitempty"`
 	Outcome     SecretEntryOutcome `json:"outcome"`
 	Warnings    []string           `json:"warnings,omitempty"`
-	// RuleCode names the violated value rule on invalid_value.
-	RuleCode string `json:"rule_code,omitempty"`
-	// Secrets and Credentials answer a list action: every Secret name and
-	// every Credential, never a value.
-	Secrets     []PendingSecret  `json:"secrets,omitempty"`
-	Credentials []CredentialInfo `json:"credentials,omitempty"`
+	Name        string             `json:"name,omitempty"`
+	Field       []string           `json:"field,omitempty"`
+	Rule        string             `json:"rule,omitempty"`
 }
 
 // UsageInfo carries a session's cumulative LLM token usage (the architecture decision records):
@@ -333,6 +328,39 @@ type UsageInfo struct {
 	TurnCount           int     `json:"turn_count"`
 	LLMCalls            int     `json:"llm_calls"`
 	AuxCalls            int     `json:"aux_calls"`
+}
+
+// Activity describes one request-correlated tool activity transition.
+type Activity struct {
+	State           string `json:"state"`
+	Sequence        uint64 `json:"sequence"`
+	ToolName        string `json:"tool_name,omitempty"`
+	AdditionalTools *int   `json:"additional_tools,omitempty"`
+}
+
+// UnmarshalJSON rejects tool fields on thinking events even when explicitly empty.
+func (a *Activity) UnmarshalJSON(data []byte) error {
+	type wire Activity
+	var value wire
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if value.State == "thinking" {
+		_, hasName := fields["tool_name"]
+		_, hasCount := fields["additional_tools"]
+		if hasName || hasCount {
+			return fmt.Errorf("invalid activity fields")
+		}
+	}
+	*a = Activity(value)
+
+	return nil
 }
 
 // Response is the client-bound message sent by the daemon.
@@ -385,14 +413,14 @@ type Response struct {
 	ProtocolVersion int `json:"protocol_version,omitempty"`
 	// AgentID and AgentName ride the authenticated handshake ok response
 	// only: the daemon's agent identity, shown by the TUI.
-	AgentID        string               `json:"agent_id,omitempty"`
-	AgentName      string               `json:"agent_name,omitempty"`
-	PendingSecrets []PendingSecret      `json:"pending_secrets,omitempty"`
-	Secrets        []PendingSecret      `json:"secrets,omitempty"`
-	Credentials    []CredentialInfo     `json:"credentials,omitempty"`
-	SecretEntry    *SecretEntryResponse `json:"secret_entry,omitempty"`
-	OAuthLogin     *OAuthLoginResponse  `json:"oauth_login,omitempty"`
-	ConfigSaved    bool                 `json:"config_saved,omitempty"`
+	AgentID     string               `json:"agent_id,omitempty"`
+	AgentName   string               `json:"agent_name,omitempty"`
+	Secrets     []PendingSecret      `json:"secrets,omitempty"`
+	Credentials []CredentialInfo     `json:"credentials,omitempty"`
+	SecretEntry *SecretEntryResponse `json:"secret_entry,omitempty"`
+	OAuthLogin  *OAuthLoginResponse  `json:"oauth_login,omitempty"`
+	ConfigSaved bool                 `json:"config_saved,omitempty"`
+	Activity    *Activity            `json:"activity,omitempty"`
 }
 
 // CompactionInfo carries a Compaction's estimated prompt size before and
@@ -499,6 +527,23 @@ func (r Response) Validate() error {
 
 	if !isAllowedModelState(r.ModelState) {
 		return fmt.Errorf("%w: unknown model_state %q", ErrMalformedResponse, string(r.ModelState))
+	}
+	if a := r.Activity; a != nil {
+		if r.ConnectionID == "" || r.RequestID == "" || r.Status != ResponseStatusOK || r.ResponseType != ResponseTypeControl || r.Content != "" || r.ErrorCode != "" || a.Sequence == 0 {
+			return fmt.Errorf("%w: invalid activity response", ErrMalformedResponse)
+		}
+		switch a.State {
+		case "thinking":
+			if a.ToolName != "" || a.AdditionalTools != nil {
+				return fmt.Errorf("%w: invalid activity fields", ErrMalformedResponse)
+			}
+		case "using_tool":
+			if a.ToolName == "" || a.AdditionalTools == nil || *a.AdditionalTools < 0 {
+				return fmt.Errorf("%w: invalid activity fields", ErrMalformedResponse)
+			}
+		default:
+			return fmt.Errorf("%w: invalid activity state", ErrMalformedResponse)
+		}
 	}
 	if r.SecretEntry != nil {
 		if !validSecretAction(r.SecretEntry.Action) || !validSecretOutcome(r.SecretEntry.Outcome) {
@@ -630,19 +675,15 @@ func Marshal(v any) ([]byte, error) {
 }
 
 // MarshalJSON distinguishes an authoritative empty set from metadata that is
-// unavailable (omitted): a non-nil empty pending_secrets, secrets or
+// unavailable (omitted): a non-nil empty secrets or
 // credentials slice is emitted as [], a nil one is omitted.
 func (r Response) MarshalJSON() ([]byte, error) {
 	type wire Response
 	out := struct {
 		wire
-		PendingSecrets *[]PendingSecret  `json:"pending_secrets,omitempty"`
-		Secrets        *[]PendingSecret  `json:"secrets,omitempty"`
-		Credentials    *[]CredentialInfo `json:"credentials,omitempty"`
+		Secrets     *[]PendingSecret  `json:"secrets,omitempty"`
+		Credentials *[]CredentialInfo `json:"credentials,omitempty"`
 	}{wire: wire(r)}
-	if r.PendingSecrets != nil {
-		out.PendingSecrets = &r.PendingSecrets
-	}
 	if r.Secrets != nil {
 		out.Secrets = &r.Secrets
 	}
