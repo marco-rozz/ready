@@ -22,6 +22,10 @@ import (
 // only metacharacter and matches any (possibly empty) sequence of characters,
 // including the `/` that appears in MCP wire names (e.g. "light/turn_on").
 // This is deliberately not path.Match, whose `*` does not cross `/`.
+// MatchGlob exposes the shared glob matcher (subagent-runtime's definition
+// restriction uses the same semantics as the profile allow/deny rules).
+func MatchGlob(pattern, name string) bool { return matchGlob(pattern, name) }
+
 func matchGlob(pattern, name string) bool {
 	// Iterative wildcard match with backtracking on the last `*`.
 	var (

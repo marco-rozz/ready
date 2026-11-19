@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,24 +24,31 @@ import (
 // files are ordered by the UUIDv7 that follows it.
 const fileTimeLayout = "2006-01-02T15-04-05"
 
-// fileSuffix is the Session file extension.
-const fileSuffix = ".jsonl"
-
 // tailProbe bounds how much of a file's end is read to find its last line;
 // a closing record is always far smaller.
 const tailProbe = 64 * 1024
 
-// Session is one conversation Session of an address.
+// Session is one conversation Session of an address. The layout is one
+// FOLDER per Session (subagent-runtime task 2.1 — BREAKING, no migration):
+// `<root>/<address>/<ts>_<uuidv7>/session.jsonl`, with a Subagent hierarchy
+// of a channel owner living under the folder's `subagents/` subtree.
 type Session struct {
 	// ID is the Session's UUIDv7.
 	ID string
 	// Address is the owning Conversation address.
 	Address Address
-	// StartedAt is the Session's local start time (the file name prefix).
+	// StartedAt is the Session's local start time (the folder name prefix).
 	StartedAt time.Time
-	// Path is the Session file path (created lazily at the first Turn).
+	// Path is the Session file path inside its folder (created lazily at
+	// the first Turn).
 	Path string
 }
+
+// Dir returns the Session's folder (the parent of its file).
+func (s *Session) Dir() string { return filepath.Dir(s.Path) }
+
+// fileBaseName is the transcript file inside every Session folder.
+const fileBaseName = "session.jsonl"
 
 // Store maps Sessions onto the filesystem: one directory per address under
 // the root, one append-only JSONL file per Session, and no index — the
@@ -76,33 +84,29 @@ func (s *Store) newSession(addr Address, now time.Time) (*Session, error) {
 
 // sessionFor builds the Session value for a known id and start time.
 func (s *Store) sessionFor(addr Address, id string, start time.Time) *Session {
-	name := start.Local().Format(fileTimeLayout) + "_" + id + fileSuffix
+	folder := start.Local().Format(fileTimeLayout) + "_" + id
 
 	return &Session{
 		ID:        id,
 		Address:   addr,
 		StartedAt: start,
-		Path:      filepath.Join(s.root, addr.DirName(), name),
+		Path:      filepath.Join(s.root, addr.DirName(), folder, fileBaseName),
 	}
 }
 
-// sessionFile is one scheme-matching file of an address directory.
-type sessionFile struct {
-	path  string
+// sessionDir is one scheme-matching Session folder of an address directory.
+type sessionDir struct {
+	path  string // the folder
+	file  string // the transcript file inside it
 	id    string
 	day   time.Time // the name's local calendar day
 	start time.Time // the name's local start time
-	size  int64
+	size  int64     // the whole tree (the folder incl. subagents/)
 }
 
-// parseFileName splits `<YYYY-MM-DDTHH-MM-SS>_<uuidv7>.jsonl`.
-func parseFileName(name string) (start time.Time, id string, ok bool) {
-	stem, hasSuffix := strings.CutSuffix(name, fileSuffix)
-	if !hasSuffix {
-		return time.Time{}, "", false
-	}
-
-	ts, rawID, found := strings.Cut(stem, "_")
+// parseFolderName splits `<YYYY-MM-DDTHH-MM-SS>_<uuidv7>`.
+func parseFolderName(name string) (start time.Time, id string, ok bool) {
+	ts, rawID, found := strings.Cut(name, "_")
 	if !found {
 		return time.Time{}, "", false
 	}
@@ -120,9 +124,31 @@ func parseFileName(name string) (start time.Time, id string, ok bool) {
 	return start, parsed.String(), true
 }
 
-// listFiles returns the scheme-matching files of dir ordered by UUIDv7
-// (oldest first). A missing directory lists as empty.
-func listFiles(dir string) ([]sessionFile, error) {
+// treeSize returns the recursive byte size of dir (0 when missing).
+func treeSize(dir string) int64 {
+	var total int64
+
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // missing entries just don't count
+		}
+
+		if info, ierr := d.Info(); ierr == nil {
+			total += info.Size()
+		}
+
+		return nil
+	})
+
+	return total
+}
+
+// listSessionDirs returns the scheme-matching Session folders of dir
+// ordered by UUIDv7 (oldest first). A missing directory lists as empty. The
+// subagents/ subtree of an owner folder is never listed here (owner folders
+// are the entries of an ADDRESS directory; child folders live one level
+// deeper and never participate in selection).
+func listSessionDirs(dir string) ([]sessionDir, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -132,30 +158,28 @@ func listFiles(dir string) ([]sessionFile, error) {
 		return nil, fmt.Errorf("failed to list %q: %w", dir, err)
 	}
 
-	var out []sessionFile
+	var out []sessionDir
 
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
-			continue
+		if !e.IsDir() {
+			continue // legacy flat files are ignored — the folder layout is breaking
 		}
 
-		start, id, ok := parseFileName(e.Name())
+		start, id, ok := parseFolderName(e.Name())
 		if !ok {
 			continue
 		}
 
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
+		path := filepath.Join(dir, e.Name())
 
 		y, m, d := start.Date()
-		out = append(out, sessionFile{
-			path:  filepath.Join(dir, e.Name()),
+		out = append(out, sessionDir{
+			path:  path,
+			file:  filepath.Join(path, fileBaseName),
 			id:    id,
 			day:   time.Date(y, m, d, 0, 0, 0, 0, time.Local),
 			start: start,
-			size:  info.Size(),
+			size:  treeSize(path),
 		})
 	}
 
@@ -200,33 +224,33 @@ func isClosed(path string) (bool, error) {
 	return last.Kind == persistence.KindSessionClosed, nil
 }
 
-// resolve returns the current Session of addr: its newest file when that
-// file does not end with a closing record, nil otherwise (the address has no
-// current Session). Older files without a closing record cannot arise with a
-// single writer; one found (manual tampering) is treated as ended with a
-// WARN.
+// resolve returns the current Session of addr: its newest folder when that
+// folder's transcript does not end with a closing record, nil otherwise (the
+// address has no current Session). Older folders without a closing record
+// cannot arise with a single writer; one found (manual tampering) is treated
+// as ended with a WARN.
 func (s *Store) resolve(ctx context.Context, addr Address) (*Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("failed to resolve session: %w", err)
 	}
 
-	files, err := listFiles(filepath.Join(s.root, addr.DirName()))
-	if err != nil || len(files) == 0 {
+	dirs, err := listSessionDirs(filepath.Join(s.root, addr.DirName()))
+	if err != nil || len(dirs) == 0 {
 		return nil, err
 	}
 
-	for _, f := range files[:len(files)-1] {
-		if closed, cerr := isClosed(f.path); cerr == nil && !closed {
+	for _, f := range dirs[:len(dirs)-1] {
+		if closed, cerr := isClosed(f.file); cerr == nil && !closed {
 			s.logger.Warn().
 				Str("address", string(addr)).
-				Str("file", f.path).
-				Msg("session file without a closing record is not the newest — treated as ended")
+				Str("folder", f.path).
+				Msg("session folder without a closing record is not the newest — treated as ended")
 		}
 	}
 
-	newest := files[len(files)-1]
+	newest := dirs[len(dirs)-1]
 
-	closed, err := isClosed(newest.path)
+	closed, err := isClosed(newest.file)
 	if err != nil {
 		return nil, err
 	}
@@ -235,5 +259,5 @@ func (s *Store) resolve(ctx context.Context, addr Address) (*Session, error) {
 		return nil, nil
 	}
 
-	return &Session{ID: newest.id, Address: addr, StartedAt: newest.start, Path: newest.path}, nil
+	return &Session{ID: newest.id, Address: addr, StartedAt: newest.start, Path: newest.file}, nil
 }

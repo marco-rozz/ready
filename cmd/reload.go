@@ -75,6 +75,25 @@ func (c *reloadCoordinator) Reload(ctx context.Context, fromTUI bool) (*runtimeG
 		return nil, fmt.Errorf("runtime reload failed; the previous configuration stays active: %w", err)
 	}
 
+	// subagents.enabled reload flip (D14): on true→false every channel-owner
+	// hierarchy is cascade-closed BEFORE the reload requests exclusive
+	// access to the generation gate — running jobs are unaffected. Both
+	// directions install the new gate value on the process-lifetime Runtime
+	// (a false→true flip must not wait for a restart).
+	if c.rt.subagents != nil && c.current != nil && c.current.cfg != nil && next.cfg != nil {
+		prevOn := c.current.cfg.Subagents.EnabledOn()
+		nextOn := next.cfg.Subagents.EnabledOn()
+
+		if prevOn && !nextOn {
+			c.rt.subagents.DisableChannelFleets(ctx)
+		}
+
+		if prevOn != nextOn {
+			c.rt.subagents.SetEnabled(nextOn)
+			c.logger.Info().Bool("enabled", nextOn).Msg("subagents feature gate reloaded")
+		}
+	}
+
 	// The daemon began shutting down while the generation was being built:
 	// release it instead of installing it behind the shutdown path.
 	if c.daemonCtx.Err() != nil {
@@ -96,7 +115,15 @@ func (c *reloadCoordinator) Reload(ctx context.Context, fromTUI bool) (*runtimeG
 	if c.afterSwap != nil {
 		c.afterSwap(next, fromTUI)
 	}
-	old.shutdown(ctx, c.logger)
+
+	// Retirement of the previous generation is owned by the lease manager
+	// (immediate, or deferred to the last background-dispatch lease) — the
+	// coordinator shuts it down directly only when leases are not wired
+	// (test runs).
+	if c.rt.leases == nil {
+		old.shutdown(ctx, c.logger)
+	}
+
 	c.logger.Info().Bool("from_tui", fromTUI).Msg("runtime reload complete")
 
 	return next, nil
@@ -174,6 +201,14 @@ func (rt *sessionRuntime) swapGeneration(ctx context.Context, next *runtimeGener
 
 	defer rt.genMu.Unlock()
 	rt.applyGeneration(next)
+
+	// Generation leases (subagent-runtime D14): the lease manager adopts the
+	// new generation and retires the previous one — deferred to the last
+	// lease release when background dispatches still run on it. The swap
+	// never waits for leases (they are never taken under this gate).
+	if rt.leases != nil {
+		rt.leases.Swap(ctx, next)
+	}
 
 	return nil
 }

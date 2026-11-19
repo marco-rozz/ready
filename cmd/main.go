@@ -192,6 +192,20 @@ func main() {
 	// not run. We invoke stop() explicitly before the final exit.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
+	// A graceful shutdown that wedges must never hold the operator's
+	// terminal hostage: signals are delivered to every registered channel,
+	// so the first SIGINT/SIGTERM starts the graceful path while the second
+	// one force-exits (shell convention 128+2).
+	forceCh := make(chan os.Signal, 1)
+	signal.Notify(forceCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-forceCh // first signal: the graceful shutdown is already running
+		<-forceCh // second signal: force exit
+
+		fmt.Fprintln(os.Stderr, "forced exit: graceful shutdown did not complete; run the shutdown checklist before relaunching")
+		os.Exit(130)
+	}()
+
 	code, _ := run(ctx, os.Args, os.Stderr)
 
 	stop()

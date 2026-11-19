@@ -8,11 +8,14 @@ that makes it trustworthy rather than merely chatty.
 - A **conversation address** is a channel participant: the terminal share
   one address (`cli`), every Telegram chat has its own
   (`telegram-<chat_id>`), so parallel chats never see each other's history.
-- Each address owns one current **Session** — an append-only transcript
-  file (`<sessions path>/<address>/<timestamp>_<uuidv7>.jsonl`), never
+- Each address owns one current **Session** — a folder holding an
+  append-only transcript
+  (`<sessions path>/<address>/<timestamp>_<uuidv7>/session.jsonl`), never
   rewritten. It records the verbatim user message, the frozen per-turn
   context line, every ReAct iteration (assistant thought + tool calls + the
-  exact tool results), the final reply, and one usage line per turn.
+  exact tool results), the final reply, and one usage line per turn. When
+  the agent spawns subagents, each child gets its own transcript in the
+  Session folder's `subagents/` subtree.
 - A **Turn** is one user request processed through the ReAct loop. A Turn
   that fails still records what happened: tool calls that completed keep
   their results visible, interrupted ones are closed with an explicit

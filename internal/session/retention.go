@@ -21,13 +21,14 @@ type RetentionPolicy struct {
 }
 
 // Retain runs one retention pass over every address directory: an ended
-// Session (a file that is not its address's current one) is deleted when its
-// name's day falls outside the window, then further ended files are deleted
-// oldest-first, across addresses, while their total size exceeds the cap.
-// Only scheme-matching files are ever touched and a current Session is never
-// deleted. Returns the deleted paths.
+// Session (a folder that is not its address's current one) is deleted when
+// its name's day falls outside the window, then further ended trees are
+// deleted oldest-first, across addresses, while their total size exceeds the
+// cap. A whole tree is removed (the folder incl. its subagents/ subtree);
+// only scheme-matching folders are ever touched and a current Session is
+// never deleted. Returns the deleted paths.
 func (s *Store) Retain(ctx context.Context, policy RetentionPolicy, now time.Time) ([]string, error) {
-	dirs, err := os.ReadDir(s.root)
+	addressDirs, err := os.ReadDir(s.root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -36,9 +37,9 @@ func (s *Store) Retain(ctx context.Context, policy RetentionPolicy, now time.Tim
 		return nil, fmt.Errorf("failed to list sessions root: %w", err)
 	}
 
-	var ended []sessionFile
+	var ended []sessionDir
 
-	for _, d := range dirs {
+	for _, d := range addressDirs {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("retention interrupted: %w", err)
 		}
@@ -47,31 +48,31 @@ func (s *Store) Retain(ctx context.Context, policy RetentionPolicy, now time.Tim
 			continue
 		}
 
-		files, err := listFiles(filepath.Join(s.root, d.Name()))
+		folders, err := listSessionDirs(filepath.Join(s.root, d.Name()))
 		if err != nil {
 			s.logger.Warn().Err(err).Str("dir", d.Name()).Msg("retention: failed to list address directory")
 
 			continue
 		}
 
-		if len(files) == 0 {
+		if len(folders) == 0 {
 			continue
 		}
 
-		// The newest file is the current Session unless it is closed.
-		last := len(files) - 1
-		if closed, cerr := isClosed(files[last].path); cerr == nil && closed {
+		// The newest folder is the current Session unless it is closed.
+		last := len(folders) - 1
+		if closed, cerr := isClosed(folders[last].file); cerr == nil && closed {
 			last++
 		}
 
-		ended = append(ended, files[:last]...)
+		ended = append(ended, folders[:last]...)
 	}
 
 	y, m, d := now.Date()
 	cutoff := time.Date(y, m, d-(policy.Days-1), 0, 0, 0, 0, time.Local)
 
 	var deleted []string
-	var kept []sessionFile
+	var kept []sessionDir
 
 	for _, f := range ended {
 		if policy.Days == 0 || f.day.Before(cutoff) {
@@ -108,15 +109,15 @@ func (s *Store) Retain(ctx context.Context, policy RetentionPolicy, now time.Tim
 	return deleted, nil
 }
 
-// remove deletes one ended Session file, logging a failure.
+// remove deletes one ended Session tree, logging a failure.
 func (s *Store) remove(path string) bool {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		s.logger.Warn().Err(err).Str("file", path).Msg("retention: failed to delete ended session")
+	if err := os.RemoveAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.logger.Warn().Err(err).Str("folder", path).Msg("retention: failed to delete ended session tree")
 
 		return false
 	}
 
-	s.logger.Info().Str("file", path).Msg("retention: ended session deleted")
+	s.logger.Info().Str("folder", path).Msg("retention: ended session tree deleted")
 
 	return true
 }

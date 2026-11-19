@@ -21,12 +21,14 @@ import (
 	"github.com/marco-rozz/ready/internal/compaction"
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/formatter"
+	"github.com/marco-rozz/ready/internal/injection"
 	"github.com/marco-rozz/ready/internal/orchestrator"
 	"github.com/marco-rozz/ready/internal/persistence"
 	"github.com/marco-rozz/ready/internal/privacy"
 	"github.com/marco-rozz/ready/internal/protocol"
 	"github.com/marco-rozz/ready/internal/session"
 	"github.com/marco-rozz/ready/internal/skills"
+	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/usage"
 )
@@ -261,6 +263,27 @@ type sessionRuntime struct {
 
 	stdinResetOnce sync.Once
 
+	// coord is the reload coordinator; the process-lifetime current
+	// generation accessor for the Subagent services.
+	coord *reloadCoordinator
+
+	// subagents is the process-lifetime Subagent Runtime (nil before wiring
+	// or when never enabled); subagentNotices is its D6c latch.
+	subagents       *subagent.Runtime
+	subagentNotices *subagentNoticeState
+
+	// fleetLimiter is the shared 250 ms snapshot limiter (change-driven AND
+	// Connection attach emissions); wired by buildSubagentRuntime, nil
+	// before then.
+	fleetLimiter *fleetLimiter
+
+	// leases is the process-lifetime generation-lease manager of the
+	// Subagent Runtime (subagent-runtime D14): child dispatches acquire a
+	// lease instead of the generation gate; retirement of a replaced
+	// generation defers to the last lease release. nil at boot before the
+	// first generation is installed (leases are never taken then).
+	leases *generationLeases
+
 	toolCharsComputed atomic.Bool
 	toolChars         atomic.Int64
 
@@ -345,6 +368,18 @@ func (rt *sessionRuntime) onSessionEnd(ctx context.Context, ended *session.Sessi
 	if rt.cfgMgr != nil {
 		rt.cfgMgr.ReleaseSession(ended.ID)
 	}
+}
+
+// currentBootConfig returns the current generation's boot config (nil when
+// no generation is installed).
+func (rt *sessionRuntime) currentBootConfig() *config.Config {
+	if rt.coord != nil {
+		if g := rt.coord.currentGen(); g != nil {
+			return g.bootCfg
+		}
+	}
+
+	return nil
 }
 
 // resetRule returns a channel's reset rule.
@@ -1015,6 +1050,18 @@ func (rt *sessionRuntime) compact(ctx context.Context, cur *session.Session, his
 
 		return compactResult{outcome: compactFailed}
 	}
+
+	// One production scan of the summariser output (subagent-runtime 7.4,
+	// context-compaction "Summariser and Compaction skill"): neutralisation
+	// only — forged reserved tags are disarmed, escalation patterns are
+	// neither flagged nor announced. The scan is deterministic and
+	// in-process; the stored summary is the scan-mutated form so the
+	// post-compaction view, a restore and /session render are consistent
+	// without a rescan (the /compact manual path and the Turn-start guard
+	// both read this same stored summary). A finding never alters the
+	// compaction outcome — mirroring the child path's Summarise wrapper in
+	// configureSessionRuntime.
+	summary = injection.Scan(summary, injection.ModeNeutraliseOnly).Text
 
 	preserved := rt.pinnedSkills(ctx, sid, channelName, prevPreserved, view)
 	delta := usageDelta(usageBefore, acc.Snapshot())

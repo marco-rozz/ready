@@ -670,3 +670,69 @@ func TestResponseAgentDir(t *testing.T) {
 		}
 	})
 }
+
+// TestHandbackNoticeRoundTrip covers the protocol-6 `elapsed_ms` field
+// (subagent-panel-observability D5): present ⇒ carried on the wire and
+// decoded; absent/zero ⇒ the field is omitted (an old daemon's
+// two-segment line degrades gracefully).
+func TestHandbackNoticeRoundTrip(t *testing.T) {
+	withDuration := Response{
+		ConnectionID: "c1",
+		Status:       ResponseStatusOK,
+		ResponseType: ResponseTypeControl,
+		Content:      ControlSubagentHandback,
+		Handback:     &HandbackNotice{Name: "daily-brief", Status: "completed", ElapsedMS: 252000},
+	}
+	data, err := Marshal(withDuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"elapsed_ms":252000`) {
+		t.Fatalf("marshalled notice lost elapsed_ms: %s", data)
+	}
+	got, err := UnmarshalResponse(data)
+	if err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	if got.Handback == nil || got.Handback.Name != "daily-brief" ||
+		got.Handback.Status != "completed" || got.Handback.ElapsedMS != 252000 {
+		t.Fatalf("decoded handback = %+v", got.Handback)
+	}
+
+	without := Response{
+		ConnectionID: "c1",
+		Status:       ResponseStatusOK,
+		ResponseType: ResponseTypeControl,
+		Content:      ControlSubagentHandback,
+		Handback:     &HandbackNotice{Name: "daily-brief", Status: "completed"},
+	}
+	data, err = Marshal(without)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "elapsed_ms") {
+		t.Fatalf("zero elapsed_ms must be omitted: %s", data)
+	}
+	got, err = UnmarshalResponse(data)
+	if err != nil {
+		t.Fatalf("round-trip without duration: %v", err)
+	}
+	if got.Handback == nil || got.Handback.ElapsedMS != 0 {
+		t.Fatalf("decoded handback = %+v", got.Handback)
+	}
+}
+
+// TestHandbackNoticeStrictDecodeAcceptsElapsedMS is the version-history
+// regression for protocol 6: the strict decoder accepts the new field on
+// the control event (a strict protocol-5 peer would have rejected it —
+// that is why the version bumped).
+func TestHandbackNoticeStrictDecodeAcceptsElapsedMS(t *testing.T) {
+	raw := `{"connection_id":"c1","status":"ok","response_type":"control","content":"subagent_handback","handback":{"name":"daily-brief","status":"completed","elapsed_ms":72000}}`
+	got, err := UnmarshalResponse([]byte(raw))
+	if err != nil {
+		t.Fatalf("strict decode rejected elapsed_ms: %v", err)
+	}
+	if got.Handback == nil || got.Handback.ElapsedMS != 72000 {
+		t.Fatalf("decoded handback = %+v", got.Handback)
+	}
+}

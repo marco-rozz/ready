@@ -19,9 +19,11 @@ type HistoryProvider interface {
 }
 
 // EndHook runs after a Session ended (closing record written): it releases
-// Session-scoped state (agentskills session, usage totals, compaction state)
-// and may trigger retention.
-type EndHook func(ctx context.Context, ended *Session)
+// Session-scoped state (agentskills session, usage totals, compaction state
+// and the Subagent fleet cascade — subagent-runtime D5) and may trigger
+// retention. reason is the closing record's reason (command / reset_daily /
+// reset_idle).
+type EndHook func(ctx context.Context, ended *Session, reason string)
 
 // Manager holds the address → current Session map and executes Session
 // transitions. Single-writer invariant: End and the application
@@ -268,7 +270,7 @@ func (m *Manager) endLocked(ctx context.Context, a *addrState, reason string, ne
 	m.mu.Unlock()
 
 	for _, hook := range hooks {
-		hook(ctx, ended)
+		hook(ctx, ended, reason)
 	}
 
 	m.hist.Drop(ended.ID)

@@ -35,6 +35,9 @@ HA_Backup
 !/docs/agent-directories.md
 !/docs/config-versioning.md
 !/docs/openai-codex-provider.md
+!/docs/img/
+!/docs/img/architecture-*.png
+!/docs/img/architecture-*.avif
 /tasks/
 /test_ready/
 CONTEXT.md
@@ -63,4 +66,4 @@ scratch/
 # every release build stamps vcs.modified=true (+dirty on the module version).
 /dist/
 
-ready-architecture.*
+/ready-architecture.*

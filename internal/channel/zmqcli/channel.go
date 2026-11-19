@@ -292,6 +292,15 @@ type Channel struct {
 	// boot-time hooks; nil in tests that never set it.
 	connStart channel.ConnectionStartHook
 
+	// postHandshake runs after the authenticated ok frame has actually
+	// been sent (wire ordering: any unsolicited event emitted here reaches
+	// the client AFTER the handshake reply, so the client's one-frame
+	// handshake read is never disturbed — e.g. the Subagent fleet attach
+	// snapshot). Receives the ok response's effective Session ID (empty
+	// without a Connection start hook). Guarded by usageMu; nil in tests
+	// that never set it.
+	postHandshake func(sessionID string)
+
 	// sess holds the single active session state.
 	sess sessionState
 
@@ -687,6 +696,15 @@ func (c *Channel) OnConnectionStart(hook channel.ConnectionStartHook) {
 	defer c.usageMu.Unlock()
 
 	c.connStart = hook
+}
+
+// SetPostHandshakeHook wires the hook that runs after the authenticated ok
+// frame has been sent (see the postHandshake field comment).
+func (c *Channel) SetPostHandshakeHook(hook func(sessionID string)) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+
+	c.postHandshake = hook
 }
 
 // connectionStart runs the wired hook for a just-acquired Connection; with
@@ -1092,11 +1110,16 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 			Int("declared", req.ProtocolVersion).
 			Int("daemon", protocol.Version).
 			Msg("protocol_version mismatch: session_start refused before authentication")
+		// Safe content naming BOTH versions (wire-protocol spec): the
+		// client's declared version and the daemon's — no credentials, no
+		// prompt text, a version mismatch carries nothing sensitive.
 		resp, _ := protocol.Marshal(protocol.Response{
-			ConnectionID:    req.ConnectionID,
-			Status:          protocol.ResponseStatusError,
-			RequestID:       req.RequestID,
-			ResponseType:    protocol.ResponseTypeControl,
+			ConnectionID: req.ConnectionID,
+			Status:       protocol.ResponseStatusError,
+			RequestID:    req.RequestID,
+			ResponseType: protocol.ResponseTypeControl,
+			Content: fmt.Sprintf("protocol version mismatch: client version %d, daemon version %d — install matching `ready` releases on both ends",
+				req.ProtocolVersion, protocol.Version),
 			ErrorCode:       protocol.ErrorCodeProtocolMismatch,
 			ProtocolVersion: protocol.Version,
 		})
@@ -1250,7 +1273,25 @@ func (c *Channel) sendHandshakeOK(ctx context.Context, identity []byte, okResp p
 		c.logger.Error().Err(sendErr).
 			Str(ConnectionID, okResp.ConnectionID).
 			Msg("failed to send handshake OK reply — session released")
+
+		return
 	}
+
+	// Wire ordering guarantee: anything emitted here reaches the client
+	// strictly after the handshake ok frame (the client's handshake read
+	// consumes exactly one frame — the ok reply — and must never see an
+	// unsolicited event in its place).
+	if hook := c.postHandshakeSnapshot(); hook != nil && okResp.SessionID != "" {
+		hook(okResp.SessionID)
+	}
+}
+
+// postHandshakeSnapshot reads the wired post-handshake hook.
+func (c *Channel) postHandshakeSnapshot() func(sessionID string) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+
+	return c.postHandshake
 }
 
 // handleMessage processes a message or exec request. It verifies that the
@@ -1920,4 +1961,65 @@ func shortIdentity(identity []byte) string {
 	}
 
 	return hex[:maxHexChars]
+}
+
+// SendSubagentsEvent pushes the unsolicited `subagents` snapshot control
+// event (subagent-runtime D11) to the active Connection: the fleet rows and
+// the pending-handback count. It never touches a pending reply slot.
+func (c *Channel) SendSubagentsEvent(info protocol.SubagentsInfo) error {
+	connectionID, identity, _, _ := c.sess.snapshot()
+	if connectionID == "" || len(identity) == 0 {
+		return nil
+	}
+
+	resp, err := protocol.Marshal(protocol.Response{
+		ConnectionID: connectionID,
+		Status:       protocol.ResponseStatusOK,
+		ResponseType: protocol.ResponseTypeControl,
+		Content:      protocol.ControlSubagents,
+		Subagents:    &info,
+	})
+	if err != nil {
+		return fmt.Errorf("zmqcli: marshal %s event: %w", protocol.ControlSubagents, err)
+	}
+
+	if sendErr := c.listener.Send(identity, resp); sendErr != nil {
+		c.logger.Warn().Err(sendErr).Str(ConnectionID, connectionID).Str("event", protocol.ControlSubagents).Msg("failed to send subagents event")
+
+		return fmt.Errorf("zmqcli: send %s event: %w", protocol.ControlSubagents, sendErr)
+	}
+
+	return nil
+}
+
+// SendSubagentHandbackEvent pushes the just-delivered dispatch result's
+// notice to the connected TUI (an unsolicited control event, never a reply
+// delivery): the Subagent's name, the handback status and — protocol 6
+// (subagent-panel-observability D5) — the dispatch's wall-clock duration in
+// milliseconds (0 = unknown, field omitted). No-op without an active
+// connection.
+func (c *Channel) SendSubagentHandbackEvent(name, status string, elapsedMS int64) error {
+	connectionID, identity, _, _ := c.sess.snapshot()
+	if connectionID == "" || len(identity) == 0 {
+		return nil
+	}
+
+	resp, err := protocol.Marshal(protocol.Response{
+		ConnectionID: connectionID,
+		Status:       protocol.ResponseStatusOK,
+		ResponseType: protocol.ResponseTypeControl,
+		Content:      protocol.ControlSubagentHandback,
+		Handback:     &protocol.HandbackNotice{Name: name, Status: status, ElapsedMS: elapsedMS},
+	})
+	if err != nil {
+		return fmt.Errorf("zmqcli: marshal %s event: %w", protocol.ControlSubagentHandback, err)
+	}
+
+	if sendErr := c.listener.Send(identity, resp); sendErr != nil {
+		c.logger.Warn().Err(sendErr).Str(ConnectionID, connectionID).Str("event", protocol.ControlSubagentHandback).Msg("failed to send subagent handback event")
+
+		return fmt.Errorf("zmqcli: send %s event: %w", protocol.ControlSubagentHandback, sendErr)
+	}
+
+	return nil
 }

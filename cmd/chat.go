@@ -491,16 +491,11 @@ func chatHandshakeDirect(_ context.Context, dealer zmq4.Socket, connectionID, to
 		return protocol.Response{}, handleHandshakeRecvError(stderr, err, sigIntFired)
 	}
 
-	if challengeResp.ErrorCode != challenge {
-		_, _ = fmt.Fprintf(stderr, "expected challenge, got status=%q error_code=%q\n",
-			challengeResp.Status, challengeResp.ErrorCode)
-
-		return protocol.Response{}, cli.Exit("", ExitErr)
-	}
-
-	// guided-init D11a: the client checks protocol_version on EVERY
-	// handshake response before computing any HMAC or opening a session.
-	if verr := checkProtocolVersion(&challengeResp, stderr); verr != nil {
+	// Wire-protocol spec: the client checks protocol_version on EVERY
+	// session_start response BEFORE any other status interpretation
+	// (no HMAC, no session) — a mismatch or a version-less reply must
+	// print its own stderr line, never the generic challenge complaint.
+	if verr := round1Gate(&challengeResp, stderr); verr != nil {
 		return protocol.Response{}, verr
 	}
 
@@ -529,15 +524,9 @@ func chatHandshakeLoop(chatCtx context.Context, dealer zmq4.Socket, connectionID
 		return protocol.Response{}, handleHandshakeRecvError(stderr, err, sigIntFired)
 	}
 
-	if challengeResp.ErrorCode != challenge {
-		_, _ = fmt.Fprintf(stderr, "expected challenge, got status=%q error_code=%q\n",
-			challengeResp.Status, challengeResp.ErrorCode)
-
-		return protocol.Response{}, cli.Exit("", ExitErr)
-	}
-
-	// guided-init D11a: same client-side check on the loop path.
-	if verr := checkProtocolVersion(&challengeResp, stderr); verr != nil {
+	// Wire-protocol spec: same ordering as the direct path — the version
+	// gate precedes the challenge check on the loop path too.
+	if verr := round1Gate(&challengeResp, stderr); verr != nil {
 		return protocol.Response{}, verr
 	}
 
@@ -548,6 +537,42 @@ func chatHandshakeLoop(chatCtx context.Context, dealer zmq4.Socket, connectionID
 
 // recvFn is either recvDirect (TUI) or recv.waitControl (non-TUI).
 type recvFn func(dealer zmq4.Socket, timeout time.Duration, sigIntFired chan struct{}) (protocol.Response, error)
+
+// errUndecodableReply marks a handshake response that could not be decoded
+// at all (strict decoding refused it). It is reported as a daemon that
+// predates protocol versioning, never as a raw parse error.
+var errUndecodableReply = errors.New("undecodable handshake reply")
+
+// round1Gate applies the round-1 (probe) response gate shared by both
+// handshake paths: the protocol-version check FIRST (a mismatch or a
+// version-less reply gets its own spec-required stderr line and never
+// reaches the challenge complaint), then the challenge expectation.
+// Nothing here computes an HMAC or touches session state.
+func round1Gate(resp *protocol.Response, stderr io.Writer) error {
+	if verr := checkProtocolVersion(resp, stderr); verr != nil {
+		return verr
+	}
+
+	if resp.ErrorCode != challenge {
+		_, _ = fmt.Fprintf(stderr, "expected challenge, got status=%q error_code=%q\n",
+			resp.Status, resp.ErrorCode)
+
+		return cli.Exit("", ExitErr)
+	}
+
+	return nil
+}
+
+// reportPredatesVersioning prints the single stderr line the wire-protocol
+// spec requires for a round-1 reply that carries no protocol_version or
+// cannot be decoded: a daemon that predates protocol versioning.
+func reportPredatesVersioning(stderr io.Writer) error {
+	_, _ = fmt.Fprintf(stderr,
+		"protocol version mismatch: %s (client version %d) — install matching `ready` releases on both ends\n",
+		protocol.PredatesVersioningHint, protocol.Version)
+
+	return cli.Exit("", ExitErr)
+}
 
 // checkProtocolVersion enforces the client side of the guided-init D11a
 // handshake gate on one session_start response: a different declared version
@@ -564,11 +589,7 @@ func checkProtocolVersion(resp *protocol.Response, stderr io.Writer) error {
 		return cli.Exit("", ExitErr)
 	}
 	if resp.ProtocolVersion == 0 {
-		_, _ = fmt.Fprintf(stderr,
-			"protocol version mismatch: %s (client version %d) — install matching `ready` releases on both ends\n",
-			protocol.PredatesVersioningHint, protocol.Version)
-
-		return cli.Exit("", ExitErr)
+		return reportPredatesVersioning(stderr)
 	}
 	if resp.ProtocolVersion != protocol.Version {
 		_, _ = fmt.Fprintf(stderr,
@@ -661,7 +682,11 @@ func recvDirect(dealer zmq4.Socket, timeout time.Duration, sigIntFired chan stru
 
 		resp, parseErr := protocol.UnmarshalResponse(msg.Frames[len(msg.Frames)-1])
 		if parseErr != nil {
-			ch <- result{err: parseErr}
+			// Strict decoding refused the frame: a handshake peer that cannot
+			// emit a decodable session_start response predates protocol
+			// versioning — surfaced as errUndecodableReply, never as a raw
+			// parse error.
+			ch <- result{err: fmt.Errorf("%w: %s", errUndecodableReply, parseErr.Error())}
 
 			return
 		}
@@ -683,18 +708,20 @@ func recvDirect(dealer zmq4.Socket, timeout time.Duration, sigIntFired chan stru
 // from the DEALER socket and dispatches control/reply messages into typed
 // channels; progress frames are discarded (D16).
 type recvLoop struct {
-	dealer  zmq4.Socket
-	control chan protocol.Response // auth/handshake/post-handshake lifecycle
-	replies chan protocol.Response // final answers to message/exec requests
-	errs    chan error             // receive errors
+	dealer      zmq4.Socket
+	control     chan protocol.Response // auth/handshake/post-handshake lifecycle
+	replies     chan protocol.Response // final answers to message/exec requests
+	errs        chan error             // receive errors
+	undecodable chan error             // frames strict decoding refused (handshake reporting)
 }
 
 func newRecvLoop(dealer zmq4.Socket) *recvLoop {
 	return &recvLoop{
-		dealer:  dealer,
-		control: make(chan protocol.Response, 8),
-		replies: make(chan protocol.Response, 8),
-		errs:    make(chan error, 1),
+		dealer:      dealer,
+		control:     make(chan protocol.Response, 8),
+		replies:     make(chan protocol.Response, 8),
+		errs:        make(chan error, 1),
+		undecodable: make(chan error, 1),
 	}
 }
 
@@ -724,6 +751,15 @@ func (r *recvLoop) run(ctx context.Context, sigIntFired chan struct{}) {
 
 		resp, parseErr := protocol.UnmarshalResponse(raw)
 		if parseErr != nil {
+			// Strict decoding refused the frame. Post-handshake this stays
+			// silently ignored (a noise frame must not tear a live session);
+			// during the handshake waitControl surfaces the first one so the
+			// round-1 report can name a daemon predating protocol versioning.
+			select {
+			case r.undecodable <- fmt.Errorf("%w: %s", errUndecodableReply, parseErr.Error()):
+			default:
+			}
+
 			continue
 		}
 
@@ -754,11 +790,15 @@ func (r *recvLoop) run(ctx context.Context, sigIntFired chan struct{}) {
 	}
 }
 
-// waitControl waits for a control message with timeout (handshake).
+// waitControl waits for a control message with timeout (handshake). A frame
+// strict decoding refused is surfaced as errUndecodableReply so the caller
+// can report a versioning-predating daemon instead of a bare timeout.
 func (r *recvLoop) waitControl(ctx context.Context, timeout time.Duration, sigIntFired chan struct{}) (protocol.Response, error) {
 	select {
 	case resp := <-r.control:
 		return resp, nil
+	case err := <-r.undecodable:
+		return protocol.Response{}, err
 	case err := <-r.errs:
 		return protocol.Response{}, err
 	case <-time.After(timeout):
@@ -806,7 +846,11 @@ func isModelStatusControl(resp protocol.Response) bool {
 
 	return resp.Activity != nil || resp.ModelState != "" ||
 		resp.Content == protocol.ControlSessionChanged ||
-		resp.Content == protocol.ControlCompacted
+		resp.Content == protocol.ControlCompacted ||
+		// subagent-runtime: the fleet snapshot is a TUI-only view; the non-
+		// TUI paths ignore it (task 6.3).
+		resp.Content == protocol.ControlSubagents ||
+		resp.Content == protocol.ControlSubagentHandback
 }
 
 // waitReplyIgnoringModelStatus wraps recvLoop.waitReply, skipping
@@ -1079,6 +1123,14 @@ func handleHandshakeRecvError(stderr io.Writer, err error, sigIntFired chan stru
 
 	if errors.Is(err, errSigInt) {
 		return cli.Exit("", ExitSIGINT)
+	}
+
+	// A reply strict decoding refused cannot carry a protocol version:
+	// per the wire-protocol spec it is reported as a daemon that predates
+	// protocol versioning (one stderr line, generic exit 1), never as a
+	// raw parse error.
+	if errors.Is(err, errUndecodableReply) {
+		return reportPredatesVersioning(stderr)
 	}
 
 	_, _ = fmt.Fprintf(stderr, "%v\n", err)

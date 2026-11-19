@@ -91,3 +91,72 @@ func TestSwapChannelsStopsPreviousTelegramWhenRunning(t *testing.T) {
 		t.Fatal("swapChannels must stop the previous Telegram channel")
 	}
 }
+
+// --- subagent-runtime task 3.4: generation leases ---
+
+func TestGenerationLeases_DeferredRetirement(t *testing.T) {
+	var retired atomic.Int32
+	g1 := &runtimeGeneration{cancel: func() {}}
+	g2 := &runtimeGeneration{cancel: func() {}}
+	l := newGenerationLeases(g1, zerolog.Nop())
+	l.retire = func(context.Context, *runtimeGeneration) { retired.Add(1) }
+
+	// A child holds a lease on g1; the swap must not wait for it.
+	release := func() func() {
+		_, rel := l.Acquire(context.Background())
+
+		return rel
+	}()
+	l.Swap(context.Background(), g2)
+
+	if l.PendingRetired() != 1 {
+		t.Fatalf("pending retired = %d", l.PendingRetired())
+	}
+	if retired.Load() != 0 {
+		t.Fatal("leased generation retired during swap")
+	}
+
+	// Release: retirement runs.
+	release()
+	if retired.Load() != 1 {
+		t.Fatalf("retired = %d after release", retired.Load())
+	}
+	if l.PendingRetired() != 0 {
+		t.Fatal("deferred generation not cleared")
+	}
+}
+
+func TestGenerationLeases_ImmediateRetirementWhenUnleased(t *testing.T) {
+	var retired atomic.Int32
+	g1 := &runtimeGeneration{cancel: func() {}}
+	g2 := &runtimeGeneration{cancel: func() {}}
+	l := newGenerationLeases(g1, zerolog.Nop())
+	l.retire = func(context.Context, *runtimeGeneration) { retired.Add(1) }
+
+	l.Swap(context.Background(), g2)
+	if retired.Load() != 1 {
+		t.Fatalf("unleased previous not retired immediately: %d", retired.Load())
+	}
+}
+
+func TestGenerationLeases_ShutdownAllRetiresEverything(t *testing.T) {
+	var retired atomic.Int32
+	g1 := &runtimeGeneration{cancel: func() {}}
+	g2 := &runtimeGeneration{cancel: func() {}}
+	g3 := &runtimeGeneration{cancel: func() {}}
+	l := newGenerationLeases(g1, zerolog.Nop())
+	l.retire = func(context.Context, *runtimeGeneration) { retired.Add(1) }
+
+	_, rel := l.Acquire(context.Background())
+	l.Swap(context.Background(), g2)
+	_, rel2 := l.Acquire(context.Background())
+	l.Swap(context.Background(), g3)
+
+	l.ShutdownAll(context.Background())
+	rel()
+	rel2() // releases after ShutdownAll must not double-retire
+
+	if got := retired.Load(); got != 3 {
+		t.Fatalf("retired = %d, want 3 (g1, g2, g3)", got)
+	}
+}

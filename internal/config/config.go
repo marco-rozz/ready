@@ -54,6 +54,7 @@ type Config struct {
 	Channels      ChannelsConfig             `yaml:"channels"`
 	MCPServers    map[string]MCPServerConfig `yaml:"mcp_servers"`
 	Skills        SkillsConfig               `yaml:"skills"`
+	Subagents     SubagentsConfig            `yaml:"subagents"`
 	Sessions      SessionsConfig             `yaml:"sessions"`
 	Compaction    CompactionConfig           `yaml:"compaction"`
 	Logging       LoggingConfig              `yaml:"logging"`
@@ -377,6 +378,15 @@ type LLMProviderConfig struct {
 	// with this value or Ollama's silent truncation invalidates the
 	// percentage (boot WARN on mismatch).
 	ContextWindow int `yaml:"context_window"`
+
+	// MaxParallel caps the concurrent LLM attempts granted slots on this
+	// provider instance (subagent-runtime D18): every main-agent attempt
+	// (owner or child), aux call and probe queues for a slot before running;
+	// owner attempts are granted ahead of channel-owner Subagent attempts,
+	// which are granted ahead of job attempts. Default: 1 for ollama (a
+	// local model serialises its calls), unlimited (0) for every other
+	// provider. A negative value fails boot.
+	MaxParallel int `yaml:"max_parallel"`
 }
 
 // OllamaOptions mirrors the subset of Ollama's api.Options relevant to chat
@@ -1155,6 +1165,11 @@ func (c *Config) validate() error {
 		return err
 	}
 
+	// Subagent Runtime configuration (subagent-runtime D13).
+	if err := validateSubagents(c.Subagents); err != nil {
+		return err
+	}
+
 	if err := c.validateProfileNamed(); err != nil {
 		return err
 	}
@@ -1394,6 +1409,12 @@ func (c *Config) validateLLM() error {
 		// field.
 		if entry.ContextWindow < 0 {
 			return fmt.Errorf("llm.providers.%s.context_window must be a positive integer (tokens), got %d", name, entry.ContextWindow) // user-facing config error
+		}
+
+		// max_parallel (subagent-runtime D18): optional non-negative integer
+		// on every provider type (0 = unlimited; ollama defaults to 1).
+		if entry.MaxParallel < 0 {
+			return fmt.Errorf("llm.providers.%s.max_parallel must be a non-negative integer, got %d", name, entry.MaxParallel) // user-facing config error
 		}
 
 		hasKey := entry.APIKey.IsSet()
@@ -1841,6 +1862,10 @@ func applyLLMDefaults(llm *LLMConfig) {
 		entry.Name = name
 		if entry.Provider == ProviderOpenAICodex && entry.BaseURL == "" {
 			entry.BaseURL = "https://chatgpt.com/backend-api"
+		}
+		// D18 default: a local model serialises its attempts.
+		if entry.Provider == ProviderOllama && entry.MaxParallel == 0 {
+			entry.MaxParallel = 1
 		}
 		llm.Providers[name] = entry
 	}

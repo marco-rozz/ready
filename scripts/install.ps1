@@ -33,6 +33,7 @@ function Get-LauncherPath { Join-Path $env:USERPROFILE '.local\bin\ready.exe' }
 function Get-ShareRootPath { Join-Path $env:USERPROFILE '.local\share\ready' }
 function Get-BodyPath { Get-LauncherPath } # body == exe, published directly
 function Get-LibraryPath { Join-Path (Get-ShareRootPath) 'library\skills' }
+function Get-SubagentLibraryPath { Join-Path (Get-ShareRootPath) 'library\subagents' }
 function Get-AgentDirPath { Join-Path $env:USERPROFILE '.ready' }
 
 # Is-Elevated reports whether the current process token is elevated
@@ -221,6 +222,9 @@ function Main {
         if (-not (Test-Path (Join-Path $extractDir 'skills'))) {
             throw 'the archive is missing the skills library (a corrupted or unrelated release?)'
         }
+        if (-not (Test-Path (Join-Path $extractDir 'subagents'))) {
+            throw 'the archive is missing the subagent definition library (a corrupted or unrelated release?)'
+        }
         if (-not (Test-Path (Join-Path $extractDir 'config.example.yaml'))) {
             throw 'the archive is missing config.example.yaml (a corrupted or unrelated release?)'
         }
@@ -301,6 +305,33 @@ function Main {
         }
         if (Test-Path $libraryOld) {
             Remove-Item $libraryOld -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        # subagent definition library: same installer-owned swap.
+        $subLibrary = Get-SubagentLibraryPath
+        $subParent = Split-Path $subLibrary -Parent
+        if (-not (Test-Path $subParent)) {
+            New-Item -ItemType Directory -Path $subParent -Force | Out-Null
+        }
+        $subOld = Join-Path $subParent 'subagents.old'
+        $subSwapped = $false
+        if (Test-Path $subLibrary) {
+            if (Test-Path $subOld) {
+                Remove-Item $subOld -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+            Rename-Item $subLibrary 'subagents.old'
+            $subSwapped = $true
+        }
+        try {
+            Move-Item (Join-Path $extractDir 'subagents') $subLibrary
+        } catch {
+            if ($subSwapped -and -not (Test-Path $subLibrary)) {
+                Rename-Item $subOld 'subagents' -ErrorAction SilentlyContinue
+            }
+            throw "failed to publish the subagent definition library: $($_.Exception.Message)"
+        }
+        if (Test-Path $subOld) {
+            Remove-Item $subOld -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
         }
 
         # The example is program content. Only ready init creates an agent

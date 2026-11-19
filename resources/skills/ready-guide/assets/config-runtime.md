@@ -25,10 +25,10 @@ sessions:
   channel checks at Connection start, silently; the stdin CLI checks once
   at its first message.
 - Compaction never counts as activity for reset or idle purposes.
-- Retention touches only ended `.jsonl` Sessions and only files matching
-  the naming scheme; the current Session is never deleted. A pass runs at
-  boot and after every Session end. `retention_days: 0` deletes ended
-  Sessions at the very next pass.
+- Retention touches only ended Session folders (whole trees, the
+  `subagents/` subtree included) matching the naming scheme; the current
+  Session is never deleted. A pass runs at boot and after every Session
+  end. `retention_days: 0` deletes ended Sessions at the very next pass.
 - Channel overrides: `channels.<name>.session_reset` with the same fields
   (only set fields replace the global ones). Invalid values (bad mode,
   malformed `daily_at`, idle mode without `idle_after`) fail boot.

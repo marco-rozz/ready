@@ -30,6 +30,7 @@ import (
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/errdigest"
 	"github.com/marco-rozz/ready/internal/formatter"
+	"github.com/marco-rozz/ready/internal/injection"
 	"github.com/marco-rozz/ready/internal/llm"
 	"github.com/marco-rozz/ready/internal/logging"
 	homemcp "github.com/marco-rozz/ready/internal/mcp"
@@ -43,6 +44,8 @@ import (
 	"github.com/marco-rozz/ready/internal/session"
 	"github.com/marco-rozz/ready/internal/skillcache"
 	"github.com/marco-rozz/ready/internal/skills"
+	"github.com/marco-rozz/ready/internal/skillssync"
+	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/twin"
 	"github.com/marco-rozz/ready/internal/usage"
@@ -85,6 +88,15 @@ type turnExecutor interface {
 		resumeReady func() bool,
 		onChunk func(string),
 	) (agent.TurnOutcome, error)
+
+	// ExecuteTurnRequest is the full-request seam the Subagent child driver
+	// uses (subagent-runtime D17): the request carries the per-turn runner
+	// set, the optional model pin and the provider-slot priority.
+	ExecuteTurnRequest(
+		ctx context.Context,
+		req orchestrator.TurnRequest,
+		onChunk func(string),
+	) (agent.TurnOutcome, error)
 }
 
 // plainRunnerExec adapts a single agent.Runner (and a fixed layout) to the
@@ -107,6 +119,18 @@ func (p *plainRunnerExec) ExecuteTurn(
 	onChunk func(string),
 ) (agent.TurnOutcome, error) {
 	return p.runner.RunMessagesStreaming(ctx, sessionKey, assemble(p.layout, ""), onChunk)
+}
+
+// ExecuteTurnRequest runs the request through the single runner (no
+// failover): the runner set is ignored, everything else is honoured.
+func (p *plainRunnerExec) ExecuteTurnRequest(
+	ctx context.Context,
+	req orchestrator.TurnRequest,
+	onChunk func(string),
+) (agent.TurnOutcome, error) {
+	outcome, err := p.runner.RunMessagesStreaming(ctx, req.SessionKey, req.Assemble(p.layout, ""), onChunk)
+
+	return outcome, err
 }
 
 // agentRegistry holds the turn executor shared by all channels. In
@@ -217,6 +241,7 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	rootLogger, logCloser := logRes.Logger, logRes.Closer
 
 	logger := rootLogger.With().Str("component", "main").Logger()
+	wireGoroutineDumpSignal(rootLogger)
 	logConfigMigration(logger, migrationReport)
 	warnThoughtsLevelMismatch(rootLogger, cfg, logRes)
 
@@ -228,6 +253,29 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	configState := &tools.ConfigManagerState{}
 	defer configState.Close()
 	shell := &serveShell{ctx: ctx, opts: opts, resolution: resolution, rootLogger: rootLogger, logger: logger, configState: configState}
+
+	// The session runtime is created as a skeleton BEFORE the first
+	// generation: the Subagent Runtime wiring (below) and buildTools read it
+	// through lazily-evaluated closures, so its remaining fields (channel
+	// manager, history and session stores) are filled in once they exist.
+	usageStore := usage.NewStore()
+	histStore := newHistoryStore(usageStore, rootLogger)
+	rt := &sessionRuntime{
+		hist:       histStore,
+		usageStore: usageStore,
+		sanitizer:  sanitizer,
+		logger:     rootLogger.With().Str("component", "dispatcher").Logger(),
+	}
+	shell.rt = rt
+
+	// Subagent Runtime (subagent-runtime task 7.3): process-lifetime, wired
+	// BEFORE the first generation — buildTools reads shell.subagents to
+	// register the subagent_* tools in the boot catalog (wiring it after the
+	// generation build left every fresh boot without the tools; they only
+	// appeared after a Runtime reload). Definitions load below and are
+	// handed to it.
+	subagentRT := buildSubagentRuntime(shell, &cfg.Subagents, cfg.Sessions.Path, rootLogger.With().Str("component", "subagent").Logger())
+	shell.subagents = subagentRT
 
 	// First Runtime Generation: LLM orchestrator + runners, MCP, Twin, skills,
 	// tools, bootstrapper. A boot failure here is fatal; later generations
@@ -251,11 +299,10 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 
 	logger.Info().Msg("READY. (Agentic Home System) started. Type a message (Ctrl+C to quit).")
 
-	// tui-usage-observability + session-lifecycle D7: the daemon-global
-	// per-Session usage registry, keyed by Session ID and re-seeded at
-	// restore from each Session file's turn_usage records.
-	usageStore := usage.NewStore()
-	histStore := newHistoryStore(usageStore, rootLogger)
+	// The skeleton session runtime is completed now that its dependencies
+	// exist; the generation's leases are installed with it.
+	rt.mgr = mgr
+	rt.applyGeneration(gen)
 
 	sessStore, err := session.NewStore(cfg.Sessions.Path, rootLogger.With().Str("component", "sessions").Logger())
 	if err != nil {
@@ -271,16 +318,33 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 		return recordFromTotals(usageStore.Snapshot(id))
 	}, rootLogger.With().Str("component", "sessions").Logger())
 
-	rt := &sessionRuntime{
-		mgr:        mgr,
-		hist:       histStore,
-		sessions:   sessMgr,
-		usageStore: usageStore,
-		sanitizer:  sanitizer,
-		logger:     rootLogger.With().Str("component", "dispatcher").Logger(),
+	rt.sessions = sessMgr
+
+	// Definitions (D3): library sync, then load — a file that fails
+	// validation at boot fails boot naming the file.
+	if syncErr := skillssync.Sync(ctx, cfg.Subagents.Path, cfg.Subagents.LibraryPath, cfg.Subagents.SyncMode(), rootLogger); syncErr != nil {
+		return fmt.Errorf("failed to sync the subagent definition library: %w", syncErr)
 	}
-	rt.applyGeneration(gen)
-	shell.rt = rt
+
+	defs, err := subagent.LoadDefinitions(cfg.Subagents.Path)
+	if err != nil {
+		return fmt.Errorf("invalid subagent definitions: %w", err)
+	}
+
+	subagentRT.SetDefinitions(subagent.NewDefinitions(defs))
+
+	// The D14 lease manager starts on the boot generation.
+	rt.leases = newGenerationLeases(gen, rootLogger.With().Str("component", "generation-leases").Logger())
+
+	// Boot restore + reconciliation (task 5.5) runs once the dispatcher is
+	// up — see restoreSubagentFleet below.
+
+	// Internal jobs (task 5b.3): open `system` trees are closed at boot with
+	// the daemon-restart reason, no callback.
+	closeStaleJobSessions(ctx, cfg.Sessions.Path, rootLogger.With().Str("component", "subagent-jobs").Logger())
+
+	// Boot restore + reconciliation (task 5.5, enabled only).
+	restoreSubagentFleet(ctx, rt, cfg.Sessions.Path, cfg.Subagents.EnabledOn(), rootLogger.With().Str("component", "subagent-restore").Logger())
 
 	coord := &reloadCoordinator{
 		rt:        rt,
@@ -292,6 +356,7 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	}
 	coord.afterSwap = func(g *runtimeGeneration, fromTUI bool) { shell.afterSwap(g, fromTUI) }
 	shell.coord = coord
+	rt.coord = coord
 	shell.reloadFn = shell.runtimeReloadHandler
 	rt.onAutoReload = coord.RequestAutoReload
 
@@ -301,8 +366,22 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 		Days:         cfg.Sessions.Retention.Days(),
 		MaxTotalSize: int64(cfg.Sessions.Retention.MaxTotalSize),
 	})
-	sessMgr.OnEnd(func(ctx context.Context, ended *session.Session) {
+	sessMgr.OnEnd(func(ctx context.Context, ended *session.Session, reason string) {
 		rt.onSessionEnd(ctx, ended)
+
+		// Owner end cascade (subagent-runtime task 5.6, D5): the fleet ends
+		// with the owner Session — cancel + join, fixed interrupt appends,
+		// closing records with the owner's reason, pending set dropped.
+		if rt.subagents != nil {
+			rt.subagents.EndOwner(ctx, subagent.Owner{
+				SessionID: ended.ID,
+				Address:   string(ended.Address),
+				Kind:      subagent.OwnerChannel,
+				History:   rt.hist.For(ctx, ended),
+				Delivery:  subagent.Delivery{Kind: subagent.DeliveryPassive},
+			}, reason)
+		}
+
 		triggerRetention()
 	})
 
@@ -348,6 +427,13 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 	// Refuse further reloads and release the current generation's resources
 	// (bootstrapper sessions, Twin, MCP, skills, config staging).
 	coord.Close().shutdown(ctx, rootLogger)
+
+	// Subagent shutdown (task 2.4): in-flight dispatches are cancelled and
+	// joined, open groups closed with the fixed daemon-restart result — NOT
+	// a Session end (no closing records, pending handbacks stay durable).
+	if shell.subagents != nil {
+		shell.subagents.Shutdown(ctx)
+	}
 
 	// The final record precedes Close: records logged after it never reach
 	// the log file (they still reach the console).
@@ -452,6 +538,35 @@ func configureSessionRuntime(cfg *config.Config, rt *sessionRuntime, aux model.B
 
 	rt.summariser = compaction.NewSummariser(aux, rt.compactionSkillPrompt, cfg.Compaction.Timeout,
 		rt.logger.With().Str("consumer", "compaction").Logger())
+
+	// Child compaction parameters (subagent-runtime task 4.3, D2: the
+	// owner's parameters); the summariser closure attributes usage to the
+	// accumulator carried in the child's context (the forwarding child
+	// accumulator). The neutralisation-only scan of the summary output is
+	// applied here once at production (task 7.4).
+	if rt.subagents != nil {
+		rt.subagents.SetChildCompaction(&subagent.ChildCompaction{
+			Enabled:          cfg.Compaction.AutoEnabled(),
+			KeepRecentTokens: cfg.Compaction.KeepRecentTokens,
+			KeepRecentTurns:  cfg.Compaction.KeepRecentTurns,
+			Window:           smallestContextWindow(cfg.LLM),
+			Reserve:          cfg.Compaction.ReserveTokens,
+			MaxTurns:         cfg.Compaction.MaxTurns,
+			Summarise: func(ctx context.Context, req compaction.Request) (string, error) {
+				summary, err := rt.summariser.Summarise(ctx, req)
+				if err != nil {
+					return "", err
+				}
+
+				// One production scan: neutralisation only (no escalation
+				// flags, no header — admin-profile conversations
+				// legitimately discuss !secret / config.yaml).
+				scanned := injection.Scan(summary, injection.ModeNeutraliseOnly)
+
+				return scanned.Text, nil
+			},
+		})
+	}
 }
 
 // wireZMQSessions wires the ZMQ channel to the Session lifecycle: the
@@ -468,6 +583,28 @@ func wireZMQSessions(ctx context.Context, zmqCh *zmqcli.Channel, rt *sessionRunt
 		id, pending := rt.sessions.RequestReset(hctx, session.AddressOf(msg), rule, time.Now())
 
 		return channel.ConnectionInfo{SessionID: id, ResetPending: pending}
+	})
+
+	// Subagent fleet attach snapshot (wire-protocol spec): a Connection
+	// attaching to a Session with Subagent history receives exactly one
+	// snapshot, after the handshake ok frame (the client's handshake read
+	// consumes exactly one frame — an emission from the Connection start
+	// hook could reach it first, because the ok reply is sent
+	// asynchronously) and before any change-driven event (none can exist:
+	// the owner has not sent anything yet). A pending reset pre-assigns a
+	// brand-new Session — no history by construction — so only an ok whose
+	// Session ID matches the address's CURRENT session is evaluated.
+	zmqCh.SetPostHandshakeHook(func(effectiveSessionID string) {
+		if effectiveSessionID == "" {
+			return
+		}
+
+		cur := rt.sessions.Current(ctx, session.Address(zmqcli.ChannelName))
+		if cur == nil || cur.ID != effectiveSessionID {
+			return
+		}
+
+		rt.maybeEmitAttachSnapshot(cur)
 	})
 
 	zmqCh.SetUsageSource(func() *protocol.UsageInfo {
@@ -710,6 +847,7 @@ func buildTools(
 	haTwin *hatwin.Twin,
 	rootLogger zerolog.Logger,
 	profileOverrides config.ProfileOverrideInputs,
+	subagentRT *subagent.Runtime,
 	sharedState ...*tools.ConfigManagerState,
 ) ([]tool.BaseTool, homemcp.Runtime, []profile.BlockedTool, *tools.ConfigManager) {
 	logger := rootLogger.With().Str("component", "tools").Logger()
@@ -783,6 +921,12 @@ func buildTools(
 		builtinTools = append(builtinTools, tools.NewConfigManagerTool(cfgMgr))
 	}
 
+	// The subagent_* tool surface (subagent-runtime task 7.1): registered
+	// under builtin_tools; absent entirely when the Runtime is not wired.
+	if subagentRT != nil {
+		builtinTools = append(builtinTools, newSubagentTools(subagentRT, nil, rootLogger)...)
+	}
+
 	var blocked []profile.BlockedTool
 
 	agentTools, ownerBlocked := profile.GateOwner(ctx, "builtin_tools", builtinTools, cfg.BuiltinTools.Profiles, activeProfileName, decisionLog, logger)
@@ -823,11 +967,11 @@ func profileSource(overrides config.ProfileOverrideInputs) string {
 	return "configuration"
 }
 
-// wrapWithErrorDigest wraps all tools with the error-digestion layer
-// (errdigest.TrackedTool). The classifier is wired here with the MCP and
-// wait-tool sentinels.
-func wrapWithErrorDigest(agentTools []tool.BaseTool, rootLogger zerolog.Logger) []tool.BaseTool {
-	classifier := errdigest.NewClassifier().
+// errDigestClassifier builds the daemon-wide sentinel→severity classifier
+// (shared by the error-digestion tool wrapper and the Subagent handback
+// severity mapping — subagent-runtime).
+func errDigestClassifier() *errdigest.Classifier {
+	return errdigest.NewClassifier().
 		Register(tools.ErrWaitExceedsTurnBudget, errdigest.Transient).
 		Register(homemcp.ErrMCPTimeout, errdigest.Transient).
 		Register(homemcp.ErrMCPConnection, errdigest.Transient).
@@ -868,7 +1012,19 @@ func wrapWithErrorDigest(agentTools []tool.BaseTool, rootLogger zerolog.Logger) 
 		Register(config.ErrConfigSourceConflict, errdigest.Permanent).
 		Register(config.ErrNotRegularConfig, errdigest.Permanent).
 		Register(config.ErrCommitTransient, errdigest.Transient).
-		Register(config.ErrCommitPostCommit, errdigest.Transient)
+		Register(config.ErrCommitPostCommit, errdigest.Transient).
+		// Subagent runtime refusals (subagent-runtime): a disabled feature
+		// is a configuration fact, not a transient failure — the model must
+		// see [PERMANENT] and report the capability as unavailable instead
+		// of retrying or concluding the tool does not exist.
+		Register(subagent.ErrFeatureDisabled, errdigest.Permanent).
+		Register(subagent.ErrModelPinOutsideChain, errdigest.Permanent)
+}
+
+// wrapWithErrorDigest wraps all tools with the error-digestion layer
+// (errdigest.TrackedTool).
+func wrapWithErrorDigest(agentTools []tool.BaseTool, rootLogger zerolog.Logger) []tool.BaseTool {
+	classifier := errDigestClassifier()
 
 	return errdigest.WrapTools(agentTools, classifier, toolSessionKey,
 		rootLogger.With().Str("component", "errdigest").Logger())
@@ -1615,6 +1771,20 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		rt.cfgMgr.ConfirmConfigInput(ctx, cur.ID, msg.Content)
 	}
 
+	// Subagent pre-turn hook (subagent-runtime task 5.3, D6): pending
+	// handbacks are delivered at the head of the Turn — handback_delivery
+	// records placed BEFORE the user message and flushed before the first
+	// model call. With nothing pending the path is untouched.
+	if rt.subagents != nil {
+		rt.deliverPendingHandbacks(ctx, subagent.Owner{
+			SessionID: cur.ID,
+			Address:   string(addr),
+			Kind:      subagent.OwnerChannel,
+			History:   history,
+			Delivery:  subagent.Delivery{Kind: subagent.DeliveryPassive},
+		}, history)
+	}
+
 	// criticalities-remediation (M14): dispose the streaming support loops
 	// even when the turn panics — cleanup/terminal may never run, and the
 	// Telegram flusher goroutine would leak its ticker until process exit.
@@ -1646,6 +1816,9 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	if msg.Metadata["transport"] != "" {
 		msgCtx = context.WithValue(msgCtx, toolTransportKeyCtxKey{}, msg.Metadata["transport"])
 	}
+	// The Subagent tools resolve their owner from this context.
+	msgCtx = context.WithValue(msgCtx, subagentRuntimeCtxKey{}, rt)
+
 	// Post-save activation context: an attached loopback ZMQ TUI sends
 	// `message` requests (never `exec`) over a numeric-loopback listener.
 	saveTracker := &turnSaveTracker{}

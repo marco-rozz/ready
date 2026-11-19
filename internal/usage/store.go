@@ -80,6 +80,11 @@ func (t *Totals) Snapshot() *Totals {
 type accumulator struct {
 	mu     sync.Mutex
 	totals Totals
+	// forward is the owner accumulator of a Subagent child dispatch
+	// (subagent-runtime D9): every model-call observation accrues to it —
+	// token deltas + the LLM-call counter; never the user-turn counter and
+	// never the owner's occupancy anchor. nil for a normal session.
+	forward *accumulator
 }
 
 // add records one model-call usage observation.
@@ -95,6 +100,30 @@ func (a *accumulator) add(u schema.TokenUsage, aux bool) {
 	}
 	if u.PromptTokens > 0 && !aux {
 		a.totals.LastMainPromptTokens = u.PromptTokens
+	}
+	if aux {
+		a.totals.AuxCalls++
+	} else {
+		a.totals.LLMCalls++
+	}
+
+	if a.forward != nil {
+		a.forward.addForward(u, aux)
+	}
+}
+
+// addForward accrues one child model-call observation to the OWNER totals:
+// token deltas and the call counter (aux calls stay aux); the owner's
+// turn counter and occupancy anchor are never touched.
+func (a *accumulator) addForward(u schema.TokenUsage, aux bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.totals.ReadTokens += u.PromptTokens
+	a.totals.WrittenTokens += u.CompletionTokens
+	if u.PromptTokenDetails.CachedTokens > 0 {
+		a.totals.CachedTokens += u.PromptTokenDetails.CachedTokens
+		a.totals.HasCached = true
 	}
 	if aux {
 		a.totals.AuxCalls++
@@ -153,6 +182,21 @@ func (s *Store) Accumulator(key string) *Accumulator {
 	}
 
 	return acc
+}
+
+// NewDetached builds an unregistered accumulator for a Subagent child
+// dispatch (subagent-runtime D9): it is NOT a store key (the child has no
+// user-facing totals), and every observation forwards to the owner's
+// accumulator — token deltas + the LLM-call counter, never the owner's turn
+// counter or occupancy anchor. The child's own snapshot feeds its
+// transcript's turn_usage delta and its private Compaction anchor.
+func NewDetached(key string, owner *Accumulator) *Accumulator {
+	inner := &accumulator{}
+	if owner != nil {
+		inner.forward = owner.inner
+	}
+
+	return &Accumulator{key: key, inner: inner}
 }
 
 // Accumulator is an opaque per-session handle carried in turn contexts.

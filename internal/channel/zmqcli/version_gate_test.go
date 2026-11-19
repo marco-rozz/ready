@@ -5,6 +5,8 @@ package zmqcli
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +37,15 @@ func TestVersionGate_MismatchIssuesNoNonce(t *testing.T) {
 	}
 	if resp.ProtocolVersion != protocol.Version {
 		t.Fatalf("daemon version echo = %d, want %d", resp.ProtocolVersion, protocol.Version)
+	}
+	// Safe content naming BOTH versions (wire-protocol spec): the client's
+	// declared version and the daemon's.
+	want := fmt.Sprintf("client version %d, daemon version %d", protocol.Version-1, protocol.Version)
+	if !strings.Contains(resp.Content, "mismatch") || !strings.Contains(resp.Content, want) {
+		t.Fatalf("mismatch content = %q, want it to name both versions (%s)", resp.Content, want)
+	}
+	if strings.Contains(resp.Content, "secret-version") {
+		t.Fatalf("mismatch content leaked the shared secret: %q", resp.Content)
 	}
 }
 

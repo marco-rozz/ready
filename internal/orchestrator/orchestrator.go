@@ -108,6 +108,10 @@ type Config struct {
 	RetryBackoff    time.Duration
 	RetryBackoffCap time.Duration
 
+	// Slots is the daemon-wide per-provider parallelism limiter (D18); nil
+	// means unlimited.
+	Slots *SlotLimiter
+
 	// Clock returns "now"; nil means time.Now. Tests inject a fake.
 	Clock func() time.Time
 }
@@ -241,6 +245,22 @@ type TurnRequest struct {
 	SessionKey  string
 	Assemble    func(layout llm.PromptLayout, ref string) []*schema.Message
 	ResumeReady func() bool
+
+	// Runners replaces the default runner set for this turn (subagent-
+	// runtime D17): keyed by candidate reference, one runner per candidate
+	// built for a specific catalog and iteration cap (a child runner set).
+	// nil = the main agent's runners (behaviour-identical). A candidate
+	// without a runner in the set is skipped by selection.
+	Runners map[string]agent.Runner
+
+	// Only restricts selection to ONE candidate reference (the model pin of
+	// a definition): no failover walk; the candidate's own retry
+	// classification still applies and health updates as usual.
+	Only string
+
+	// Priority is the provider-slot priority class of this turn's attempts
+	// (subagent-runtime D18): owner, Subagent, or job.
+	Priority int
 }
 
 // unsafeRestart reports whether a failed attempt forbids any further attempt
@@ -257,6 +277,43 @@ func (r TurnRequest) unsafeRestart(outcome agent.TurnOutcome) bool {
 	}
 
 	return !r.ResumeReady()
+}
+
+// turnStateFor builds a turn's walk state under the D17 restrictions: a
+// model pin visits only the pinned candidate (an error when the pin is not
+// in the compiled chain — spawn validation refuses one earlier, so reaching
+// here means the candidate vanished); a child runner set skips candidates
+// whose child runner could not be built.
+func (o *Orchestrator) turnStateFor(req TurnRequest) (*turnState, error) {
+	ts := &turnState{order: o.constructedOrder(), attempted: make(map[int]bool)}
+
+	if req.Only != "" {
+		pinned := -1
+		for i, cs := range o.cands {
+			if cs.cand.Ref == req.Only {
+				pinned = i
+
+				break
+			}
+		}
+
+		if pinned < 0 {
+			return nil, fmt.Errorf("model pin %q is not a member of the LLM candidate chain", req.Only)
+		}
+
+		ts.order = []int{pinned}
+	} else if req.Runners != nil {
+		filtered := make([]int, 0, len(ts.order))
+		for _, i := range ts.order {
+			if req.Runners[o.cands[i].cand.Ref] != nil {
+				filtered = append(filtered, i)
+			}
+		}
+
+		ts.order = filtered
+	}
+
+	return ts, nil
 }
 
 // mergeAttempt folds the tool-activity flags of every attempt into outcome:
@@ -285,6 +342,16 @@ func (o *Orchestrator) ExecuteTurn(
 	return o.RunTurn(ctx, TurnRequest{SessionKey: sessionKey, Assemble: assemble, ResumeReady: resumeReady}, onChunk)
 }
 
+// ExecuteTurnRequest is the full-request shape of RunTurn (the turnExecutor
+// seam the Subagent child driver uses — subagent-runtime D17).
+func (o *Orchestrator) ExecuteTurnRequest(
+	ctx context.Context,
+	req TurnRequest,
+	onChunk func(string),
+) (agent.TurnOutcome, error) {
+	return o.RunTurn(ctx, req, onChunk)
+}
+
 // RunTurn executes one agent turn, walking the ordered candidate chain per
 // the design doc/D3: each healthy candidate gets one retry cycle, in declared
 // order, while the turn is resume-ready (no open tool-call group — see
@@ -296,7 +363,10 @@ func (o *Orchestrator) ExecuteTurn(
 func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk func(string)) (agent.TurnOutcome, error) {
 	o.markTraffic()
 
-	ts := &turnState{order: o.constructedOrder(), attempted: make(map[int]bool)}
+	ts, err := o.turnStateFor(req)
+	if err != nil {
+		return agent.TurnOutcome{}, err
+	}
 
 	var (
 		lastErr       error
@@ -334,7 +404,7 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 				Msg("LLM candidate turn attempt")
 
 			conversation := req.Assemble(cand.Layout, cand.Ref)
-			outcome, err := o.attemptRunner(candidateCtx, cand, req.SessionKey, conversation, onChunk)
+			outcome, err := o.attemptRunner(candidateCtx, cand, req, conversation, onChunk)
 			outcome = mergeAttempt(&acc, outcome)
 			if err == nil {
 				candidateCancel()
@@ -445,22 +515,44 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 // share of the outer deadline's remaining time divided by the candidates
 // still untried this turn, enforced as a real context deadline so a hung
 // candidate cannot consume the turn.
+// attemptRunner runs one candidate's runner under the attempt budget. The
+// provider slot (D18) is acquired BEFORE any budget context is created, so
+// queue wait counts toward the outer deadline but never toward the
+// liveness/proportional budget — a queued local model is never falsely
+// demoted for liveness. The runner is the turn's runner-set entry for this
+// candidate (D17: a child turn runs the child-built runners), defaulting to
+// the orchestrator's own.
 func (o *Orchestrator) attemptRunner(
 	ctx context.Context,
 	cand Candidate,
-	sessionKey string,
+	req TurnRequest,
 	conversation []*schema.Message,
 	onChunk func(string),
 ) (agent.TurnOutcome, error) {
+	release, err := o.cfg.Slots.acquire(ctx, cand.Provider, req.Priority)
+	if err != nil {
+		// The outer deadline/cancellation expired while queued: a property of
+		// the turn, never a candidate demotion (RunTurn checks ctx.Err()).
+		return agent.TurnOutcome{}, err
+	}
+	defer release()
+
+	runner := cand.Runner
+	if req.Runners != nil {
+		if r, ok := req.Runners[cand.Ref]; ok && r != nil {
+			runner = r
+		}
+	}
+
 	if onChunk == nil {
-		return cand.Runner.RunMessagesStreaming(ctx, sessionKey, conversation, nil)
+		return runner.RunMessagesStreaming(ctx, req.SessionKey, conversation, nil)
 	}
 
 	actx, cancel, budgetHit, stopTimer := cancelBudgetContext(ctx, o.cfg.AttemptTimeout)
 	defer cancel()
 	actx = agent.WithLiveness(actx, stopTimer)
 
-	outcome, err := cand.Runner.RunMessagesStreaming(actx, sessionKey, conversation, onChunk)
+	outcome, err := runner.RunMessagesStreaming(actx, req.SessionKey, conversation, onChunk)
 
 	// If the attempt budget fired while the outer context is still alive,
 	// the failure is an attempt-budget expiry (hard class) regardless of the
@@ -591,6 +683,27 @@ func cancelBudgetContext(ctx context.Context, budget time.Duration) (context.Con
 
 // ── Auxiliary consumers (formatter post-step, compaction summariser) ─────
 
+// SmallestContextWindow returns the smallest context_window declared across
+// the chain's candidates (0 when none declares one) — the subagent handback
+// delivery budget's cap (25% of the smallest window, subagent-runtime D6).
+func (o *Orchestrator) SmallestContextWindow() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	smallest := 0
+	for i := range o.cands {
+		if o.cands[i].cand.Runner == nil {
+			continue
+		}
+
+		if w := o.cands[i].cand.Model.ContextWindow(); w > 0 && (smallest == 0 || w < smallest) {
+			smallest = w
+		}
+	}
+
+	return smallest
+}
+
 // AuxModel returns a model.BaseChatModel whose Generate walks the candidate
 // chain with the shared health policy and the proportional-share attempt
 // budget (the design doc: both auxiliary consumers are non-streaming by nature).
@@ -639,11 +752,19 @@ func (a *auxChatModel) Generate(ctx context.Context, input []*schema.Message, op
 
 		cand := o.candidateCopy(i)
 
+		// D18: aux calls acquire the provider slot before the budget context
+		// (queue wait stays outside the proportional budget); owner priority.
+		release, slotErr := o.cfg.Slots.acquire(ctx, cand.Provider, PriorityOwner)
+		if slotErr != nil {
+			return nil, slotErr
+		}
+
 		actx, cancel, budgetExpired := candidateCycleContext(ctx, true, untried, o.cfg.AttemptTimeout)
 
 		msg, err := cand.Aux.Generate(actx, input, opts...)
 		budgetHit := budgetExpired()
 		cancel()
+		release()
 
 		if err == nil {
 			o.recordSuccess(i, true, "aux")

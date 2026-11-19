@@ -93,8 +93,8 @@ func TestVersionResponseFieldRoundTrip(t *testing.T) {
 }
 
 func TestErrorCodeConstants(t *testing.T) {
-	if Version != 4 {
-		t.Fatalf("activity is protocol 4, got %d", Version)
+	if Version != 6 {
+		t.Fatalf("subagent-panel-observability is protocol 6, got %d", Version)
 	}
 	if ErrorCodeProtocolMismatch != "protocol_mismatch" {
 		t.Fatalf("unexpected mismatch code %q", ErrorCodeProtocolMismatch)

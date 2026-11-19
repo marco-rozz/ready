@@ -233,6 +233,11 @@ llm:
       #   num_ctx: 8192             # context window; must fit system prompt + history
       #   temperature: 0.3          # lower = more deterministic home-automation replies
       #   # top_p, top_k, seed, repeat_penalty, num_thread are also available
+      # max_parallel: 1            # concurrent LLM attempts granted slots on this provider
+                                   # (subagent-runtime). Owner attempts are granted ahead of
+                                   # Subagent attempts, which are granted ahead of job attempts;
+                                   # queue wait never demotes a candidate for liveness.
+                                   # Default: 1 for ollama, unlimited otherwise.
     # openrouter-gemma:
     #   provider: "openrouter"
     #   api: "chat_completions"
@@ -655,19 +660,22 @@ skills:
                               # installer owns the library and replaces it on
                               # every install; the daemon never writes into it.
 
-# ── Conversation Sessions (one append-only JSONL file per Session) ──────────
+# ── Conversation Sessions (one folder per Session; subagent-runtime BREAKING) ──
 # A Conversation address (cli, telegram-<chat_id>) owns one current Session
-# plus ended ones. Each Session is ONE append-only JSONL file:
-#   <path>/<address>/<YYYY-MM-DDTHH-MM-SS>_<uuidv7>.jsonl
-# holding the full transcript (user messages, turn-context lines, tool calls
-# and results, replies) plus the records `turn_usage` (usage per Turn —
-# totals survive a restart), `compaction` and the closing `session_closed`.
-# No index: the current Session is the newest file without a closing record.
+# plus ended ones. Each Session is ONE FOLDER holding an append-only JSONL
+# file (subagent-runtime — BREAKING, no migration; delete old sessions/ once):
+#   <path>/<address>/<YYYY-MM-DDTHH-MM-SS>_<uuidv7>/session.jsonl
+# A channel owner's Subagent hierarchy lives in the folder's `subagents/`
+# subtree (`subagents/<name>_<ts>_<id>/session.jsonl` per child); retention
+# operates on whole trees. The file holds the full transcript (user
+# messages, turn-context lines, tool calls and results, replies) plus the
+# records `turn_usage` (usage per Turn — totals survive a restart),
+# `compaction`, `handback` (a Subagent result's arrival — bookkeeping,
+# never activity), `handback_delivery` (its injection at the head of a
+# Turn) and the closing `session_closed`. No index: the current Session is
+# the newest folder whose transcript lacks a closing record.
 # Tool results (entity states, logbook dumps) live in these files: keep the
 # directory access-controlled (created 0700, files 0600).
-# ⚠️ BREAKING: replaces checkpoints/ and plans/ — delete both once
-# (no migration). The removed keys persistence.{checkpoints_path,max_history,
-# plans_path,plan_ttl} fail boot with a message naming the replacement.
 #
 # Session commands (every channel, never reaching the model, FIFO behind the
 # Turn in flight): /new (start a new Session; "Session already new." when the
@@ -738,6 +746,30 @@ compaction:
   # 31B on Apple Silicon needs ~30-80s to read ~16k tokens and ~75-150s to
   # write a ~1.5k-token summary. Hosted models can use a much lower value.
   timeout: 180s
+
+# ── Subagent Runtime (background delegation) ─────────────────────────────
+# The LLM can delegate work to bounded background Subagents (subagent-_
+# tools under builtin_tools) that run through the same LLM failover chain,
+# with their own transcripts under the owner Session folder, and report
+# back with durable, scan-checked results. Definitions are `*.md` assets
+# with YAML frontmatter in <agent-dir>/subagents/ (library-synced like
+# skills; the shipped library provides `general-purpose` and the read-only
+# `explore`). `enabled` (default false) gates USER-FACING delegation only:
+# internal daemon jobs always run, each governed by the flag of the feature
+# that launches them.
+#subagents:
+#  enabled: false
+#  max_depth: 1               # nesting cap, 1-2 (at 2 a child may spawn dispatch-scoped grandchildren)
+#  max_concurrent: 4          # running dispatches per owner Session
+#  max_concurrent_jobs: 1     # daemon-wide concurrent internal jobs
+#  mailbox_buffer: 32         # per-child bounded FIFO of queued follow-up messages
+#  wait_timeout: 60s          # subagent_wait's default blocking window
+#  handback_max_tokens: 4096  # a result's report cap (token-estimated)
+#  handback_turn_budget_tokens: 16384  # results injected at the head of one Turn
+                              # (further capped at 25% of the smallest declared context_window)
+#  path: subagents/           # definitions directory, inside the agent dir
+#  sync: auto                 # definition library sync (auto|notify|off)
+#  # library_path:            # the shipped definitions library (program storage by default)
 
 logging:
   # ready init writes level: info, format: json and file_path: logs/ready.log,

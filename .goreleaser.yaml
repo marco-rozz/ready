@@ -67,13 +67,16 @@ archives:
     # GOARM 6 target is renamed ready_linux_armv6 so the installer's
     # releases/latest/download/<asset> scheme has a fixed shape.
     name_template: '{{- if and (eq .Os "linux") (eq .Arch "arm") -}}ready_linux_armv6{{- else -}}ready_{{ .Os }}_{{ .Arch }}{{- end -}}'
-    # The extendable bundle list. Skills land at skills/ inside the archive;
-    # the installer maps that to program storage at ~/.local/share/ready/library/skills/.
+    # The extendable bundle list. Skills land at skills/ and Subagent
+    # definitions at subagents/ inside the archive; the installer maps them
+    # to program storage at ~/.local/share/ready/library/{skills,subagents}/.
     files:
       # the binary is included implicitly at the archive root
       - src: config.example.yaml
       - src: "resources/skills/**/*"
         dst: skills
+      - src: "resources/subagents/**/*"
+        dst: subagents
 
 checksum:
   name_template: checksums.txt

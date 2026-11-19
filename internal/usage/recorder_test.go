@@ -379,3 +379,51 @@ func TestWithToolsPreservesRecorder(t *testing.T) {
 }
 
 func usagePtr(u schema.TokenUsage) *schema.TokenUsage { return &u }
+
+// --- subagent-runtime task 4.4: the forwarding child accumulator ---
+
+func TestDetachedForwardsToOwner(t *testing.T) {
+	st := NewStore()
+	owner := st.Accumulator("owner-session")
+	child := NewDetached("child-session", owner)
+
+	// Two main-agent child calls and one aux (child compaction summariser).
+	child.AddUsage(schema.TokenUsage{PromptTokens: 100, CompletionTokens: 10}, false)
+	child.AddUsage(schema.TokenUsage{PromptTokens: 200, CompletionTokens: 20}, false)
+	child.AddUsage(schema.TokenUsage{PromptTokens: 50, CompletionTokens: 5}, true)
+
+	// Owner sees all three calls (tokens + counters), no turn, no anchor.
+	o := owner.Snapshot()
+	if o == nil || o.LLMCalls != 2 || o.AuxCalls != 1 {
+		t.Fatalf("owner snapshot = %+v", o)
+	}
+	if o.ReadTokens != 350 || o.WrittenTokens != 35 {
+		t.Fatalf("owner tokens = %+v", o)
+	}
+	if o.TurnCount != 0 {
+		t.Fatalf("owner turns = %d, want 0", o.TurnCount)
+	}
+	if o.LastMainPromptTokens != 0 {
+		t.Fatalf("owner anchor moved: %d", o.LastMainPromptTokens)
+	}
+
+	// The child's own totals are private (its turn_usage delta source).
+	c := child.Snapshot()
+	if c == nil || c.LLMCalls != 2 || c.ReadTokens != 350 || c.LastMainPromptTokens != 200 {
+		t.Fatalf("child snapshot = %+v", c)
+	}
+
+	// A child turn never counts as an owner turn.
+	child.AddTurn()
+	if o2 := owner.Snapshot(); o2.TurnCount != 0 {
+		t.Fatalf("owner turns after child AddTurn = %d", o2.TurnCount)
+	}
+}
+
+func TestDetachedNilOwnerIsInert(t *testing.T) {
+	child := NewDetached("child", nil)
+	child.AddUsage(schema.TokenUsage{PromptTokens: 5}, false)
+	if c := child.Snapshot(); c == nil || c.LLMCalls != 1 {
+		t.Fatalf("child = %+v", c)
+	}
+}

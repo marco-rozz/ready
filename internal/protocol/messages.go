@@ -189,7 +189,16 @@ const (
 // wire contract keeps this value (mixed releases still connect); a wire
 // change a strict previous-version peer would reject or misinterpret bumps
 // it. It applies to the ZMQ transport only; no other channel negotiates.
-const Version = 4
+//
+// Version 5 (subagent-runtime, BREAKING): the unsolicited `subagents`
+// snapshot control event (Subagents) joins the wire; same-repo co-release,
+// exact-equality handshake unchanged.
+// Version 6 (subagent-panel-observability, BREAKING): HandbackNotice gains
+// the optional `elapsed_ms` field (the dispatch's wall-clock duration,
+// computed daemon-side); a strict protocol-5 peer would reject the unknown
+// field, so the version bumps. Same-repo co-release, exact-equality
+// handshake unchanged.
+const Version = 6
 
 // PredatesVersioningGuess is the client's message when a handshake response
 // cannot carry a protocol version at all — an unmarshal refusal or an error
@@ -399,6 +408,15 @@ type Response struct {
 	// Compaction rides the unsolicited `compacted` control event only
 	// (session-lifecycle): the token estimates before and after.
 	Compaction *CompactionInfo `json:"compaction,omitempty"`
+	// Subagents rides the unsolicited `subagents` control event only
+	// (subagent-runtime): the fleet snapshot and the pending-handback
+	// count.
+	Subagents *SubagentsInfo `json:"subagents,omitempty"`
+	// Handback rides the unsolicited `subagent_handback` control event
+	// only (subagent-runtime): the just-delivered dispatch result's name
+	// and status, so a connected idle TUI learns the Subagent finished
+	// without waiting for the owner's next turn.
+	Handback *HandbackNotice `json:"handback,omitempty"`
 	// AgentDir rides the authenticated handshake ok response only
 	// (per-user-install-agent-isolation): the daemon-authoritative agent
 	// directory for the interactive startup block, home-prefix sanitised
@@ -430,6 +448,36 @@ type CompactionInfo struct {
 	TokensAfter  int `json:"tokens_after"`
 }
 
+// SubagentsAgentView is one row of the `subagents` snapshot's fleet.
+type SubagentsAgentView struct {
+	SubagentID string `json:"subagent_id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+	StartedAt  string `json:"started_at"` // RFC3339
+	Activity   string `json:"activity,omitempty"`
+	QueuedMail int    `json:"queued_mail"`
+	Parent     string `json:"parent,omitempty"` // depth-2 only
+}
+
+// SubagentsInfo is the payload of the `subagents` control event: the full
+// fleet snapshot and the pending-handback count (the TUI badge).
+type SubagentsInfo struct {
+	Agents           []SubagentsAgentView `json:"agents"`
+	PendingHandbacks int                  `json:"pending_handbacks"`
+}
+
+// HandbackNotice is the payload of the `subagent_handback` control event:
+// the just-delivered dispatch result's identity and outcome class, plus —
+// since protocol version 6 (subagent-panel-observability D5) — the
+// dispatch's wall-clock duration in milliseconds (absent/zero start ⇒ the
+// field is omitted; an old daemon renders the plain two-segment line).
+type HandbackNotice struct {
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+}
+
 // Content values of the unsolicited Session lifecycle and post-save activation
 // control events (Status=ok, ResponseType=control, no error_code). None of
 // them consumes a pending reply slot.
@@ -445,6 +493,17 @@ const (
 	// ControlConfigReloaded announces completion of an in-process runtime
 	// reload triggered outside the connected TUI.
 	ControlConfigReloaded = "config_reloaded"
+	// ControlSubagents is the full Subagent fleet snapshot (subagent-
+	// runtime D11): fleet rows plus the pending-handback count. Emitted on
+	// fleet changes coalesced to at most 4 per second, once at Connection
+	// attach with subagent history, and once empty after a cascade close.
+	ControlSubagents = "subagents"
+	// ControlSubagentHandback announces a delivered dispatch result
+	// (subagent-runtime): the Subagent's name and the handback status.
+	// Emitted on every handback delivery to the owner's connection; the
+	// result's content itself still lands at the head of the owner's next
+	// turn — this event is a visibility signal, never a delivery.
+	ControlSubagentHandback = "subagent_handback"
 )
 
 // Validate checks structural and semantic invariants on a Request. It returns

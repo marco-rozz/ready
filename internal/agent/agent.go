@@ -199,7 +199,14 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 	adkMessages := make([]adk.Message, len(messages))
 	copy(adkMessages, messages)
 
-	iter := r.Run(ctx, adkMessages)
+	// A derived context so an abandoned turn (the caller's deadline arrived
+	// while the executor was still running) stops scheduling further model
+	// calls; on the normal path the cancel is a post-return no-op.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	iter := r.Run(runCtx, adkMessages)
+	events := pumpIterator(iter)
 
 	// Start a per-turn thought tap; no-op when tap is nil or disabled.
 	tt := a.tap.StartTurn(sessionKey)
@@ -228,10 +235,30 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 	}
 
 	for {
-		event, ok := iter.Next()
-		if !ok {
+		var item iteratorItem[*adk.TypedAgentEvent[*schema.Message]]
+		select {
+		case item = <-events:
+		case <-ctx.Done():
+			// Deadline/cancellation while the executor was still running:
+			// abandon the event loop (the pump is drained without side
+			// effects) and fail the turn with the context error. The turn
+			// outcome metadata accumulated so far is preserved.
+			drainIterator(events)
+			runCancel()
+
+			return TurnOutcome{
+				Reply:             finalContent,
+				ToolCallStarted:   toolCallStarted,
+				ToolCallCompleted: toolCallCompleted,
+				ContentDelivered:  contentDelivered,
+			}, fmt.Errorf("agent execution failed: %w", ctx.Err())
+		}
+
+		if !item.ok {
 			break
 		}
+
+		event := item.event
 
 		if event.Err != nil {
 			lastErr = event.Err

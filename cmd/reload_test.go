@@ -10,6 +10,8 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/marco-rozz/ready/internal/channel"
 	"github.com/marco-rozz/ready/internal/channel/telegram"
+	"github.com/marco-rozz/ready/internal/config"
+	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/rs/zerolog"
 )
@@ -18,6 +20,15 @@ func testGeneration(agentTools ...tool.BaseTool) *runtimeGeneration {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &runtimeGeneration{ctx: ctx, cancel: cancel, agentReg: &agentRegistry{}, agentTools: agentTools}
+}
+
+// testGenerationWithSubagents builds a generation whose config carries the
+// given subagents.enabled value (the reload flip tests).
+func testGenerationWithSubagents(enabled bool) *runtimeGeneration {
+	g := testGeneration()
+	g.cfg = &config.Config{Subagents: config.SubagentsConfig{Enabled: &enabled}}
+
+	return g
 }
 
 func newTestCoordinator(t *testing.T, rt *sessionRuntime, build func(context.Context) (*runtimeGeneration, error), grace time.Duration) *reloadCoordinator {
@@ -210,6 +221,64 @@ func TestReloadCoordinator_ReloadRefusedWhenDaemonShuttingDown(t *testing.T) {
 // The daemon can begin shutting down while a reload is mid-flight (SIGINT
 // racing a config-save reload): the freshly built generation must be shut
 // down and never installed, and afterSwap must never restart channels.
+// The subagents.enabled reload flip (D14): false→true opens the
+// process-lifetime gate without a restart, true→false closes it (the fleet
+// cascade is a no-op on an empty registry here).
+func TestReloadCoordinator_SubagentsEnabledFlip(t *testing.T) {
+	rt := &sessionRuntime{logger: zerolog.Nop()}
+	rts := subagent.New(subagent.Deps{Logger: zerolog.Nop()}, subagent.NewDefinitions(nil))
+	rt.subagents = rts
+
+	seq := []*runtimeGeneration{
+		testGenerationWithSubagents(true),
+		testGenerationWithSubagents(false),
+	}
+	build := func(context.Context) (*runtimeGeneration, error) {
+		if len(seq) == 0 {
+			return testGenerationWithSubagents(false), nil
+		}
+
+		g := seq[0]
+		seq = seq[1:]
+
+		return g, nil
+	}
+	coord := newTestCoordinator(t, rt, build, time.Second)
+	coord.current.cfg = testGenerationWithSubagents(false).cfg
+
+	owner := subagent.Owner{SessionID: "s1", Address: testCLIChannelName, Kind: subagent.OwnerChannel}
+	spawn := func() error {
+		_, err := rts.Spawn(context.Background(), owner, nil, subagent.SpawnRequest{})
+
+		return err
+	}
+
+	// Boot with enabled=false: the gate refuses (empty definitions make the
+	// post-gate path fail with ErrDefinitionUnknown — enough to prove the
+	// gate state).
+	if err := spawn(); !errors.Is(err, subagent.ErrFeatureDisabled) {
+		t.Fatalf("spawn while disabled = %v, want ErrFeatureDisabled", err)
+	}
+
+	// Reload to enabled=true: the gate opens without a restart.
+	if _, err := coord.Reload(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := spawn(); errors.Is(err, subagent.ErrFeatureDisabled) {
+		t.Fatalf("gate still closed after the false→true reload flip: %v", err)
+	}
+
+	// Reload back to enabled=false: the gate closes again.
+	if _, err := coord.Reload(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := spawn(); !errors.Is(err, subagent.ErrFeatureDisabled) {
+		t.Fatalf("gate still open after the true→false reload flip: %v", err)
+	}
+}
+
 func TestReloadCoordinator_ReloadAbortedWhenDaemonShutsDownMidBuild(t *testing.T) {
 	rt := &sessionRuntime{logger: zerolog.Nop()}
 	daemonCtx, cancelDaemon := context.WithCancel(context.Background())

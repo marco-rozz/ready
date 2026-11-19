@@ -22,8 +22,9 @@ const partSeparator = "\n\n"
 // Serialise renders entries in the plain-text form the summariser reads:
 // `[User]:`, `[Assistant]:`, `[Assistant tool calls]:`, `[Tool result]:`.
 // Turn-context lines are omitted (per-turn directives, not conversation);
-// tool results are truncated to MaxToolResultChars with a marker; a
-// skills-load result becomes a marker naming the skill.
+// tool results and delivered Subagent handbacks are truncated to
+// MaxToolResultChars with a marker; a skills-load result becomes a marker
+// naming the skill.
 func Serialise(entries []persistence.HistoryMessage) string {
 	return strings.Join(serialiseParts(entries), partSeparator)
 }
@@ -38,6 +39,16 @@ func serialiseParts(entries []persistence.HistoryMessage) []string {
 		case e.IsRecord(), e.Kind == persistence.KindTurnContext:
 			continue
 		case e.Role == persistence.RoleUser:
+			// A delivered Subagent handback (subagent-runtime 7.4): labelled so
+			// the summariser keeps it as an agent result, not user speech —
+			// and truncated like tool results (context-compaction "Handback
+			// deliveries open their Turn").
+			if e.Kind == persistence.KindHandbackDelivery {
+				parts = append(parts, "[Subagent result]: "+truncateLikeToolResult(e.Content))
+
+				continue
+			}
+
 			parts = append(parts, "[User]: "+e.Content)
 		case e.Role == persistence.RoleSystem:
 			parts = append(parts, "[System]: "+e.Content)
@@ -71,6 +82,12 @@ func toolResultText(tc persistence.ToolCallRecord, content string) string {
 		}
 	}
 
+	return truncateLikeToolResult(content)
+}
+
+// truncateLikeToolResult cuts content at MaxToolResultChars runes with a
+// truncation marker (tool results and Subagent handback deliveries).
+func truncateLikeToolResult(content string) string {
 	runes := []rune(content)
 	if len(runes) <= MaxToolResultChars {
 		return content

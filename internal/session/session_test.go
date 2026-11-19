@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/marco-rozz/ready/internal/channel"
+	"github.com/marco-rozz/ready/internal/channel/telegram"
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/persistence"
 	"github.com/rs/zerolog"
@@ -222,8 +223,13 @@ func TestResolve_ClosedWithoutNextStartsFresh(t *testing.T) {
 		t.Errorf("the new session file must be created lazily, stat err = %v", err)
 	}
 
-	if !strings.HasPrefix(filepath.Base(cur.Path), cur.StartedAt.Local().Format(fileTimeLayout)+"_"+cur.ID) {
-		t.Errorf("unexpected file name %q", filepath.Base(cur.Path))
+	folder := filepath.Base(filepath.Dir(cur.Path))
+	if !strings.HasPrefix(folder, cur.StartedAt.Local().Format(fileTimeLayout)+"_"+cur.ID) {
+		t.Errorf("unexpected folder name %q (file %q)", folder, filepath.Base(cur.Path))
+	}
+
+	if filepath.Base(cur.Path) != fileBaseName {
+		t.Errorf("the transcript must be %q inside the folder, got %q", fileBaseName, filepath.Base(cur.Path))
 	}
 }
 
@@ -278,7 +284,7 @@ func TestStartNew_ClosingRecordWithUsage(t *testing.T) {
 	ended := recordTurn(t, m, "cli", time.Now())
 
 	var hooked []string
-	m.OnEnd(func(_ context.Context, s *Session) { hooked = append(hooked, s.ID) })
+	m.OnEnd(func(_ context.Context, s *Session, _ string) { hooked = append(hooked, s.ID) })
 
 	next, started := m.StartNew(context.Background(), "cli")
 	if !started || next.ID == ended.ID {
@@ -560,19 +566,68 @@ func TestManager_ConcurrentHandshakesAndWorker(t *testing.T) {
 		t.Fatal("expected at least one pending reset applied")
 	}
 
-	files, err := listFiles(filepath.Join(m.Store().Root(), "cli"))
+	dirs, err := listSessionDirs(filepath.Join(m.Store().Root(), "cli"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	closed := 0
-	for _, f := range files {
-		if c, _ := isClosed(f.path); c {
+	for _, f := range dirs {
+		if c, _ := isClosed(f.file); c {
 			closed++
 		}
 	}
 
 	if closed != ended {
 		t.Errorf("closing records = %d, applied resets = %d", closed, ended)
+	}
+}
+
+// --- subagent-runtime task 2.1 ---
+
+// Reserved addresses: AddressOf can never yield `main` or `system` — a
+// channel message always maps to the channel's own address space.
+func TestAddressOfNeverReserved(t *testing.T) {
+	reserved := map[Address]bool{"main": true, "system": true}
+
+	msgs := []channel.Message{
+		{ChannelName: "cli", Content: "x"},
+		{ChannelName: "telegram", Metadata: map[string]string{telegram.MetadataChatID: "42"}, Content: "x"},
+		{ChannelName: "telegram", Content: "x"}, // no chat id
+		{ChannelName: "system", Content: "x"},
+		{ChannelName: "main", Content: "x"},
+		{ChannelName: "telegram", Metadata: map[string]string{telegram.MetadataChatID: "system"}, Content: "x"},
+	}
+
+	for _, msg := range msgs {
+		addr := AddressOf(msg)
+		if reserved[addr] {
+			t.Errorf("AddressOf(%+v) = reserved address %q", msg, addr)
+		}
+	}
+}
+
+// Child folders live under subagents/ inside the owner folder and never
+// participate in current-Session selection.
+func TestChildSessionPathAndExclusion(t *testing.T) {
+	root := t.TempDir()
+	m := newTestManager(t, root, zerolog.Nop())
+
+	cur := recordTurn(t, m, "cli", time.Now())
+	child := persistence.ChildSessionPath(filepath.Dir(cur.Path), "explore-1", "01900000-0000-7000-8000-000000000001", time.Now())
+
+	if !strings.Contains(child, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {
+		t.Fatalf("child path missing subagents/: %q", child)
+	}
+
+	_ = os.MkdirAll(filepath.Dir(child), 0o700)
+	if err := os.WriteFile(child, []byte(`{"role":"user","content":"task"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The child folder must not become the current Session of any address.
+	m2 := newTestManager(t, root, zerolog.Nop())
+	if got := m2.Current(context.Background(), "cli"); got.ID != cur.ID {
+		t.Fatalf("child folder disturbed current-session selection: %s", got.ID)
 	}
 }

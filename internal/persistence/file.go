@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Session file and directory permissions (session-lifecycle: directories
@@ -20,6 +21,18 @@ const (
 	dirPerm  = 0o700
 	filePerm = 0o600
 )
+
+// ChildSessionPath returns the session.jsonl path of a child Session folder
+// `subagents/<name>_<ts>_<id>/` inside an owner Session folder — the
+// Subagent hierarchy layout (subagent-runtime D5). Child folders never
+// participate in current-Session selection (the subtree is excluded by
+// construction: `subagents` does not parse as a Session folder name and the
+// scan never descends into owner folders).
+func ChildSessionPath(ownerDir, name, id string, start time.Time) string {
+	folder := start.Local().Format("2006-01-02T15-04-05") + "_" + name + "_" + id
+
+	return filepath.Join(ownerDir, "subagents", folder, "session.jsonl")
+}
 
 // SessionFile is the append-only handle of one Session's JSONL file. The file
 // is created lazily by the first Append (so a Session that never records a

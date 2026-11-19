@@ -45,21 +45,33 @@ type Plan struct {
 	ToSummarise []persistence.HistoryMessage
 }
 
-// isBoundary reports whether entries[i] opens a Turn.
-func isBoundary(entries []persistence.HistoryMessage, i int) bool {
-	return entries[i].IsTurnBoundary()
+// boundarySet computes the Turn-opener set of entries once per plan (D6b
+// rule, subagent-runtime): a turn boundary, or the first handback_delivery
+// of the run opening that Turn — a delivery is never separated from its Turn.
+func boundarySet(entries []persistence.HistoryMessage) map[int]bool {
+	set := make(map[int]bool)
+	for _, s := range persistence.TurnStarts(entries) {
+		set[s] = true
+	}
+
+	return set
+}
+
+// isBoundary reports whether i is a Turn opener in the set.
+func isBoundary(set map[int]bool, i int) bool {
+	return set[i]
 }
 
 // isValidCut reports whether the kept tail may start at i: a Turn boundary
 // or an assistant message (a split oversized Turn). Never a tool result (a
 // call would be separated from its result) and never a turn-context line
 // (it belongs with its user message).
-func isValidCut(entries []persistence.HistoryMessage, lines []int, i int) bool {
+func isValidCut(entries []persistence.HistoryMessage, lines []int, boundaries map[int]bool, i int) bool {
 	if i <= 0 || i >= len(entries) || lines[i] < 0 {
 		return false
 	}
 
-	return isBoundary(entries, i) || entries[i].Role == persistence.RoleAssistant
+	return boundaries[i] || entries[i].Role == persistence.RoleAssistant
 }
 
 // PlanCut chooses the first kept entry. ok is false when nothing can be
@@ -68,11 +80,13 @@ func isValidCut(entries []persistence.HistoryMessage, lines []int, i int) bool {
 func PlanCut(in PlanInput) (Plan, bool) {
 	var cut int
 
+	boundaries := boundarySet(in.Entries)
+
 	var ok bool
 	if in.TurnMode {
-		cut, ok = turnCut(in)
+		cut, ok = turnCut(in, boundaries)
 	} else {
-		cut, ok = tokenCut(in)
+		cut, ok = tokenCut(in, boundaries)
 	}
 
 	if !ok {
@@ -80,7 +94,7 @@ func PlanCut(in PlanInput) (Plan, bool) {
 	}
 
 	if in.MaxInputTokens > 0 {
-		if cut, ok = guardInput(in, cut); !ok {
+		if cut, ok = guardInput(in, boundaries, cut); !ok {
 			return Plan{}, false
 		}
 	}
@@ -89,10 +103,10 @@ func PlanCut(in PlanInput) (Plan, bool) {
 }
 
 // turnCut keeps the last KeepRecentTurns Turns.
-func turnCut(in PlanInput) (int, bool) {
+func turnCut(in PlanInput, boundaries map[int]bool) (int, bool) {
 	var bounds []int
 	for i := range in.Entries {
-		if isBoundary(in.Entries, i) {
+		if isBoundary(boundaries, i) {
 			bounds = append(bounds, i)
 		}
 	}
@@ -104,7 +118,7 @@ func turnCut(in PlanInput) (int, bool) {
 
 	cut := bounds[len(bounds)-keep]
 
-	return cut, isValidCut(in.Entries, in.Lines, cut)
+	return cut, isValidCut(in.Entries, in.Lines, boundaries, cut)
 }
 
 // tokenCut walks back from the newest entry accumulating estimated tokens
@@ -113,7 +127,7 @@ func turnCut(in PlanInput) (int, bool) {
 // Turn boundary (whole Turns kept); when the edge falls inside the view's
 // first Turn, an assistant message inside that oversized Turn (a split
 // Turn); failing both, the nearest valid cut after the edge.
-func tokenCut(in PlanInput) (int, bool) {
+func tokenCut(in PlanInput, boundaries map[int]bool) (int, bool) {
 	candidate := -1
 	acc := 0
 
@@ -131,19 +145,19 @@ func tokenCut(in PlanInput) (int, bool) {
 	}
 
 	for i := candidate; i > 0; i-- {
-		if isBoundary(in.Entries, i) && isValidCut(in.Entries, in.Lines, i) {
+		if isBoundary(boundaries, i) && isValidCut(in.Entries, in.Lines, boundaries, i) {
 			return i, true
 		}
 	}
 
 	for i := candidate; i > 0; i-- {
-		if isValidCut(in.Entries, in.Lines, i) {
+		if isValidCut(in.Entries, in.Lines, boundaries, i) {
 			return i, true
 		}
 	}
 
 	for i := candidate + 1; i < len(in.Entries); i++ {
-		if isValidCut(in.Entries, in.Lines, i) {
+		if isValidCut(in.Entries, in.Lines, boundaries, i) {
 			return i, true
 		}
 	}
@@ -154,7 +168,7 @@ func tokenCut(in PlanInput) (int, bool) {
 // guardInput shrinks the summarised slice to the oldest one that fits
 // MaxInputTokens (the design doc input guard): the rest stays verbatim after the
 // new first kept entry, and a later evaluation may compact again.
-func guardInput(in PlanInput, cut int) (int, bool) {
+func guardInput(in PlanInput, boundaries map[int]bool, cut int) (int, bool) {
 	fits := func(end int) bool {
 		chars := 0
 		for _, part := range serialiseParts(in.Entries[:end]) {
@@ -169,13 +183,13 @@ func guardInput(in PlanInput, cut int) (int, bool) {
 	}
 
 	for i := cut - 1; i > 0; i-- {
-		if isBoundary(in.Entries, i) && isValidCut(in.Entries, in.Lines, i) && fits(i) {
+		if isBoundary(boundaries, i) && isValidCut(in.Entries, in.Lines, boundaries, i) && fits(i) {
 			return i, true
 		}
 	}
 
 	for i := cut - 1; i > 0; i-- {
-		if isValidCut(in.Entries, in.Lines, i) && fits(i) {
+		if isValidCut(in.Entries, in.Lines, boundaries, i) && fits(i) {
 			return i, true
 		}
 	}

@@ -1,10 +1,14 @@
 package persistence
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +47,17 @@ const (
 	// KindSessionClosed is the closing record of a Session: ended_at, reason,
 	// and the Session's final usage totals. Nothing follows it in the file.
 	KindSessionClosed MessageKind = "session_closed"
+	// KindHandback is a Subagent handback ARRIVAL record (subagent-runtime
+	// D6a): bookkeeping appended to the owner file through AppendBookkeeping,
+	// excluded from the model view, never Turn activity. The pending handback
+	// queue of the owner Session IS the set of these records without a
+	// delivered counterpart.
+	KindHandback MessageKind = "handback"
+	// KindHandbackDelivery is the delivered form of a pending handback,
+	// injected at the head of the owner's next Turn BEFORE its user message
+	// (user role, in view). The Turn opener is the first record of a
+	// contiguous run [handback_delivery*, user] — see TurnStarts.
+	KindHandbackDelivery MessageKind = "handback_delivery"
 )
 
 // Session end reasons carried by the closing record.
@@ -56,6 +71,17 @@ const (
 // tool call that has no recorded result. English product
 // string; the [Transient] prefix mirrors the error-digest observation shape.
 const InterruptedToolResult = "[Transient] Interrupted: no result was recorded for this call; it may or may not have executed. Verify the current state before retrying."
+
+// Interrupted tool results of the Subagent Runtime (fixed English product
+// strings):
+const (
+	// InterruptedRestartToolResult closes an open tool-call group left by a
+	// dispatch (or an owner Turn) that a daemon restart cut off.
+	InterruptedRestartToolResult = "[Transient] Interrupted: daemon restart"
+	// InterruptedOwnerEndToolResult closes an open group when the owner
+	// Session ended (Session command or reset rule) while a dispatch ran.
+	InterruptedOwnerEndToolResult = "[Transient] Interrupted: owner session ended"
+)
 
 // ToolCallRecord is one tool call emitted by an assistant message. ID is
 // always non-empty and protocol-portable once recorded; Name is the canonical
@@ -117,23 +143,115 @@ type HistoryMessage struct {
 	// Closing record fields.
 	EndedAt *time.Time `json:"ended_at,omitempty"`
 	Reason  string     `json:"reason,omitempty"`
+
+	// Subagent handback fields (HistoryMessage schema v3 — subagent-runtime
+	// D6): KindHandback carries the arrival record (Content = the raw report
+	// capped at handback_max_tokens, Status/Severity the outcome class and
+	// error-digest class, Usage informational); KindHandbackDelivery carries
+	// the delivered user-role message (Content = the harness envelope with
+	// the scanned text) and DeliveredHandbackID names the consumed handback.
+	HandbackID          string `json:"handback_id,omitempty"`
+	DispatchID          string `json:"dispatch_id,omitempty"`
+	Status              string `json:"status,omitempty"`
+	Severity            string `json:"severity,omitempty"`
+	DeliveredHandbackID string `json:"delivered_handback_id,omitempty"`
 }
 
 // IsTurnBoundary reports whether m opens a new turn unit: a user message
-// that is not the turn-context line.
+// that is neither the turn-context line nor a handback-delivery record.
+// A handback_delivery record belongs to the Turn it precedes (subagent-
+// runtime D6b): the Turn opener is the first record of a contiguous run
+// [handback_delivery*, user] — TurnStarts computes that over a slice, so a
+// delivery is never separated from its Turn by the planner.
 func (m HistoryMessage) IsTurnBoundary() bool {
-	return m.Role == RoleUser && m.Kind != KindTurnContext
+	return m.Role == RoleUser && m.Kind != KindTurnContext && m.Kind != KindHandbackDelivery
 }
 
 // IsRecord reports whether m is a non-message record (compaction,
-// turn_usage, session_closed) — never part of the model's view.
+// turn_usage, session_closed, handback) — never part of the model's view.
 func (m HistoryMessage) IsRecord() bool {
 	switch m.Kind {
-	case KindCompaction, KindTurnUsage, KindSessionClosed:
+	case KindCompaction, KindTurnUsage, KindSessionClosed, KindHandback:
 		return true
 	default:
 		return false
 	}
+}
+
+// TurnStarts returns the indexes of the Turn openers of msgs under the D6b
+// rule: a turn boundary, or the first handback_delivery of a contiguous run
+// of deliveries followed (eventually) by a turn-boundary user message.
+// Trailing deliveries (not yet followed by the user message) are NOT openers
+// — their Turn has not started. O(n), one pass from the end.
+func TurnStarts(msgs []HistoryMessage) []int {
+	n := len(msgs)
+	out := make([]int, 0, 4)
+
+	i := n - 1
+	for i >= 0 {
+		m := msgs[i]
+
+		if m.Kind == KindHandbackDelivery {
+			// Walk back over the run; the opener is decided by what follows.
+			run := i
+			for run >= 0 && msgs[run].Kind == KindHandbackDelivery {
+				run--
+			}
+
+			// The turn-boundary user message must exist LATER in the slice
+			// (after the run) for the run to open a Turn.
+			found := false
+			for j := i + 1; j < n; j++ {
+				if msgs[j].Kind == KindHandbackDelivery {
+					continue
+				}
+
+				found = msgs[j].IsTurnBoundary()
+
+				break
+			}
+
+			if found {
+				out = append(out, run+1)
+			}
+
+			i = run
+
+			continue
+		}
+
+		// A turn-boundary user message immediately after a delivery run is
+		// the SAME Turn's opener already counted at the run's head (D6b).
+		prevIsDelivery := i > 0 && msgs[i-1].Kind == KindHandbackDelivery
+		if m.IsTurnBoundary() && !prevIsDelivery {
+			out = append(out, i)
+		}
+
+		i--
+	}
+
+	// out was built newest-first; return oldest-first.
+	for l, r := 0, len(out)-1; l < r; l, r = l+1, r-1 {
+		out[l], out[r] = out[r], out[l]
+	}
+
+	return out
+}
+
+// HasDeliveredCounterpart reports whether a handback record's id was
+// delivered: the delivered marker (handbackHandbackID) rides the delivery
+// record or a recorded subagent_wait tool result.
+func HasDeliveredCounterpart(rec, later HistoryMessage) bool {
+	id := rec.HandbackID
+	if id == "" {
+		return false
+	}
+
+	if later.Kind == KindHandbackDelivery && later.DeliveredHandbackID == id {
+		return true
+	}
+
+	return later.Role == RoleTool && strings.Contains(later.Content, "handback_id:") && strings.Contains(later.Content, id)
 }
 
 // EstimatedChars approximates the prompt size of m in characters (content,
@@ -227,13 +345,16 @@ func (h *ConversationHistory) Add(msg HistoryMessage) {
 	h.observeLocked(msg)
 }
 
-// observeLocked updates the activity bookkeeping for a new entry.
+// observeLocked updates the activity bookkeeping for a new entry. A
+// handback ARRIVAL record is never activity (the reset rules' last-Turn time
+// must not move for background work); a handback_delivery belongs to the
+// Turn it opens and counts.
 func (h *ConversationHistory) observeLocked(msg HistoryMessage) {
-	if msg.Kind != KindCompaction && msg.Timestamp.After(h.lastActivity) {
+	if msg.Kind != KindCompaction && msg.Kind != KindHandback && msg.Timestamp.After(h.lastActivity) {
 		h.lastActivity = msg.Timestamp
 	}
 
-	if msg.IsTurnBoundary() {
+	if msg.IsTurnBoundary() || msg.Kind == KindHandbackDelivery {
 		h.hasTurn = true
 	}
 }
@@ -318,6 +439,41 @@ func (h *ConversationHistory) AppendRecord(ctx context.Context, rec HistoryMessa
 	line := h.lineCount
 	h.lineCount++
 	h.applyRecordLocked(rec, line)
+
+	return nil
+}
+
+// AppendBookkeeping appends rec (a handback record) to the Session file
+// WITHOUT flushing the view's unsaved entries — a detached append: the
+// record's physical line is accounted (lineCount advances) so later Save
+// calls keep correct numbering, the view is untouched, and the record never
+// lands inside an unflushed open tool-call group. A closed Session refuses
+// (the hierarchy is closing; callers treat that as a silent discard).
+// Framing repair runs under the same mutex chain via the file's own lock.
+func (h *ConversationHistory) AppendBookkeeping(ctx context.Context, rec HistoryMessage) error {
+	if !rec.IsRecord() {
+		return fmt.Errorf("failed to append bookkeeping record: kind %q is not a record", rec.Kind)
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return fmt.Errorf("failed to append record: session %q is closed", h.sessionID)
+	}
+
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("failed to marshal %s record: %w", rec.Kind, err)
+	}
+
+	if h.file != nil {
+		if _, err := h.file.Append(ctx, data); err != nil {
+			return fmt.Errorf("failed to append %s record: %w", rec.Kind, err)
+		}
+	}
+
+	h.lineCount++
 
 	return nil
 }
@@ -418,6 +574,52 @@ func (h *ConversationHistory) projectLocked() []HistoryMessage {
 	return out
 }
 
+// ReadUsage walks one Session file and sums its turn_usage and compaction
+// usage records — the lightweight reader of the owner-restore subtree walk
+// (subagent-runtime D9: owner totals = owner file + each child file exactly
+// once). Corrupt lines are skipped; no view is materialised.
+func ReadUsage(ctx context.Context, path string) (UsageRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return UsageRecord{}, fmt.Errorf("usage walk interrupted: %w", err)
+	}
+
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return UsageRecord{}, nil
+	}
+
+	if err != nil {
+		return UsageRecord{}, fmt.Errorf("failed to open %q for the usage walk: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var total UsageRecord
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+
+		var msg HistoryMessage
+		if err := json.Unmarshal(line, &msg); err != nil {
+			continue // a corrupt line is crash residue, never a usage record
+		}
+
+		if msg.Usage != nil && (msg.Kind == KindTurnUsage || msg.Kind == KindCompaction) {
+			total = total.Add(*msg.Usage)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return UsageRecord{}, fmt.Errorf("failed to read %q for the usage walk: %w", path, err)
+	}
+
+	return total, nil
+}
+
 // interruptedResult builds the interrupted tool result for callID.
 func interruptedResult(callID string, at time.Time) HistoryMessage {
 	return HistoryMessage{
@@ -510,6 +712,47 @@ func (h *ConversationHistory) CloseOpenToolCallGroup() int {
 	defer h.mu.Unlock()
 
 	return h.closeOpenGroupLocked(time.Now())
+}
+
+// CloseOpenToolCallGroupWith is CloseOpenToolCallGroup with a caller-supplied
+// fixed result text (the Subagent Runtime's daemon-restart / owner-end
+// variants of the interrupted result). The view gains the results; the next
+// Save appends them.
+func (h *ConversationHistory) CloseOpenToolCallGroupWith(result string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	idx := openGroupStart(h.messages)
+	if idx < 0 {
+		return 0
+	}
+
+	answered := map[string]bool{}
+	for _, later := range h.messages[idx+1:] {
+		if later.Role == RoleTool {
+			answered[later.ToolCallID] = true
+		}
+	}
+
+	added := 0
+	for _, tc := range h.messages[idx].ToolCalls {
+		if answered[tc.ID] {
+			continue
+		}
+
+		res := HistoryMessage{
+			Role:       RoleTool,
+			Content:    result,
+			ToolCallID: tc.ID,
+			Timestamp:  time.Now(),
+		}
+		h.messages = append(h.messages, res)
+		h.lines = append(h.lines, unsaved)
+		h.observeLocked(res)
+		added++
+	}
+
+	return added
 }
 
 func (h *ConversationHistory) closeOpenGroupLocked(at time.Time) int {
@@ -614,17 +857,14 @@ func (h *ConversationHistory) CompactionCount() (int, time.Time) {
 }
 
 // TurnsSinceCompaction counts the Turns recorded after the latest compaction
-// entry (all Turns when never compacted).
+// entry (all Turns when never compacted). Turn openers follow the D6b rule
+// (TurnStarts): a handback_delivery run opens the Turn it precedes.
 func (h *ConversationHistory) TurnsSinceCompaction() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	n := 0
-	for i, m := range h.messages {
-		if !m.IsTurnBoundary() {
-			continue
-		}
-
+	for _, i := range TurnStarts(h.messages) {
 		if h.summary == nil || h.lines[i] == unsaved || h.lines[i] > h.summaryLine {
 			n++
 		}
@@ -757,21 +997,18 @@ func (h *ConversationHistory) Restore(ctx context.Context) error {
 }
 
 // OmitOldestTurns returns msgs without its oldest n whole Turns: the cut
-// lands immediately before a turn-boundary user line, so a tool call is never
-// separated from its result, and the last Turn (the one in flight) is never
-// omitted. Leading entries before the first boundary (a kept tail starting
-// mid-Turn) go with the first omitted Turn. The input is not modified.
+// lands immediately before a Turn opener (a turn-boundary user line, or the
+// first handback_delivery of the run opening that Turn — D6b, so a delivery
+// is never separated from its Turn), a tool call is never separated from its
+// result, and the last Turn (the one in flight) is never omitted. Leading
+// entries before the first boundary (a kept tail starting mid-Turn) go with
+// the first omitted Turn. The input is not modified.
 func OmitOldestTurns(msgs []HistoryMessage, n int) []HistoryMessage {
 	if n <= 0 {
 		return msgs
 	}
 
-	var bounds []int
-	for i, m := range msgs {
-		if m.IsTurnBoundary() {
-			bounds = append(bounds, i)
-		}
-	}
+	bounds := TurnStarts(msgs)
 
 	if len(bounds) <= 1 {
 		return msgs

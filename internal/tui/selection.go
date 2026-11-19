@@ -46,10 +46,26 @@ const pbcopyTimeout = 2 * time.Second
 
 // handleMouseEvent routes the mouse-ownership messages out of Update
 // (Amendment 3): wheel scroll, in-app selection start/extend/release, and
-// the copy-confirmation expiry. The bool reports whether msg was consumed.
+// the copy-confirmation expiry. The bool (consumed) is part of the routing
+// contract — Update ignores it today because every mouse message is
+// consumed.
+//
+//nolint:unparam // the consumed flag stays part of the routing contract
 func (m *Model) handleMouseEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case tea.MouseWheelMsg:
+		// The Subagent panel owns the wheel over its own rows (task 6.4);
+		// the transcript keeps the wheel everywhere else.
+		if m.wheelInSubagentsPanel(msg.Mouse().Y) {
+			if msg.Mouse().Button == tea.MouseWheelUp {
+				m.subagentsPanelScroll(-1)
+			} else if msg.Mouse().Button == tea.MouseWheelDown {
+				m.subagentsPanelScroll(1)
+			}
+
+			return m, nil, true
+		}
+
 		var vcmd tea.Cmd
 		m.vp, vcmd = m.vp.Update(msg)
 		_ = vcmd

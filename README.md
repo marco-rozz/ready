@@ -4,19 +4,95 @@
 
 **Your home, in your words. Actions checked against what actually happened.**
 
-READY. is a self-hosted assistant that connects natural-language requests to
-Home Assistant. Run its Go daemon on your own hardware, talk to it from a
-terminal or Telegram, and choose where the language model runs: on your own
-machine through Ollama, or with a configured cloud provider.
+> **Think of READY. as a butler for your smart home.** You speak plainly
+> ("is anything still on downstairs?"). The butler knows every room, does the
+> job, and then reports back. It does not say "done" until the house confirms
+> it. It also keeps its notes after a restart, can hand errands to assistants
+> in the background, and never needs to see your keys.
 
-The goal is a home assistant that understands the house, carries out a request,
-and explains the result. The foundation is already here: a live digital twin,
-verified device commands, persistent conversations, runtime model failover,
-and guided configuration that keeps credentials out of the model's context.
+The name comes from the Commodore 64 prompt: the house sits at `READY.`,
+waiting for your command.
 
-[Get started](#get-started) · [Install](#install) ·
-[Configuration](#configuration) · [Secrets](#secrets) ·
-[Development](#development)
+READY. is a self-hosted Go daemon that connects natural-language requests to
+[Home Assistant](https://www.home-assistant.io/). It runs on your own hardware,
+down to a 2014 Raspberry Pi. You talk to it from a terminal or Telegram. The
+language model is your choice: local through Ollama, or a cloud provider.
+
+[Quick start](#quick-start) · [Highlights](#highlights) ·
+[Install](#install) · [Configuration](#configuration) ·
+[Secrets](#secrets) · [Development](#development)
+
+## Quick start
+
+From nothing to talking with your house in four commands:
+
+| Step | Command | What happens |
+|---|---|---|
+| **1. Install** | `curl -fsSL https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.sh \| bash` | Per-user install, no root. Windows: `irm https://raw.githubusercontent.com/marco-rozz/ready/main/scripts/install.ps1 \| iex` |
+| **2. Create an agent** | `ready init` | A wizard asks for your model (Ollama local/cloud, OpenRouter, OpenCode, ChatGPT), stores keys encrypted and prints the next commands |
+| **3. Start the daemon** | `ready serve --profile admin` | Keep this terminal open. The `admin` profile lets the assistant help you configure itself |
+| **4. Talk to it** | `ready chat` | In a second terminal. Start with *"Help me connect my Home Assistant."* |
+
+When setup is done, stop the server and run plain `ready serve` for everyday
+use. Open a new terminal after step 1 so `ready` is on your `PATH`
+(`ready.exe` on Windows).
+
+A fresh agent knows nothing about your home until you connect Home Assistant.
+The assistant walks you through it in chat, one block at a time, and every
+change waits for your confirmation before it is saved.
+
+Things to ask once it is connected:
+
+- *"Which lights are still on downstairs?"*
+- *"Turn off the living-room lights and check the result."*
+- *"Help me add Telegram to this agent."* (in an admin session)
+
+## Highlights
+
+**It tells you what really happened.** `ha_command` does not stop at the
+"command sent" acknowledgement. It watches the Home Assistant event stream
+and reports an outcome per entity: `applied`, `pending`, `already`,
+`unchanged`, `unavailable` or `error`.
+
+**It sees the house live.** A WebSocket digital twin mirrors every entity and
+registry in memory. Every answer carries freshness signals. When the twin
+falls too far behind, it refuses to serve a stale house.
+
+**Your model can fail without bringing the assistant down.** Declare an ordered
+chain of models, for example a local Gemma with a cloud fallback. The
+orchestrator retries, fails over mid-turn without re-running device actions,
+and switches back to your preferred model once it recovers.
+
+**Background helpers** *(new, opt-in)*. The assistant can delegate research
+or long tasks to Subagents that work in the background and report back. The
+TUI shows them in a live fleet panel.
+
+**Configured by conversation, activated without restarts** *(new)*. In an
+admin session, ask the assistant to add a provider, a channel or an MCP
+server. It drafts the change, you review it, you confirm. The TUI then asks for
+any missing secret in a masked editor, runs the OAuth login, and hot-reloads
+the runtime. The conversation and the connection stay open.
+
+**Secrets stay out of the model's reach** *(new)*. `config.yaml` holds only
+references (`!secret name`). Values live in an age-encrypted store that the
+model can never read or write. The config file is safe to back up and share.
+
+**A terminal you will want to keep open.** Streaming Markdown, multiline
+input, live tool activity, model health and token usage in the status line,
+mouse selection and copy, `/session` and `/context` at a keystroke. A
+one-shot `--exec` mode covers scripts, and Telegram gives you a second way in.
+
+**Memory that survives restarts.** Every conversation is an append-only
+transcript. Long chats are compacted automatically, `/new` starts fresh, and
+sessions reset daily and are retained for a configurable period.
+
+**Small hardware, many agents.** A static ARMv6 build runs on a Raspberry Pi 1,
+and the LLM can live on another machine. Each agent directory is an isolated
+assistant with its own config, keys, skills and history.
+
+**Extensible with skills and MCP.** File-based skills describe your home and
+your routines. MCP servers add tools. Per-profile allow/deny rules decide
+which tools each agent may use.
 
 ## What READY. can do today
 
@@ -25,59 +101,67 @@ and guided configuration that keeps credentials out of the model's context.
 | **A live view of your home** | A WebSocket digital twin mirrors Home Assistant entity states and registries in memory. State queries carry freshness signals and refuse to serve a hard-stale view. |
 | **Commands with evidence** | `ha_command` checks effects against Home Assistant state events and reports an outcome per entity, including pending or unverified results. An acknowledgement alone is not proof of success. |
 | **Your choice of model** | Ollama, OpenRouter and OpenCode integrations, plus an experimental ChatGPT/Codex OAuth provider. Ordered failover tracks health and resumes eligible failed turns from recorded tool results. |
-| **A terminal built for conversations** | Streaming replies, Markdown, multiline input, model status and live token usage in the TUI; a one-shot mode for scripts; Telegram for a second way in. |
+| **A terminal built for conversations** | Streaming replies, Markdown, multiline input, live tool activity, model status and token usage in the TUI; a one-shot mode for scripts; Telegram for a second way in. |
 | **Continuity across restarts** | Separate conversations per channel address, append-only session transcripts, `/new`, `/compact`, automatic summaries and configurable retention. |
-| **Guided setup and configuration** | `ready init` creates an agent. An opt-in admin profile lets you review and confirm configuration edits in chat, then complete Secrets and OAuth in the TUI and reload the runtime. |
+| **Guided setup and configuration** | `ready init` creates an agent. An opt-in admin profile lets you review and confirm configuration edits in chat, then complete Secrets and OAuth in the TUI and reload the runtime without a restart. |
+| **Encrypted secrets** | Sensitive fields hold only `!secret` / `!secret_file` references; values live in an age-encrypted store managed by the TUI editor or `ready secrets`. |
 | **Skills and MCP tools** | File-based skills describe your home and workflows; MCP connects additional tools. Profiles control which tools each agent exposes. Shipped skill updates preserve local edits. |
+| **Background delegation** | With `subagents.enabled`, the model can spawn bounded Subagents (`subagent_*` tools) that work in the background through the same LLM failover chain and report back with durable, scan-checked results: read-only research via the shipped `explore` type, follow-ups via mail, fan-out with one wait. Definitions are `*.md` assets in `<agent-dir>/subagents/`, library-synced like skills. |
 | **Small machines, independent agents** | A static ARMv6 build supports Raspberry Pi 1-class hosts. Separate agent directories keep configuration, credentials, skills and conversations independent. |
 
-For example, with Home Assistant and the relevant tools configured, ask:
-
-- “Which lights are still on downstairs?”
-- “Turn off the living-room lights and check the result.”
-- “Help me add Telegram to this agent.” — in an admin session.
-
 The LLM plans the steps through Eino ADK's **ReAct** loop
-(Thought → Action → Observation). Home Assistant supplies the observations.
-Verification describes the state reported by Home Assistant; it cannot prove a
-physical effect that a device or integration does not report. Automatic retry
-or failover requires a complete recorded tool-call group and no final-answer
-content delivered yet; a partial failure can still require your attention.
+(Thought → Action → Observation), and Home Assistant supplies the observations.
+Verification reports the state Home Assistant sees. It cannot prove a physical
+effect that a device or integration does not report. Automatic retry or
+failover needs a complete recorded tool-call group and no final-answer content
+delivered yet, so a partial failure can still need your attention.
+
+## Architecture
+
+READY. is a single Go daemon built around an **Eino ADK** ReAct agent
+(Thought → Action → Observation) that orchestrates every request.
+
+- **Channels**: one goroutine per interface. The ZMQ terminal client (`ready chat`),
+  Telegram long-polling, and a planned Serial/PETSCII channel for vintage terminals.
+- **Agent core**: the ReAct loop runs with native tool calling and streaming.
+  A failover orchestrator walks an ordered chain of LLM candidates (Ollama,
+  OpenRouter, OpenCode, ChatGPT/Codex) and recovers automatically from
+  provider failures. Subagents run on the same chain under per-provider
+  concurrency limits.
+- **Capabilities**: MCP servers expose external tools with per-server prefixes.
+  The Home Assistant digital twin (`hatwin`) keeps a live in-memory mirror of
+  entity states and dispatches verified device commands over the same WebSocket.
+  File-based skills provide progressive disclosure of home knowledge.
+- **State**: every conversation lives in its own append-only session folder
+  (`<agent-dir>/sessions/`), with compaction, per-session token accounting and
+  retention built in. Secrets and OAuth credentials live in one age-encrypted
+  store.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" type="image/avif" srcset="docs/img/architecture-dark.avif">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/architecture-dark.png">
+  <source media="(prefers-color-scheme: light)" type="image/avif" srcset="docs/img/architecture-light.avif">
+  <img src="docs/img/architecture-light.png" alt="READY. architecture overview" width="100%">
+</picture>
 
 ## Project status
 
 **READY. is under active construction.** The capabilities above are implemented,
 but configuration and protocols can change between releases. Read the upgrade
-guidance before replacing an existing installation and keep a recoverable backup
-of the agent directory and its Store key.
+guidance before replacing an existing installation, and keep a recoverable
+backup of the agent directory and its Store key.
 
-The ChatGPT/Codex provider is experimental. Serial/PETSCII access for vintage
-terminals, including the Commodore 64, is a planned direction; the serial
-channel is not implemented yet. Tool profiles limit the available catalog;
-they are not an OS sandbox for code or scripts executed by a skill.
+The ChatGPT/Codex provider is experimental. Subagents are off by default
+(`subagents.enabled: false`). Serial/PETSCII access for vintage terminals,
+including the Commodore 64, is a planned direction; the serial channel is not
+implemented yet. Tool profiles limit the available catalog. They are not an OS
+sandbox for code or scripts executed by a skill.
 
 > **A home server does not need to be a new computer.** The release matrix
 > includes a statically linked Linux ARMv6 build for a 2014 Raspberry Pi.
-> The LLM can run on another machine. Slow storage may leave the first start
+> The LLM can run on another machine. On slow storage the first start can stay
 > silent for tens of seconds before the banner; see the shipped `ready-guide`
 > troubleshooting asset.
-
-## Get started
-
-1. Install READY. using the commands below, then open a new terminal.
-2. Run `ready init` (`ready.exe init` on Windows). Choose your provider/model;
-   the wizard creates the agent, collects credentials privately, and prints
-   the exact commands for your setup.
-3. For the default agent, start the setup server with
-   `ready serve --profile admin`, then run `ready chat` in a second terminal.
-   For a custom directory or endpoint, use the commands printed by the wizard.
-4. Ask READY. to help configure the Home Assistant twin and any MCP servers you
-   need. Review configuration changes before confirming a save. Once configured,
-   stop the setup server and run `ready serve` with your normal profile.
-
-A fresh agent has no connection to your home until you configure one.
-The admin profile is for setup; available device actions depend on Home
-Assistant, the active command vocabulary and tool-profile permissions.
 
 ## Install
 
@@ -310,7 +394,7 @@ command. Values are entered in the authenticated ZMQ TUI under a profile
 that exposes `config-manager` (e.g. `--profile admin`) on a numeric loopback listener (use SSH forwarding for
 remote access; the editor opens by itself at the end of a turn that left
 something pending), or offline with `ready secrets set <name>`. Select the admin
-profile on `ready serve`, not on `ready chat`. The ZMQ protocol version is 4 and must match exactly on both ends. Upgrade the daemon and all chat clients together; rollback likewise requires matching older binaries on both ends. No data migration is needed.
+profile on `ready serve`, not on `ready chat`. READY's chat wire protocol (the JSON messages `ready chat` and the daemon exchange over ZMQ; not the ZMTP transport version) is version 6 and must match exactly on both ends. Upgrade the daemon and all chat clients together; rollback likewise requires matching older binaries on both ends. No data migration is needed.
 
 The RED editor masks the input (bullets and a character count); **Ctrl+R**
 shows the current field, a value with leading/trailing whitespace is flagged
@@ -457,7 +541,19 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
   verification, stale thresholds).
 - `skills` — path, hot reload, `sync`, `library_path` (see above).
 - `sessions` — per-address transcript files, reset rules (`daily`/`idle`),
-  retention; `/new` and `/compact` are session commands.
+  retention; `/new` and `/compact` are session commands. Each Session is a
+  folder with `session.jsonl` (subagent-runtime BREAKING: one folder per
+  Session — delete old `sessions/` once on upgrade); a Subagent hierarchy
+  lives in the owner folder's `subagents/` subtree and retention operates
+  on whole trees.
+- `subagents` — background delegation: `enabled` (default `false`, the
+  five `subagent_*` tools are absent when off), `max_depth` (1–2),
+  `max_concurrent`, `max_concurrent_jobs`, mailbox buffer, wait timeout,
+  handback caps, the definitions `path`/`sync`/`library_path`.
+- `llm.providers.<name>.max_parallel` — concurrent attempts per provider
+  instance (default 1 for `ollama`): owner turns are granted slots ahead of
+  Subagent turns and jobs, and queueing never demotes a candidate for
+  liveness.
 - `compaction` — automatic context compaction with a summariser skill.
 - `default_profile` + per-owner `profiles.<name>.{allow,deny}` — tool gating
   (fail-closed); `disclose_denied_tools` turns blocked calls into an explicit

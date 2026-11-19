@@ -95,30 +95,42 @@ type syncer struct {
 func Run(ctx context.Context, cfg config.SkillsConfig, runtimeHome string, logger zerolog.Logger) error {
 	logger = logger.With().Str("component", "skillssync").Logger()
 
-	m := modeOf(cfg.Sync)
-	if m == modeOff {
-		logger.Debug().Msg("skill library sync disabled (skills.sync: off)")
-
-		return nil
-	}
-
-	if cfg.LibraryPath == "" {
-		logger.Debug().Msg("no skill library location resolved — sync is a no-op")
-
-		return nil
-	}
-
 	runtimePath := cfg.Path
 	if runtimePath == "" {
 		runtimePath = filepath.Join(runtimeHome, "skills")
 	}
-	if err := validateSource(runtimePath, cfg.LibraryPath); err != nil {
+
+	return Sync(ctx, runtimePath, cfg.LibraryPath, cfg.Sync, logger)
+}
+
+// Sync is the generic per-file three-way library sync between runtimePath
+// and libraryPath under syncMode (auto|notify|off; empty = auto). The skills
+// boot sync and the Subagent-definition sync (subagent-runtime, task 1.5)
+// run the same mechanics with their own component label; the state file
+// (.library-state.json) is per runtime directory.
+func Sync(ctx context.Context, runtimePath, libraryPath, syncMode string, logger zerolog.Logger) error {
+	logger = logger.With().Str("component", "skillssync").Logger()
+
+	m := modeOf(syncMode)
+	if m == modeOff {
+		logger.Debug().Str("path", runtimePath).Msg("library sync disabled (sync: off)")
+
+		return nil
+	}
+
+	if libraryPath == "" {
+		logger.Debug().Str("path", runtimePath).Msg("no library location resolved — sync is a no-op")
+
+		return nil
+	}
+
+	if err := validateSource(runtimePath, libraryPath); err != nil {
 		return err
 	}
 
 	s := &syncer{
 		runtimePath: runtimePath,
-		libraryPath: cfg.LibraryPath,
+		libraryPath: libraryPath,
 		mode:        m,
 		logger:      logger,
 	}

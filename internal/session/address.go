@@ -21,17 +21,39 @@ import (
 // (`telegram-<chat_id>`). The stdin CLI and the ZMQ CLI share `cli`.
 type Address string
 
+// Reserved Conversation addresses owned by the Subagent Runtime
+// (subagent-runtime): `system` hosts job-owner Sessions, `main` is the
+// autonomous owner's reservation. AddressOf can never yield either — a
+// channel literally named so (none exists; structural guarantee) gets a
+// prefixed address.
+const (
+	ReservedSystem = "system"
+	ReservedMain   = "main"
+)
+
 // AddressOf maps an incoming message to its Conversation address. Each
 // multi-tenant channel contributes its peer key through the metadata it
 // already sets (Telegram: the chat id).
 func AddressOf(msg channel.Message) Address {
+	var addr Address
+
 	if msg.ChannelName == telegram.ChannelName {
 		if id := msg.Metadata[telegram.MetadataChatID]; id != "" {
-			return Address(msg.ChannelName + "-" + id)
+			addr = Address(msg.ChannelName + "-" + id)
 		}
 	}
 
-	return Address(msg.ChannelName)
+	if addr == "" {
+		addr = Address(msg.ChannelName)
+	}
+
+	// Structural guarantee (pinned by a test): the reserved Subagent-owner
+	// addresses are never produced.
+	if addr == ReservedSystem || addr == ReservedMain {
+		addr = "channel-" + addr
+	}
+
+	return addr
 }
 
 // Route recovers the channel name and delivery metadata of an address, for

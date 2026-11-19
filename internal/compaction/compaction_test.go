@@ -196,6 +196,28 @@ func TestSerialise(t *testing.T) {
 
 // --- trigger / backoff ---
 
+// A delivered Subagent handback is serialised as [Subagent result]: with
+// the same truncation as tool results (context-compaction "Handback
+// deliveries open their Turn").
+func TestSerialise_HandbackDeliveryTruncatedLikeToolResults(t *testing.T) {
+	entries := []persistence.HistoryMessage{
+		{Role: persistence.RoleUser, Kind: persistence.KindHandbackDelivery, Content: strings.Repeat("h", 9000)},
+		{Role: persistence.RoleUser, Kind: persistence.KindHandbackDelivery, Content: "short result"},
+		u("go on"),
+	}
+
+	got := Serialise(entries)
+
+	wantLong := "[Subagent result]: " + strings.Repeat("h", MaxToolResultChars) + "… [truncated: 7000 more characters]"
+	if !strings.Contains(got, wantLong) {
+		t.Errorf("long handback delivery not truncated at MaxToolResultChars: %s", got[:min(len(got), 200)])
+	}
+
+	if !strings.Contains(got, "[Subagent result]: short result") {
+		t.Errorf("short handback delivery must be kept verbatim: %s", got)
+	}
+}
+
 func TestTrigger(t *testing.T) {
 	tr := Trigger{Window: 131072, Reserve: 16384}
 	if tr.Threshold() != 114688 {

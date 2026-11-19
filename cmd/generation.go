@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/marco-rozz/ready/internal/agent"
+	"github.com/marco-rozz/ready/internal/agent/toolnames"
 	"github.com/marco-rozz/ready/internal/bootstrap"
 	"github.com/marco-rozz/ready/internal/channel"
 	"github.com/marco-rozz/ready/internal/channel/cli"
@@ -23,8 +27,10 @@ import (
 	"github.com/marco-rozz/ready/internal/skillcache"
 	"github.com/marco-rozz/ready/internal/skills"
 	"github.com/marco-rozz/ready/internal/skillssync"
+	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/twin"
+	"github.com/marco-rozz/ready/internal/usage"
 	"github.com/marco-rozz/ready/pkg/hatwin"
 	"github.com/rs/zerolog"
 )
@@ -41,6 +47,13 @@ type runtimeGeneration struct {
 	bootCfg           *config.Config
 	activeProfileName string
 	bootSecrets       *bootSecretState
+
+	llmCands      []orchestrator.Candidate
+	llmResolver   *toolnames.Resolver
+	llmDisclosure bool
+	llmProfile    string
+	childRunnerMu sync.Mutex
+	childRunners  map[string]map[string]agent.Runner
 
 	skillsMgr    *skills.Manager
 	skillCache   *skillcache.SkillCache
@@ -60,6 +73,179 @@ type runtimeGeneration struct {
 // generationStageError adds the failed builder stage while preserving the cause.
 func generationStageError(stage string, err error) error {
 	return fmt.Errorf("failed to %s: %w", stage, err)
+}
+
+// ── generation leases (subagent-runtime D14, task 3.4) ───────────────────
+
+// generationLeases is the refcounted lease API over the active runtime
+// generation. Background child dispatches NEVER take the session worker's
+// generation gate (a child waiting for RLock while its owner holds RLock
+// inside subagent_wait would stall every address, and a cascade close under
+// the write lock that joins children blocked on RLock would deadlock):
+// instead a dispatch acquires a lease on the generation it started on and
+// releases it at dispatch end. The swap installs the new generation without
+// waiting for leases; a generation is retired (shutdown) when its last lease
+// is released — bounded by the child dispatch timeout. Leases are never
+// acquired while holding the gate.
+type generationLeases struct {
+	mu      sync.Mutex
+	current *runtimeGeneration
+	refs    int
+	// retired holds generations replaced while still leased, in swap order.
+	retired []*runtimeGeneration
+
+	// retire shuts down a fully released generation (injectable for tests).
+	retire func(ctx context.Context, g *runtimeGeneration)
+
+	logger zerolog.Logger
+}
+
+// newGenerationLeases builds the lease manager over an initial generation.
+func newGenerationLeases(initial *runtimeGeneration, logger zerolog.Logger) *generationLeases {
+	return &generationLeases{current: initial, logger: logger}
+}
+
+// Acquire takes one lease on the active generation and returns it with the
+// release func. Never call while holding the generation gate. The returned
+// generation is consumed by the child driver (cmd wiring, subagent-runtime
+// 4.1).
+func (l *generationLeases) Acquire(ctx context.Context) (*runtimeGeneration, func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.refs++
+	g := l.current
+
+	return g, func() { l.Release(ctx, g) }
+}
+
+// Swap installs next as the active generation from the lease manager's
+// perspective and retires the previous one — immediately when unleased,
+// deferred to the last lease release otherwise (logged). Called by the swap
+// path after applyGeneration, outside the gate. The swap NEVER waits for
+// leases.
+func (l *generationLeases) Swap(ctx context.Context, next *runtimeGeneration) {
+	l.mu.Lock()
+
+	previous := l.current
+	if previous == nil || previous == next {
+		l.current = next
+		l.mu.Unlock()
+
+		return
+	}
+
+	l.current = next
+
+	if l.refs > 0 {
+		l.retired = append(l.retired, previous)
+		l.mu.Unlock()
+
+		l.logger.Info().Msg("previous runtime generation leased by a background dispatch — retirement deferred to its release")
+
+		return
+	}
+
+	l.mu.Unlock()
+
+	l.retireAll(ctx, []*runtimeGeneration{previous})
+}
+
+// Release drops one lease. When the released generation is the active one
+// the refcount just drops; when it is a deferred-retirement generation and
+// this was its last lease, every deferral is retired now (the leases and the
+// deferrals drain together — a child finishing on an old generation retires
+// every generation older than the active one).
+func (l *generationLeases) Release(ctx context.Context, g *runtimeGeneration) {
+	l.mu.Lock()
+
+	if g == l.current {
+		if l.refs > 0 {
+			l.refs--
+		}
+		l.mu.Unlock()
+
+		return
+	}
+
+	deferred := false
+	for _, r := range l.retired {
+		if r == g {
+			deferred = true
+
+			break
+		}
+	}
+
+	if !deferred {
+		l.mu.Unlock()
+
+		return
+	}
+
+	if l.refs--; l.refs > 0 {
+		l.mu.Unlock()
+
+		return
+	}
+
+	pending := append([]*runtimeGeneration(nil), l.retired...)
+	l.retired = nil
+	l.refs = 0
+	l.mu.Unlock()
+
+	l.retireAll(ctx, pending)
+}
+
+// retireAll shuts down the deferred generations (in swap order).
+func (l *generationLeases) retireAll(ctx context.Context, pending []*runtimeGeneration) {
+	for _, g := range pending {
+		if l.retire != nil {
+			l.retire(ctx, g)
+
+			continue
+		}
+
+		g.shutdown(ctx, l.logger)
+	}
+}
+
+// PendingRetired reports the count of generations awaiting lease release
+// (test seam).
+func (l *generationLeases) PendingRetired() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return len(l.retired)
+}
+
+// ActiveLeases reports the live lease count (test seam).
+func (l *generationLeases) ActiveLeases() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.refs
+}
+
+// ShutdownAll cancels every lease-holder's generation context and retires
+// every generation (active + deferred) — the daemon shutdown path. The
+// dispatch contexts are cancelled by the generation's own cancel (the child
+// driver's deadline ctx derives from it).
+func (l *generationLeases) ShutdownAll(ctx context.Context) {
+	l.mu.Lock()
+
+	current := l.current
+	pending := append([]*runtimeGeneration(nil), l.retired...)
+	l.retired = nil
+	l.current = nil
+	l.refs = 0
+	l.mu.Unlock()
+
+	if current != nil {
+		pending = append([]*runtimeGeneration{current}, pending...)
+	}
+
+	l.retireAll(ctx, pending)
 }
 
 // shutdown cancels the generation context and releases its resources. It is
@@ -110,6 +296,7 @@ func (g *runtimeGeneration) shutdown(ctx context.Context, logger zerolog.Logger)
 type serveShell struct {
 	ctx         context.Context
 	opts        ServeOptions
+	subagents   *subagent.Runtime
 	resolution  config.Resolution
 	rootLogger  zerolog.Logger
 	logger      zerolog.Logger
@@ -208,7 +395,7 @@ func (s *serveShell) buildGeneration(cfg *config.Config) (g *runtimeGeneration, 
 	g.haTwin = haTwin
 
 	agentTools, mcpRuntime, blockedTools, cfgMgr := buildTools(genCtx, bootCfg, skillsMgr, skillCache, s.opts.MockMCP, profileName, haTwin, s.rootLogger,
-		config.ProfileOverrideInputs{Flag: s.opts.Profile, Env: os.Getenv(config.ProfileEnvName)}, s.configState)
+		config.ProfileOverrideInputs{Flag: s.opts.Profile, Env: os.Getenv(config.ProfileEnvName)}, s.subagents, s.configState)
 	g.mcpRuntime, g.cfgMgr = mcpRuntime, cfgMgr
 
 	discloseDenied := activeProfile.DiscloseDeniedTools
@@ -216,11 +403,35 @@ func (s *serveShell) buildGeneration(cfg *config.Config) (g *runtimeGeneration, 
 	g.agentTools = agentTools
 
 	resolver := buildToolNameResolver(genCtx, agentTools, s.rootLogger, blockedTools, discloseDenied)
+	g.llmResolver, g.llmDisclosure, g.llmProfile = resolver, discloseDenied, profileName
+
+	// Definitions revalidated at reload only (subagent-runtime task 1.4):
+	// a file that fails validation keeps the previous version with a WARN;
+	// boot is the only fatal path. No fsnotify watcher.
+	if s.subagents != nil {
+		if defs, derr := subagent.LoadDefinitions(bootCfg.Subagents.Path); derr != nil {
+			logger.Warn().Err(derr).Msg("subagent definition revalidation failed at reload — the previous definitions stay active")
+		} else {
+			s.subagents.SetDefinitions(subagent.NewDefinitions(defs))
+		}
+	}
 
 	llmCands, fatalLLMErr := buildLLMCandidates(genCtx, cfg, agentTools, s.rootLogger, resolver, profileName, discloseDenied, pendingPaths)
 	if fatalLLMErr != nil {
 		return g, fmt.Errorf("invalid LLM registry: %w", fatalLLMErr)
 	}
+
+	// Per-provider parallelism (subagent-runtime D18): one limiter per
+	// generation, keyed by provider instance name (per-generation because
+	// the candidate chain — and its orchestrator — are generation-scoped).
+	slotLimits := make(map[string]int, len(cfg.LLM.Providers))
+	for name, p := range cfg.LLM.Providers {
+		if p.MaxParallel > 0 {
+			slotLimits[name] = p.MaxParallel
+		}
+	}
+
+	g.llmCands = llmCands
 
 	orch := orchestrator.New(orchestrator.Config{
 		Candidates:      llmCands,
@@ -230,6 +441,7 @@ func (s *serveShell) buildGeneration(cfg *config.Config) (g *runtimeGeneration, 
 		Retries:         cfg.LLM.ResolvedFailoverRetries(),
 		RetryBackoff:    cfg.LLM.ResolvedFailoverRetryBackoff(),
 		RetryBackoffCap: 30 * time.Second,
+		Slots:           orchestrator.NewSlotLimiter(slotLimits),
 	}, s.rootLogger)
 	orch.Boot(genCtx)
 	orch.Start(genCtx)
@@ -485,4 +697,137 @@ func (s *serveShell) reloadResponse(ctx context.Context, g *runtimeGeneration) p
 	}
 
 	return resp
+}
+
+// childRunnerSet builds (or returns the memoised) per-candidate runner set
+// for a child definition snapshot (subagent-runtime task 3.2, D17): one
+// runner per chain candidate built for the child's catalog and iteration
+// cap, keyed by candidate reference. Memoised inside the generation (a
+// snapshot is stable: prompt body, tools, caps) and retired with it. A pin
+// outside the chain is the fixed structural error.
+func (g *runtimeGeneration) childRunnerSet(
+	ctx context.Context,
+	def subagent.Definition,
+	pinnedModel string,
+	tools []tool.BaseTool,
+	rootLogger zerolog.Logger,
+) (map[string]agent.Runner, error) {
+	toolNames := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if info, err := t.Info(ctx); err == nil && info != nil {
+			toolNames = append(toolNames, info.Name)
+		}
+	}
+
+	key := def.Name + "|" + pinnedModel + "|" + strings.Join(toolNames, ",") + "|" + fmt.Sprint(def.EffectiveMaxIterations())
+
+	g.childRunnerMu.Lock()
+	if set, ok := g.childRunners[key]; ok {
+		g.childRunnerMu.Unlock()
+
+		return set, nil
+	}
+	g.childRunnerMu.Unlock()
+
+	if pinnedModel != "" && !chainHasRef(g.llmCands, pinnedModel) {
+		return nil, fmt.Errorf("%w: %q", subagent.ErrModelPinOutsideChain, pinnedModel)
+	}
+
+	logger := rootLogger.With().Str("component", "subagent-runner-set").Str("type", def.Name).Logger()
+	// Child runner sets share no thought tap with owner turns (a single tap
+	// would interleave; children log nothing here).
+	tap := agent.NewTap(rootLogger, false)
+
+	set := make(map[string]agent.Runner, len(g.llmCands))
+
+	for _, cand := range g.llmCands {
+		if cand.Runner == nil {
+			continue // a candidate whose construction failed stays skipped
+		}
+
+		if pinnedModel != "" && cand.Ref != pinnedModel {
+			continue
+		}
+
+		runner, err := g.buildChildRunner(ctx, cand, def, tools, tap, logger)
+		if err != nil {
+			logger.Warn().Err(err).Str("model", cand.Ref).Msg("child runner construction failed; candidate skipped for this definition")
+
+			continue
+		}
+
+		set[cand.Ref] = runner
+	}
+
+	if len(set) == 0 {
+		return nil, fmt.Errorf("failed to build the child runner set for %q: no candidate constructed", def.Name)
+	}
+
+	g.childRunnerMu.Lock()
+	if g.childRunners == nil {
+		g.childRunners = map[string]map[string]agent.Runner{}
+	}
+	g.childRunners[key] = set
+	g.childRunnerMu.Unlock()
+
+	return set, nil
+}
+
+// chainHasRef reports whether the chain carries ref.
+func chainHasRef(cands []orchestrator.Candidate, ref string) bool {
+	for _, c := range cands {
+		if c.Ref == ref {
+			return true
+		}
+	}
+
+	return false
+}
+
+// buildChildRunner constructs one child runner on the candidate's model,
+// both construction paths, with the child's tools and iteration cap.
+func (g *runtimeGeneration) buildChildRunner(
+	ctx context.Context,
+	cand orchestrator.Candidate,
+	def subagent.Definition,
+	tools []tool.BaseTool,
+	tap *agent.Tap,
+	logger zerolog.Logger,
+) (agent.Runner, error) {
+	maxIter := def.EffectiveMaxIterations()
+
+	if cand.Model.IsAgentic() {
+		recorded := usage.NewRecordedAgenticModel(cand.Model.Agentic)
+
+		// The blocked-call disclosure rewrites use the OWNER catalog's ghost
+		// index; a child catalog is a strict subset, so the resolver stays
+		// the generation's.
+		var runnerModel model.AgenticModel = recorded
+		if g.llmDisclosure {
+			runnerModel = toolnames.NewDisclosingAgenticModel(recorded, g.llmResolver, logger, g.llmProfile)
+		}
+
+		return agent.NewAgentic(ctx, agent.AgenticConfig{
+			Model:         runnerModel,
+			Tools:         tools,
+			SystemPrompt:  "", // the child prompt lives in the dispatch prefix
+			MaxIterations: maxIter,
+		}, tap)
+	}
+
+	recorded := usage.NewRecordedChatModel(cand.Model.Chat)
+
+	var chatModel *toolnames.NormalizingChatModel
+	if g.llmDisclosure {
+		chatModel = toolnames.NewDisclosingChatModel(recorded, g.llmResolver, logger, g.llmProfile)
+	} else {
+		chatModel = toolnames.NewNormalizingChatModel(recorded, g.llmResolver, logger)
+	}
+
+	return agent.New(ctx, agent.Config{
+		ChatModel:     chatModel,
+		Tools:         tools,
+		SystemPrompt:  "",
+		MaxIterations: maxIter,
+	}, tap)
 }

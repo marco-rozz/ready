@@ -128,6 +128,7 @@ main() {
     extract "$TMP_DIR/$ARCHIVE_NAME$ARCHIVE_EXT" "$EXTRACT_DIR"
     [ -f "$EXTRACT_DIR/$REMOTE_FILE" ] || die "the archive is missing $REMOTE_FILE (a corrupted or unrelated release?)"
     [ -d "$EXTRACT_DIR/skills" ] || die "the archive is missing the skills library (a corrupted or unrelated release?)"
+    [ -d "$EXTRACT_DIR/subagents" ] || die "the archive is missing the subagent definition library (a corrupted or unrelated release?)"
     [ -f "$EXTRACT_DIR/config.example.yaml" ] || die "the archive is missing config.example.yaml (a corrupted or unrelated release?)"
 
     # ── step 5: place (program → library → reference config → PATH) ─────────
@@ -140,6 +141,7 @@ main() {
     LAUNCHER_DIR="$USER_HOME/.local/bin"
     LAUNCHER="$LAUNCHER_DIR/$BIN_NAME"
     LIBRARY_DIR="$SHARE_DIR/library/skills"
+    SUBAGENT_LIBRARY_DIR="$SHARE_DIR/library/subagents"
     AGENT_DIR="$USER_HOME/.ready"
 
     # Program body: stage in the destination directory (same filesystem) and
@@ -158,6 +160,7 @@ main() {
     # skill copies are never touched (the daemon syncs them per file at
     # boot). A failed publication restores the previous library.
     replace_library "$EXTRACT_DIR/skills" "$LIBRARY_DIR"
+    replace_library "$EXTRACT_DIR/subagents" "$SUBAGENT_LIBRARY_DIR"
 
     # The example is installer-owned program content. Only ready init creates
     # an agent configuration; installation must not pre-empt its first-run wizard.

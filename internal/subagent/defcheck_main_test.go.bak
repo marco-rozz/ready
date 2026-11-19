@@ -1,0 +1,16 @@
+package main
+
+import (
+	"fmt"
+	"github.com/marco-rozz/ready/internal/subagent"
+)
+
+func main() {
+	defs, err := subagent.LoadDefinitions("resources/subagents")
+	if err != nil {
+		panic(err)
+	}
+	for _, d := range defs {
+		fmt.Printf("%+v body=%d chars\n", d, len(d.Body))
+	}
+}

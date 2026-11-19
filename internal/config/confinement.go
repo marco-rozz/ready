@@ -30,6 +30,7 @@ func (c *Config) validateStateConfined() error {
 	for _, d := range []confinedDest{
 		{key: "sessions.path", path: c.Sessions.Path},
 		{key: "skills.path", path: c.Skills.Path},
+		{key: "subagents.path", path: c.Subagents.Path},
 		{key: "logging.file_path", path: c.Logging.FilePath},
 	} {
 		if d.path == "" {

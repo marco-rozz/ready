@@ -1,6 +1,6 @@
 ---
 name: ready-guide
-description: "How to use and configure READY., the self-hosted home-automation assistant. Load this skill whenever the user asks anything about using READY. (commands, chat client, TUI, roles/commands such as /new or /compact), or about configuring it: config.yaml keys, LLM providers and failover, channels (cli/zmqcli/telegram/serial), MCP servers, the HA digital twin, MCP profiles, OAuth, sessions, compaction, logging, skill sync, install/upgrade, or any boot failure and error they saw. Guides a config interview: one YAML block at a time until a complete, valid configuration emerges."
+description: "How to use and configure READY., the self-hosted home-automation assistant. Load this skill whenever the user asks anything about using READY. (commands, chat client, TUI, roles/commands such as /new or /compact), or about configuring it: config.yaml keys, LLM providers and failover, channels (cli/zmqcli/telegram/serial), MCP servers, the HA digital twin, MCP profiles, OAuth, sessions, compaction, logging, skill sync, subagents (background delegation), install/upgrade, or any boot failure and error they saw. Guides a config interview: one YAML block at a time until a complete, valid configuration emerges."
 version: "1.0"
 ---
 
@@ -29,6 +29,7 @@ This SKILL.md is a map. The assets carry the details; load the one you need
 | `assets/config-channels.md` | The `channels:` block: cli vs zmqcli, telegram, serial, formatters. |
 | `assets/config-ha.md` | `mcp_servers:`, the `home_assistant:` digital twin, tool profiles, MCP OAuth. |
 | `assets/config-runtime.md` | `sessions:`, `compaction:`, `logging:`, `skills:` keys. |
+| `assets/config-subagents.md` | The `subagents:` block: background delegation, the `subagent_*` tools, definitions and library sync, depth/concurrency caps. |
 | `assets/config-runtime-tuning.md` | Numeric tuning from runtime evidence: context windows, compaction thresholds, failover timing. |
 | `assets/config-timeouts.md` | Every timeout and time-like knob: what it bounds, the ordering invariant, the log line that reveals it fired, and tuning by expectations (before any runtime evidence exists). |
 | `assets/config-manager.md` | The user wants to CHANGE the configuration through the agent: staged editing, `!secret` references, `ready secrets`, and the authenticated ZMQ masked secret editor. |
@@ -96,9 +97,14 @@ the configuration, one block at a time, in this order:
    `*` is the only metacharacter (it crosses `/`, e.g. `light/*` matches
    `light/turn_on`), matched case-sensitively against the owner's
    UNPREFIXED wire name (not `ha__light/turn_on`).
-5. **Then sessions, compaction, logging** — usually the defaults are right;
+5. **Optional: subagents** (`assets/config-subagents.md`) — background
+   delegation is OFF by default; offer it when the user wants work done in
+   the background (research, fan-out, long tasks) without the conversation
+   waiting. If enabled, run the `builtin_tools` per-profile question too
+   (which profiles may call `subagent_*`), one profile at a time.
+6. **Then sessions, compaction, logging** — usually the defaults are right;
    present them as "here is what you already get, override only if needed".
-6. **Optional fine-tuning pass — expectations, not numbers.** When the user
+7. **Optional fine-tuning pass — expectations, not numbers.** When the user
    asks to tune the setup (or at the end of a fresh install), ask at most the
    four expectation questions from `assets/config-timeouts.md` (failure
    posture; local vs cloud LLM; home responsiveness; channel audience) and

@@ -169,7 +169,14 @@ func (a *AgenticAgent) RunMessagesStreaming(ctx context.Context, sessionKey stri
 
 	agenticMessages := toAgenticMessages(messages)
 
-	iter := r.Run(ctx, agenticMessages)
+	// A derived context so an abandoned turn (the caller's deadline arrived
+	// while the executor was still running) stops scheduling further model
+	// calls; on the normal path the cancel is a post-return no-op.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	iter := r.Run(runCtx, agenticMessages)
+	events := pumpIterator(iter)
 
 	// Transcript sink: nil when unarmed.
 	rec := newTranscriptEmitter(ctx, messages)
@@ -197,10 +204,30 @@ func (a *AgenticAgent) RunMessagesStreaming(ctx context.Context, sessionKey stri
 	}
 
 	for {
-		event, ok := iter.Next()
-		if !ok {
+		var item iteratorItem[*adk.TypedAgentEvent[*schema.AgenticMessage]]
+		select {
+		case item = <-events:
+		case <-ctx.Done():
+			// Deadline/cancellation while the executor was still running:
+			// abandon the event loop (the pump is drained without side
+			// effects) and fail the turn with the context error. The turn
+			// outcome metadata accumulated so far is preserved.
+			drainIterator(events)
+			runCancel()
+
+			return TurnOutcome{
+				Reply:             finalContent,
+				ToolCallStarted:   toolCallStarted,
+				ToolCallCompleted: toolCallCompleted,
+				ContentDelivered:  contentDelivered,
+			}, fmt.Errorf("agent execution failed: %w", ctx.Err())
+		}
+
+		if !item.ok {
 			break
 		}
+
+		event := item.event
 
 		if event.Err != nil {
 			lastErr = event.Err

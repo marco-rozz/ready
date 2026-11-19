@@ -36,6 +36,9 @@ const (
 	// defaultSkillsDir is the default skills directory inside the agent
 	// directory.
 	defaultSkillsDir = "skills"
+	// defaultSubagentsDir is the default Subagent-definitions directory
+	// inside the agent directory (subagent-runtime D13).
+	defaultSubagentsDir = "subagents"
 	// defaultOAuthDir is the OAuth credentials directory inside the agent
 	// directory.
 	defaultOAuthDir = "oauth"
@@ -248,6 +251,7 @@ func (c *Config) applyRuntimeHomePaths() {
 	c.runtimeHomesApplied = true
 
 	c.Skills.Path = resolveRelPath(c.Skills.Path, c.RuntimeHome, defaultSkillsDir)
+	c.Subagents.Path = resolveRelPath(c.Subagents.Path, c.RuntimeHome, defaultSubagentsDir)
 	c.Sessions.Path = resolveRelPath(c.Sessions.Path, c.RuntimeHome, defaultSessionsDir)
 	c.Logging.FilePath = resolveRelPath(c.Logging.FilePath, c.RuntimeHome, "")
 
@@ -271,6 +275,14 @@ func (c *Config) applyRuntimeHomePaths() {
 	if c.Skills.LibraryPath == "" {
 		if home, err := userHome(); err == nil && home != "" {
 			c.Skills.LibraryPath = filepath.Join(home, ".local", "share", "ready", "library", "skills")
+		}
+	}
+
+	// The Subagent-definition library mirrors the skills library root.
+	c.Subagents.LibraryPath = resolveRelPath(c.Subagents.LibraryPath, c.RuntimeHome, "")
+	if c.Subagents.LibraryPath == "" {
+		if home, err := userHome(); err == nil && home != "" {
+			c.Subagents.LibraryPath = filepath.Join(home, ".local", "share", "ready", "library", "subagents")
 		}
 	}
 }

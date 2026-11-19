@@ -5,6 +5,32 @@ In-repo copies of upstream modules that need a local patch, wired in via
 the upstream module at a pinned version, with the patch kept as small as
 possible so upstream diffs stay reviewable.
 
+## Refreshing a vendored module
+
+`replace`-pinned modules do not update with `go get` — the `require` line is
+the pin's documentation, resolution always goes through the directory. An
+upgrade is a refresh, not a bump:
+
+1. **Pin** — pick the target upstream version; update it here and in the
+   module's entry below.
+2. **Copy (mechanical)** — replace the directory's tree with the upstream
+   module at the pinned version, e.g.
+   `cp -R $(go env GOMODCACHE)/<module>@<ver>/ thirdparty/<module>/`.
+3. **Re-apply the patches (judgement, not replay)** — for each documented
+   patch below, read the *new* upstream file and re-evaluate the patch's
+   intent against it: adapt it to refactored code, or drop it entirely when
+   upstream now provides the equivalent. Never replay the old diff blindly.
+4. **Verify (deterministic gate)** — `go mod tidy`, `go build ./...`, the
+   full Go test suite, plus any patch-specific tests named below. Upstream
+   API drift is caught here and fixed in the READY-side call sites.
+5. **Document** — record any patch that changed shape, was dropped, or was
+   superseded by an upstream feature.
+
+One commit per module, so each diff stays reviewable. A refresh may be run
+in an agentic session: steps 1–2 and 4–5 are mechanical and gated by tests;
+step 3 is the only judgement call and must be re- reasoned against the
+current upstream code, with the test suite as the final authority.
+
 ## llmtools-go
 
 - **Upstream**: `github.com/flexigpt/llmtools-go` at **v0.25.0**

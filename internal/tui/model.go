@@ -114,6 +114,10 @@ func (s turnState) Label() string {
 type completedTurn struct {
 	echo  string
 	reply string
+	// midInfo holds informational lines that arrived while this turn was
+	// in flight (a Subagent handback trace): rendered between the echo and
+	// the reply — their chronological position.
+	midInfo []string
 	// info is a one-line informational transcript entry (session-lifecycle:
 	// `── new session ──`, `── context compacted · … ──`) — faint styled
 	// text, never markdown, never a turn.
@@ -179,6 +183,14 @@ type Model struct {
 	renderer      *mdrender.Renderer
 	echoRenderer  *mdrender.Renderer // Markdown renderer for the inset user echo (width - 2*inset)
 
+	subagents       *protocol.SubagentsInfo // the latest fleet snapshot (D11); nil = hidden
+	subagentsScroll int
+	// subagentsAtTail tracks whether the panel window is anchored at the
+	// tail of the active list (D4): true by default and after scrolling
+	// back to the bottom, cleared when the user scrolls into history, so a
+	// new snapshot re-anchors at the tail only for a tail-anchored window.
+	subagentsAtTail bool
+
 	activityRequestID  string
 	activitySeq        uint64
 	activityTool       string
@@ -203,6 +215,12 @@ type Model struct {
 	completed        []completedTurn
 	completedRenderd string
 	completedDirty   bool
+
+	// curInfo holds informational transcript lines that arrived while the
+	// current model turn is in flight (appendInfoLine): rendered IMMEDIATELY
+	// at arrival inside the live region — between the prompt echo and the
+	// (streaming → final) reply — and archived there by completeTurn.
+	curInfo []string
 
 	curEcho     string // raw markdown of the current turn's user echo
 	livePreview string // rendered current-turn preview (streamed or final)
@@ -332,6 +350,9 @@ func NewModel(d dealer, opts Options) *Model {
 		agentName:     opts.AgentName,
 		secretPending: pendingOnly(opts.PendingSecrets),
 		credentials:   opts.Credentials,
+
+		// The panel window starts tail-anchored (subagent-panel-observability D4).
+		subagentsAtTail: true,
 	}
 
 	// Static head block (chat-logo-modes D3): rendered once at construction
@@ -530,6 +551,20 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+enter", "alt+enter", "ctrl+j":
 		m.ta.InsertString("\n")
 		m.applyLayout()
+
+		return m, nil
+
+	case "alt+up":
+		if m.subagentsPanelHeight() > 0 {
+			m.subagentsPanelScroll(-1)
+		}
+
+		return m, nil
+
+	case "alt+down":
+		if m.subagentsPanelHeight() > 0 {
+			m.subagentsPanelScroll(1)
+		}
 
 		return m, nil
 
@@ -1024,7 +1059,22 @@ func (m *Model) handleLLMUnavailable(resp protocol.Response) (tea.Model, tea.Cmd
 
 // appendInfoLine adds a one-line informational entry to the transcript
 // (never a turn, never an echo).
+// appendInfoLine appends a one-line informational transcript entry
+// (session lifecycle, subagent handback trace). While a model turn is in
+// flight the line renders IMMEDIATELY inside the live turn — between the
+// prompt echo and the streaming/final reply — and is archived there by
+// completeTurn: appending to completed would hoist it above the in-flight
+// turn, deferring to completion would print it after the final text (both
+// observed wrong, 2026-11-19 with a fast one-shot Subagent whose handback
+// beat the owner's reply).
 func (m *Model) appendInfoLine(line string) {
+	if m.state == stateThinking || m.state == stateStreaming {
+		m.curInfo = append(m.curInfo, line)
+		m.rebuildViewport()
+
+		return
+	}
+
 	m.completed = append(m.completed, completedTurn{info: line})
 	m.completedDirty = true
 	m.rebuildViewport()
@@ -1047,7 +1097,11 @@ func (m *Model) completeCommandBlock(content string) {
 func (m *Model) completeTurn(reply string) tea.Cmd {
 	m.activityTool = ""
 	m.activityRequestID = ""
-	m.completed = append(m.completed, completedTurn{echo: m.curEcho, reply: reply})
+	// The info lines that arrived inside the turn (a Subagent handback
+	// trace) are archived WITH the turn, between echo and reply.
+	m.completed = append(m.completed, completedTurn{echo: m.curEcho, reply: reply, midInfo: m.curInfo})
+	m.curInfo = nil
+
 	m.curEcho = ""
 	m.buffer.Reset()
 	m.livePreview = ""
@@ -1183,10 +1237,25 @@ func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
 			m.modelState = resp.ModelState
 		}
 
+		// Subagent fleet snapshot (subagent-runtime task 6.4): a pure view
+		// of the latest snapshot — the turn state and transcript untouched.
+		if resp.Content == protocol.ControlSubagents {
+			if info := resp.Subagents; info != nil {
+				m.subagentsApplySnapshot(info)
+			} else {
+				m.subagentsApplySnapshot(&protocol.SubagentsInfo{})
+			}
+		}
+
 		// Session lifecycle events (session-lifecycle): informational
 		// transcript lines only — the turn state is untouched.
 		switch resp.Content {
 		case protocol.ControlSessionChanged:
+			// The panel is a view of the Session's fleet: cleared with the
+			// Session (task 6.4); the window re-arms its tail anchor.
+			m.subagents = nil
+			m.subagentsScroll = 0
+			m.subagentsAtTail = true
 			m.resetActivation()
 			m.leaveSecretEditor()
 			m.secretOperation = ""
@@ -1200,6 +1269,20 @@ func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
 			if c := resp.Compaction; c != nil {
 				m.appendInfoLine(fmt.Sprintf("── context compacted · %s → %s tokens ──",
 					roundTokens(c.TokensBefore), roundTokens(c.TokensAfter)))
+			}
+		case protocol.ControlSubagentHandback:
+			// Subagent finished (subagent-runtime): the result's content is
+			// delivered at the head of the next turn — this line is the
+			// immediate signal that it arrived while the owner was idle.
+			// Protocol 6 (subagent-panel-observability D5) adds the optional
+			// dispatch-duration segment; an old daemon's field-absent event
+			// renders the plain two-segment line.
+			if h := resp.Handback; h != nil {
+				line := fmt.Sprintf("── subagent %s · %s", h.Name, h.Status)
+				if d := handbackDuration(h.ElapsedMS); d != "" {
+					line += " · " + d
+				}
+				m.appendInfoLine(line + " ──")
 			}
 		}
 
@@ -1586,6 +1669,12 @@ func (m *Model) renderCompleted() string {
 		if t.echo != "" {
 			b.WriteString(m.renderEcho(t.echo))
 		}
+		for _, line := range t.midInfo {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(infoLabelStyle().Render(line))
+		}
 		if t.reply != "" {
 			if b.Len() > 0 {
 				b.WriteString("\n\n")
@@ -1618,6 +1707,12 @@ func (m *Model) buildContent() string {
 	}
 	if m.curEcho != "" {
 		parts = append(parts, m.renderEcho(m.curEcho))
+	}
+	// Info lines that arrived inside the live turn (a Subagent handback
+	// trace) render at their chronological position: after the echo, before
+	// the streaming/final reply.
+	for _, line := range m.curInfo {
+		parts = append(parts, infoLabelStyle().Render(line))
 	}
 	if m.livePreview != "" {
 		if len(parts) > 0 {
@@ -1732,7 +1827,12 @@ func (m *Model) applyLayout() {
 	}
 
 	m.vp.SetWidth(m.width)
-	vpH := m.height - inH - 3 // -1 status line, -2 input bars (task 6.1)
+	// Subagent panel (subagent-panel-observability D1): the panel takes its
+	// space ONLY from the viewport's share — the input keeps exactly
+	// computeInputHeight() and the top/bottom bars + status line are never
+	// clipped. subagentsPanelHeight() is a pure read plus idempotent scroll
+	// clamping (View calls it again right after).
+	vpH := m.height - inH - 3 - m.subagentsPanelHeight() // -1 status line, -2 input bars (task 6.1)
 	if vpH < 1 {
 		vpH = 1
 	}
@@ -1792,7 +1892,13 @@ func (m *Model) View() tea.View {
 	topBar, bottomBar := m.inputBars()
 	status := m.statusLine()
 
-	body := lipgloss.JoinVertical(lipgloss.Left, transcript, topBar, input, bottomBar, status)
+	panel := m.subagentsPanel()
+	vertical := []string{transcript}
+	if panel != "" {
+		vertical = append(vertical, panel)
+	}
+	vertical = append(vertical, topBar, input, bottomBar, status)
+	body := lipgloss.JoinVertical(lipgloss.Left, vertical...)
 
 	v := tea.NewView(body)
 	// banner-in-transcript: alt-screen for the whole session; mouse capture

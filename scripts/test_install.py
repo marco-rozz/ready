@@ -29,10 +29,13 @@ class InstallerFixture(unittest.TestCase):
     def write_bundle(self, revision):
         self.reference = f"# reference {revision}\nconfig_version: 1\n"
         self.skill = f"# ready-guide {revision}\n"
+        self.subagent = f"# general-purpose {revision}\n"
         members = {
             "config.example.yaml": self.reference.encode(),
             "skills/ready-guide/SKILL.md": self.skill.encode(),
             "skills/ready-guide/assets/help.md": b"fixture asset\n",
+            "subagents/general-purpose.md": self.subagent.encode(),
+            "subagents/explore.md": b"# explore\n",
         }
         unix = self.fixtures / "ready_darwin_arm64.tar.gz"
         with tarfile.open(unix, "w:gz") as archive:
@@ -92,6 +95,8 @@ shutil.copyfile(Path(os.environ['READY_INSTALL_FIXTURES']) / name, args[args.ind
         self.assertFalse((self.user_home / ".ready").exists())
         self.assertEqual((shared / "config.example.yaml").read_text(), self.reference)
         self.assertEqual((shared / "library/skills/ready-guide/SKILL.md").read_text(), self.skill)
+        self.assertEqual((shared / "library/subagents/general-purpose.md").read_text(), self.subagent)
+        self.assertEqual((shared / "library/subagents/explore.md").read_text(), "# explore\n")
         self.assertTrue((self.user_home / ".local/bin/ready").is_symlink())
         self.assertIn("ready init", output)
         rc = self.user_home / ".zshrc"
@@ -199,6 +204,7 @@ $agent = Get-AgentDirPath
 if (Test-Path $agent) { throw 'installer created agent data before init' }
 if (-not (Test-Path (Get-LauncherPath))) { throw 'ready.exe missing' }
 if (-not (Test-Path (Join-Path (Get-LibraryPath) 'ready-guide\SKILL.md'))) { throw 'skills missing' }
+if (-not (Test-Path (Join-Path (Get-ShareRootPath) 'library\subagents\general-purpose.md'))) { throw 'subagent definitions missing' }
 if (-not (Test-Path (Join-Path (Get-ShareRootPath) 'config.example.yaml'))) { throw 'reference missing' }
 $bin = Split-Path (Get-LauncherPath) -Parent
 if (-not ($script:FixturePath.EndsWith($bin))) { throw 'user PATH not configured' }

@@ -113,6 +113,14 @@ func buildProbeRunner(ctx context.Context, m llm.ResolvedModel) (agent.Runner, e
 // synthetic; the probe performs no I/O besides the candidate's own model
 // call and has no side effects.
 func (o *Orchestrator) probeCandidate(ctx context.Context, cand Candidate) error {
+	// D18: probes include themselves in the provider-slot accounting (job
+	// priority — background work never delays a user).
+	release, err := o.cfg.Slots.acquire(ctx, cand.Provider, PriorityJob)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	if err := RunSyntheticProbe(ctx, cand.Model, o.cfg.Recovery.ProbeTimeout); err != nil {
 		return err
 	}
