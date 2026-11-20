@@ -2,6 +2,14 @@
 
 ![READY.](READY.png)
 
+[![Go](https://img.shields.io/badge/Go1.27+-%2300ADD8.svg?&logo=go&logoColor=white)](#)
+[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?logo=github-actions&logoColor=white)](#)
+
+[![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=F0F0F0)](#)
+[![Windows](https://custom-icon-badges.demolab.com/badge/Windows-0078D6?logo=windows11&logoColor=white)](#)
+[![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](#)
+[![Raspberry Pi](https://img.shields.io/badge/Raspberry_Pi-cd2355.svg?logo=raspberrypi)](#)
+
 **Your home, in your words. Actions checked against what actually happened.**
 
 > **Think of READY. as a butler for your smart home.** You speak plainly
