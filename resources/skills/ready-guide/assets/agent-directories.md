@@ -18,6 +18,7 @@ alternative filename.
 ├── sessions/
 ├── logs/                 # when file logging is enabled
 ├── skills/               # writable personalised copy
+├── okfs/                 # knowledge bundles (reserved; created by the operator)
 ├── .daemon.lock          # ownership lock file; persistent, NOT proof of liveness
 └── .maintenance.lock     # maintenance gate (serve/login shared, purge exclusive)
 ```
@@ -29,6 +30,23 @@ alternative filename.
 - Configured writable paths (`sessions.path`, `skills.path`,
   `logging.file_path`) must stay inside the agent directory after resolving
   symlinks/junctions; an escaping destination fails at load, naming the key.
+- `okfs/` is the reserved, key-less root for Open Knowledge Format (OKF v0.3)
+  bundles: one directory per bundle, read by the read-only `okf_query` builtin
+  tool and written by the separate `okf_write` builtin tool (both gated by
+  `builtin_tools` by name, default allow; deny `okf_write` for a read-only
+  agent) and confined to the selected bundle. `okf_write` writes concepts only
+  inside bundles the operator created, stamps authorship itself and never lets
+  the model write a verification: the operator confirms a concept with the
+  two-step `/verify <bundle>/<concept>` command (`ready chat`, the stdin CLI, or
+  a Telegram private chat whose sender's numeric user id is in `allow_from`).
+  READY. never creates `okfs/`. **Bundles are copied or cloned
+  inside `okfs/`, never symlinked** (a symlinked bundle is skipped; an `okfs`
+  linked out of the agent directory is refused). Validation rejects
+  `skills.path`, `sessions.path` or `subagents.path` equal to, inside or
+  containing `okfs/`, and a `logging.file_path` whose directory is `okfs/` or
+  inside it (a log file at the agent root is fine). Uninstall with purge deletes
+  `okfs/` with the default agent directory: tell the operator to keep their own
+  copy of any bundle. The shipped `okf-consume` and `okf-generate` skills drive the tools.
 - The shipped skill library lives OUTSIDE every agent directory (see
   `install-upgrade.md`) and is the only program-content exception to that
   rule.

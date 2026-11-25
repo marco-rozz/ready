@@ -460,8 +460,8 @@ func TestSubagentHandbackLineInsideLiveTurn(t *testing.T) {
 	if len(m.completed) != 0 {
 		t.Fatalf("the trace must not touch completed turns mid-flight: %+v", m.completed)
 	}
-	if len(m.curInfo) != 1 || !strings.Contains(m.curInfo[0], "4m12s") {
-		t.Fatalf("trace not in the live turn: %v", m.curInfo)
+	if len(m.body) != 1 || m.body[0].kind != bodyInfo || !strings.Contains(m.body[0].text, "4m12s") {
+		t.Fatalf("trace not in the live turn: %v", m.body)
 	}
 
 	live := m.buildContent()
@@ -474,10 +474,10 @@ func TestSubagentHandbackLineInsideLiveTurn(t *testing.T) {
 	// The owner's reply completes: the trace is archived WITH the turn,
 	// between the echo and the reply.
 	m.completeTurn("avviato")
-	if len(m.curInfo) != 0 {
-		t.Fatalf("live info not cleared: %v", m.curInfo)
+	if len(m.body) != 0 {
+		t.Fatalf("live body not cleared: %v", m.body)
 	}
-	if len(m.completed) != 1 || len(m.completed[0].midInfo) != 1 {
+	if len(m.completed) != 1 || len(m.completed[0].body) != 1 {
 		t.Fatalf("trace not archived with the turn: %+v", m.completed)
 	}
 

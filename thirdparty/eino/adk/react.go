@@ -409,6 +409,12 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		if wasInterrupted && hasState {
 			msg = state
 		}
+		// READY patch: before-tool-calls hook (proposed calls, none executed).
+		if execCtx := getTypedChatModelAgentExecCtx[Message](ctx); execCtx != nil && execCtx.beforeToolCallsHook != nil {
+			if err := execCtx.beforeToolCallsHook(ctx); err != nil {
+				return nil, err
+			}
+		}
 		return msg, nil
 	}), compose.WithNodeName(cancelCheckNode_))
 
@@ -657,6 +663,12 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 		wasInterrupted, hasState, state := compose.GetInterruptState[*schema.AgenticMessage](ctx)
 		if wasInterrupted && hasState {
 			msg = state
+		}
+		// READY patch: before-tool-calls hook (proposed calls, none executed).
+		if execCtx := getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx); execCtx != nil && execCtx.beforeToolCallsHook != nil {
+			if err := execCtx.beforeToolCallsHook(ctx); err != nil {
+				return nil, err
+			}
 		}
 		return msg, nil
 	}), compose.WithNodeName(cancelCheckNode_))

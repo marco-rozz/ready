@@ -245,6 +245,7 @@ func TestIntegration_LLMUnavailableReply_SessionSurvives(t *testing.T) {
 	sendDealerRequest(t, dealer, protocol.Request{
 		ConnectionID: "llm-unavailable-session",
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "first message",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 	})
@@ -275,6 +276,7 @@ func TestIntegration_LLMUnavailableReply_SessionSurvives(t *testing.T) {
 	sendDealerRequest(t, dealer, protocol.Request{
 		ConnectionID: "llm-unavailable-session",
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "second message",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 	})
@@ -341,6 +343,7 @@ func TestIntegration_GenericFailureKeepsOKStatus(t *testing.T) {
 	sendDealerRequest(t, dealer, protocol.Request{
 		ConnectionID: "generic-failure-session",
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "generic failure message",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 	})

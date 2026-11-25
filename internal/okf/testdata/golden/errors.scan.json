@@ -1,0 +1,86 @@
+{
+  "bundle": {
+    "description": null,
+    "license": null,
+    "title": "Errors"
+  },
+  "concepts": [
+    {
+      "current": true,
+      "description": null,
+      "generated_at": "2026-06-20T14:00:00Z",
+      "id": "e007-nested",
+      "notes": [],
+      "path": "e007-nested.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "nested duplicate",
+      "trust": "unverified",
+      "type": "Metric",
+      "verified_before_change": false
+    },
+    {
+      "current": true,
+      "description": "d",
+      "generated_at": null,
+      "id": "e007-top",
+      "notes": [],
+      "path": "e007-top.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "two",
+      "trust": "unverified",
+      "type": "Metric",
+      "verified_before_change": false
+    }
+  ],
+  "not_concepts": [
+    {
+      "path": "e002-notmap.md",
+      "reason": "frontmatter is not a mapping"
+    },
+    {
+      "path": "e002-unclosed.md",
+      "reason": "frontmatter is not closed"
+    },
+    {
+      "path": "e002-yaml.md",
+      "reason": "frontmatter does not parse"
+    },
+    {
+      "path": "empty-fm.md",
+      "reason": "no type"
+    }
+  ],
+  "now": "2026-07-01T00:00:00+00:00",
+  "okf_version": "0.3",
+  "summary": {
+    "concepts": 2,
+    "deprecated": 0,
+    "draft": 0,
+    "not_concepts": 4,
+    "not_current": 0,
+    "selected": 2,
+    "stale": 0,
+    "trust": {
+      "human-reviewed": 0,
+      "machine-confirmed": 0,
+      "unverified": 2
+    },
+    "types": {
+      "Metric": 2
+    }
+  }
+}

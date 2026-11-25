@@ -1,0 +1,140 @@
+{
+  "transcript": [
+    {
+      "role": "user",
+      "content": "turn on the kitchen light, twice"
+    },
+    {
+      "role": "user",
+      "kind": "turn_context",
+      "content": "\u003cturn_context_NONCE\u003e\nCurrent date and time: CLOCK\n\u003c/turn_context_NONCE\u003e"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        "call_NONCE_1_0:light_on:{\"entity\":\"light.kitchen\"}"
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "{\"state\":\"on\"}",
+      "tool_call_id": "call_NONCE_1_0"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        "call_NONCE_2_0:light_on:{\"entity\":\"light.kitchen\"}"
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "{\"state\":\"on\"}",
+      "tool_call_id": "call_NONCE_2_0"
+    },
+    {
+      "role": "assistant",
+      "content": "both lights are on"
+    }
+  ],
+  "prompts": [
+    [
+      {
+        "role": "system",
+        "content": "\u003c\u003c\u003cAVAILABLE_SKILLS\u003e\u003e\u003e\n(none)\n\u003c\u003c\u003cEND_AVAILABLE_SKILLS\u003e\u003e\u003e"
+      },
+      {
+        "role": "system",
+        "content": "\u003ccurrent_channel\u003e\nThe current runtime value is \"cli\". Report this current value when asked; it supersedes historical statements.\n\u003c/current_channel\u003e"
+      },
+      {
+        "role": "system",
+        "content": "\u003ccurrent_llm_model\u003e\nThe current runtime value is \"o::m\". Report this current value when asked; it supersedes historical statements.\n\u003c/current_llm_model\u003e"
+      },
+      {
+        "role": "user",
+        "content": "turn on the kitchen light, twice"
+      },
+      {
+        "role": "user",
+        "content": "\u003cturn_context_NONCE\u003e\nCurrent date and time: CLOCK\n\u003c/turn_context_NONCE\u003e"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "\u003c\u003c\u003cAVAILABLE_SKILLS\u003e\u003e\u003e\n(none)\n\u003c\u003c\u003cEND_AVAILABLE_SKILLS\u003e\u003e\u003e"
+      },
+      {
+        "role": "system",
+        "content": "\u003ccurrent_channel\u003e\nThe current runtime value is \"cli\". Report this current value when asked; it supersedes historical statements.\n\u003c/current_channel\u003e"
+      },
+      {
+        "role": "system",
+        "content": "\u003ccurrent_llm_model\u003e\nThe current runtime value is \"o::m\". Report this current value when asked; it supersedes historical statements.\n\u003c/current_llm_model\u003e"
+      },
+      {
+        "role": "user",
+        "content": "turn on the kitchen light, twice"
+      },
+      {
+        "role": "user",
+        "content": "\u003cturn_context_NONCE\u003e\nCurrent date and time: CLOCK\n\u003c/turn_context_NONCE\u003e"
+      },
+      {
+        "role": "assistant",
+        "tool_calls": [
+          "call_NONCE_1_0:light_on:{\"entity\":\"light.kitchen\"}"
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "{\"state\":\"on\"}",
+        "tool_call_id": "call_NONCE_1_0"
+      }
+    ],
+    [
+      {
+        "role": "system",
+        "content": "\u003c\u003c\u003cAVAILABLE_SKILLS\u003e\u003e\u003e\n(none)\n\u003c\u003c\u003cEND_AVAILABLE_SKILLS\u003e\u003e\u003e"
+      },
+      {
+        "role": "system",
+        "content": "\u003ccurrent_channel\u003e\nThe current runtime value is \"cli\". Report this current value when asked; it supersedes historical statements.\n\u003c/current_channel\u003e"
+      },
+      {
+        "role": "system",
+        "content": "\u003ccurrent_llm_model\u003e\nThe current runtime value is \"o::m\". Report this current value when asked; it supersedes historical statements.\n\u003c/current_llm_model\u003e"
+      },
+      {
+        "role": "user",
+        "content": "turn on the kitchen light, twice"
+      },
+      {
+        "role": "user",
+        "content": "\u003cturn_context_NONCE\u003e\nCurrent date and time: CLOCK\n\u003c/turn_context_NONCE\u003e"
+      },
+      {
+        "role": "assistant",
+        "tool_calls": [
+          "call_NONCE_1_0:light_on:{\"entity\":\"light.kitchen\"}"
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "{\"state\":\"on\"}",
+        "tool_call_id": "call_NONCE_1_0"
+      },
+      {
+        "role": "assistant",
+        "tool_calls": [
+          "call_NONCE_2_0:light_on:{\"entity\":\"light.kitchen\"}"
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "{\"state\":\"on\"}",
+        "tool_call_id": "call_NONCE_2_0"
+      }
+    ]
+  ]
+}

@@ -6,7 +6,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/marco-rozz/ready/internal/channel"
+	"github.com/marco-rozz/ready/internal/steer"
 )
+
+const waitedOneSecond = "Waited 1 seconds successfully."
 
 func TestWaitTool_Info(t *testing.T) {
 	wt := NewWaitTool()
@@ -41,7 +46,7 @@ func TestWaitTool_InvokableRun_Success(t *testing.T) {
 		t.Errorf("expected at least ~1s wait, got %v", elapsed)
 	}
 
-	if result != "Waited 1 seconds successfully." {
+	if result != waitedOneSecond {
 		t.Errorf("unexpected result: %q", result)
 	}
 }
@@ -127,7 +132,115 @@ func TestWaitTool_InvokableRun_WithinDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "Waited 1 seconds successfully." {
+	if result != waitedOneSecond {
 		t.Errorf("result = %q", result)
+	}
+}
+
+func steerTurn(t *testing.T) (*steer.Inbox, *steer.Turn) {
+	t.Helper()
+
+	in := steer.New(nil, steer.WithStopCommand())
+	turn := in.OpenTurn(steer.TurnSpec{ID: "t1", Steerable: true, MaxSteers: 8, MaxRestarts: 4})
+
+	return in, turn
+}
+
+func TestWaitTool_EndsOnSteeringCandidate(t *testing.T) {
+	in, turn := steerTurn(t)
+	ctx := steer.WithTurn(context.Background(), turn)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		in.Admit(channel.Message{Content: "no, the other one", Origin: channel.OriginHuman})
+	}()
+
+	start := time.Now()
+
+	got, err := NewWaitTool().InvokableRun(ctx, `{"seconds":120}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+
+	if got != steer.WaitInterruptedSteer {
+		t.Fatalf("result = %q", got)
+	}
+
+	if time.Since(start) > 3*time.Second {
+		t.Fatal("the 120s wait was not interrupted promptly")
+	}
+
+	if ctx.Err() != nil {
+		t.Fatal("interrupting a wait must not cancel the Turn context")
+	}
+}
+
+func TestWaitTool_EndsOnStop(t *testing.T) {
+	in, turn := steerTurn(t)
+	ctx := steer.WithTurn(context.Background(), turn)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		in.Admit(channel.Message{Content: "/stop", Origin: channel.OriginHuman})
+	}()
+
+	got, err := NewWaitTool().InvokableRun(ctx, `{"seconds":120}`)
+	if err != nil || got != steer.WaitInterruptedStop {
+		t.Fatalf("result = %q err=%v", got, err)
+	}
+}
+
+func TestWaitTool_CandidateAlreadyPendingReturnsAtOnce(t *testing.T) {
+	in, turn := steerTurn(t)
+	in.Admit(channel.Message{Content: "early", Origin: channel.OriginHuman})
+
+	ctx := steer.WithTurn(context.Background(), turn)
+
+	start := time.Now()
+
+	if got, _ := NewWaitTool().InvokableRun(ctx, `{"seconds":60}`); got != steer.WaitInterruptedSteer {
+		t.Fatalf("result = %q", got)
+	}
+
+	if time.Since(start) > time.Second {
+		t.Fatal("a pending candidate must end the wait immediately")
+	}
+}
+
+// The signal is not the Turn context: a concurrent tool sharing the context
+// is never cancelled by an interruption.
+func TestWaitTool_InterruptionDoesNotCancelConcurrentTool(t *testing.T) {
+	in, turn := steerTurn(t)
+	ctx := steer.WithTurn(context.Background(), turn)
+
+	concurrentDone := make(chan error, 1)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			concurrentDone <- ctx.Err()
+		case <-time.After(300 * time.Millisecond):
+			concurrentDone <- nil
+		}
+	}()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		in.Admit(channel.Message{Content: "correction", Origin: channel.OriginHuman})
+	}()
+
+	if _, err := NewWaitTool().InvokableRun(ctx, `{"seconds":30}`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := <-concurrentDone; err != nil {
+		t.Fatalf("a concurrent tool on the Turn context was cancelled: %v", err)
+	}
+}
+
+func TestWaitTool_NoTurnHandleKeepsTimerSemantics(t *testing.T) {
+	got, err := NewWaitTool().InvokableRun(context.Background(), `{"seconds":1}`)
+	if err != nil || got != waitedOneSecond {
+		t.Fatalf("result=%q err=%v", got, err)
 	}
 }

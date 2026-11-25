@@ -612,7 +612,8 @@ mcp_servers:
 #     disclose_denied_tools: true
 
 # builtin_tools gates READY's own internal tools (wait,
-# skills-load/unload, read-skill-asset, list-skill-assets, config-manager) —
+# skills-load/unload, read-skill-asset, list-skill-assets, say, okf_query,
+# okf_write, config-manager) —
 # same shape and fail-closed semantics as any other policy owner. If omitted
 # entirely, a code-owned default DENIES config-manager under both default and
 # edit while allowing the other internal tools: editing the elected
@@ -633,6 +634,22 @@ mcp_servers:
 #     # needs its own admin block or stays fail-closed:
 #     admin:
 #       allow: ["*"]
+
+# Knowledge bundles: <agent-dir>/okfs/ is a RESERVED root for Open Knowledge
+# Format (OKF v0.3) bundles — one directory per bundle, read by the okf_query
+# builtin tool and written by the separate okf_write builtin tool (both gated by
+# builtin_tools above, default allow: add "okf_write" to a profile's deny list to
+# keep that profile read-only; the tool never creates a bundle directory and
+# never deletes, renames or moves files). Human verification of a concept is
+# recorded only by the person, with the /verify command (ready chat, the stdin
+# CLI, or a Telegram private chat whose sender's numeric user id is in allow_from);
+# the model cannot write it. Written concepts carry the extension keys
+# x-ready-model (in generated) and x-ready-via (in a verified event). There is
+# no key for it, you create it yourself, and bundles must be copied or cloned
+# INSIDE it (a symlink to a directory elsewhere is skipped). skills.path,
+# sessions.path and subagents.path may not equal, sit inside or contain
+# <agent-dir>/okfs, and logging.file_path's directory may not be okfs/ or inside
+# it (a log file at the agent root is fine). Purge deletes okfs/ with the agent.
 
 # A run always uses its own writable runtime skill copy at <agent-dir>/
 # skills/ (the agent directory is the selected --agent-dir, default ~/.ready).
@@ -746,6 +763,25 @@ compaction:
   # 31B on Apple Silicon needs ~30-80s to read ~16k tokens and ~75-150s to
   # write a ~1.5k-token summary. Hosted models can use a much lower value.
   timeout: 180s
+
+# ── Turn steering (mid-turn corrections and /stop) ──────────────────────────
+# A message a HUMAN sends while their own Turn is running enters that Turn at
+# the next safe point (a proposed tool call is vetoed before it runs, a running
+# tool always finishes, an answer already being delivered is never interrupted)
+# so a correction reaches the agent before it acts or answers. A message that
+# arrives too late opens the next Turn immediately. Commands (/new, /compact,
+# /verify), scripted `ready chat --exec` requests and daemon-originated items
+# never steer; /stop ends the running Turn at its earliest safe point. Reaching
+# a limit defers the message to the next Turn — it never produces an error.
+steering:
+  enabled: true                # false restores plain FIFO queueing on every channel
+  max_steers_per_turn: 8       # 1..32 — beyond it later messages queue
+  max_restarts_per_turn: 4     # 1..16 — beyond it candidates defer instead of preempting
+  min_remaining_budget: 30s    # 0..300s — no claim when less of the Turn deadline remains
+# Per-channel override of steering.enabled (cli, zmqcli, telegram, serial):
+#   channels:
+#     telegram:
+#       steering: false
 
 # ── Subagent Runtime (background delegation) ─────────────────────────────
 # The LLM can delegate work to bounded background Subagents (subagent-_

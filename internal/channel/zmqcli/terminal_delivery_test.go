@@ -86,6 +86,7 @@ func TestIntegration_ProgressThenTerminalReply_ExactlyOnce(t *testing.T) {
 	data, err := protocol.Marshal(protocol.Request{
 		ConnectionID: "terminal-reply-session",
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "driver message",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 	})

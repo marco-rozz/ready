@@ -1,0 +1,69 @@
+{
+  "bundle": {
+    "description": null,
+    "license": null,
+    "title": null
+  },
+  "concepts": [
+    {
+      "current": true,
+      "description": null,
+      "generated_at": null,
+      "id": "c",
+      "notes": [],
+      "path": "c.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "lonely",
+      "trust": "unverified",
+      "type": "Note",
+      "verified_before_change": false
+    },
+    {
+      "current": true,
+      "description": null,
+      "generated_at": null,
+      "id": "sub/d",
+      "notes": [],
+      "path": "sub/d.md",
+      "replacement_id": null,
+      "resource": "c.md",
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "d",
+      "trust": "unverified",
+      "type": "Note",
+      "verified_before_change": false
+    }
+  ],
+  "not_concepts": [],
+  "now": "2026-07-01T00:00:00+00:00",
+  "okf_version": null,
+  "summary": {
+    "concepts": 2,
+    "deprecated": 0,
+    "draft": 0,
+    "not_concepts": 0,
+    "not_current": 0,
+    "selected": 2,
+    "stale": 0,
+    "trust": {
+      "human-reviewed": 0,
+      "machine-confirmed": 0,
+      "unverified": 2
+    },
+    "types": {
+      "Note": 2
+    }
+  }
+}

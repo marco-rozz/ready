@@ -46,6 +46,7 @@ agents/casa/
 ├── sessions/
 ├── logs/                 # when file logging is enabled
 ├── skills/               # writable personalised copy
+├── okfs/                 # knowledge bundles (reserved; created by you, never by READY.)
 ├── .daemon.lock          # ownership lock file; persistent, not proof of liveness
 └── .maintenance.lock     # maintenance gate (serve/login shared, purge exclusive)
 ```
@@ -55,6 +56,71 @@ backup files may also be present. `oauth.path` and `oauth.token_store` are
 removed keys and are rejected at load. Session/log/skill path overrides must stay
 inside the directory, including after links are resolved. Keep secret values
 out of chat.
+
+### Knowledge bundles (`okfs/`)
+
+`<agent-dir>/okfs/` is a reserved child of the agent directory for
+[Open Knowledge Format](https://github.com/open-knowledge-format/open-knowledge-format)
+(OKF v0.3) bundles: each directory directly inside it (not hidden, not a
+symlink) is one bundle, named after the directory, with an optional root
+`index.md` supplying its `okf_version`, title and description. There is no
+configuration key and READY. never creates the directory; you add bundles.
+
+- The agent reads bundles through the read-only `okf_query` tool
+  (`list`, `index`, `scan`, `read`, `compare`, `validate`), which computes trust
+  tiers, status, freshness, link and citation resolution, conflict ordering
+  and OKF conformance. It never writes, and every read is confined to the
+  selected bundle: nothing in another bundle, elsewhere in the agent directory
+  or outside it is opened.
+- The agent writes concepts through the separate `okf_write` tool (`create`,
+  `update`, `deprecate`) inside bundles **you** created: it never creates a
+  bundle directory, and never deletes, renames or moves a file. The tool
+  stamps authorship itself (`generated.by: ready/<version>`, the time and the
+  model in `x-ready-model`), refuses any `generated` or `verified` the model
+  supplies, re-stamps on every change of any value (so a human-reviewed concept
+  drops to unverified), preserves the keys and comments it does not change,
+  detects edits made behind its back (an `update` needs the digest `okf_query
+  read` printed), validates what it writes and maintains `index.md` and
+  `log.md`. Each concept it writes carries the extension keys `x-ready-model`
+  (inside `generated`) and, for verifications, `x-ready-via` (inside the
+  `verified` event). Bundles you share through git therefore carry those keys.
+- **Human verification is yours alone, through `/verify`.** The model cannot
+  record a `human:` verification. You send `/verify <bundle>/<concept>`; READY.
+  replies with the concept's raw content, its trust summary and a token bound
+  to exactly those bytes. Then you send `/verify <bundle>/<concept> <your-id>
+  <token>`: the verification (`by: "human:<your-id>"`, the time, the channel) is
+  recorded only if the file is unchanged since the preview, and a Verification
+  entry is added to the bundle's `log.md`. The command never reaches the model
+  and is never written to a transcript. It is accepted on the `ready chat`
+  client, on the stdin CLI, and on Telegram **only in a private chat with the
+  bot whose sender's numeric user id is listed in `allow_from`** (a chat id or a
+  username is not enough, and an open bot with an empty `allow_from` cannot
+  verify). The id you state is self-declared by that authenticated principal.
+  There is no way to revoke a verification or to move a concept: a later change
+  makes a verification non-current, and a move is create plus deprecate (the new
+  concept needs a new verification).
+- **Copy or clone a bundle inside `okfs/`; do not link it.** A symlinked bundle
+  directory is skipped (`list` names it), directory links inside a bundle are
+  never followed, and a file link is read only while its target stays inside the
+  bundle. An `okfs` that is itself a link out of the agent directory is refused.
+- `okf_query` and `okf_write` belong to the `builtin_tools` policy owner and are
+  gated independently by name: with no `builtin_tools` block both are available
+  (deny `okf_write` to keep an agent read-only); an explicit profile entry can
+  allow or deny each like the other internal tools. A Subagent definition's
+  `tools` list restricts further (the shipped `explore` Subagent has no write
+  tool; `general-purpose` inherits the owner's).
+- `okfs/` is disjoint from every configurable path: configuration validation
+  rejects `skills.path`, `sessions.path` or `subagents.path` equal to, inside or
+  containing it, and a `logging.file_path` whose directory is `okfs/` or inside
+  it (a log file at the agent root is accepted). Bundles are therefore never
+  skills, never touched by the skill sync and never removed by Session or log
+  retention.
+- Uninstall with purge deletes the default agent directory **including `okfs/`**:
+  bundles you added there are removed with it; keep your own copy elsewhere.
+- The shipped `okf-consume` skill teaches the agent the consume procedure on
+  top of `okf_query`; the shipped `okf-generate` skill teaches the authoring
+  procedure on top of `okf_write` (the model never records a verification and
+  asks you to run `/verify`).
 
 ### Secrets and the Store key
 
@@ -250,7 +316,7 @@ even when PATH is unchanged. Shared PATH entries survive removal.
 - Uninstall removes the owned program, launcher and shipped library,
   preserving every agent's data and PATH.
 - Confirmed uninstall with purge additionally removes only the default
-  `~/.ready` agent, after taking the directory's exclusive maintenance gate:
+  `~/.ready` agent (its `okfs/` knowledge bundles included), after taking the directory's exclusive maintenance gate:
   an active daemon or mutating login makes combined removal fail BEFORE
   deleting program, library or private state. The config is removed first so
   no new daemon can boot against a recreated lock with an obsolete snapshot.

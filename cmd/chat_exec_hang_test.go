@@ -44,6 +44,9 @@ type fakeChatDaemon struct {
 	pending        []protocol.PendingSecret
 	secretRequests chan struct{}
 	secret         string
+	// authRenders records the renders_notices value of every authenticating
+	// session_start round (say-mid-turn-notice).
+	authRenders chan bool
 }
 
 func newFakeChatDaemon(t *testing.T, authOK bool, pending ...[]protocol.PendingSecret) *fakeChatDaemon {
@@ -63,6 +66,7 @@ func newFakeChatDaemonWithSecret(t *testing.T, authOK bool, secret string, pendi
 		sessionEnd:     make(chan string, 4),
 		done:           make(chan struct{}),
 		secretRequests: make(chan struct{}, 4),
+		authRenders:    make(chan bool, 8),
 	}
 	if len(pending) > 0 {
 		d.pending = pending[0]
@@ -125,6 +129,10 @@ func (d *fakeChatDaemon) serve() {
 					ProtocolVersion: protocol.Version,
 				})
 			case d.authOK && d.validHMAC(req.AuthToken, nonces[string(identity)]):
+				select {
+				case d.authRenders <- req.RendersNotices:
+				default:
+				}
 				d.reply(identity, protocol.Response{
 					ConnectionID:    req.ConnectionID,
 					Status:          protocol.ResponseStatusOK,

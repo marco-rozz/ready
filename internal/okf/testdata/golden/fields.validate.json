@@ -1,0 +1,317 @@
+{
+  "errors": 0,
+  "files_checked": 24,
+  "findings": [
+    {
+      "code": "I201",
+      "level": "info",
+      "line": 1,
+      "message": "the concept is stale: stale_after 2026-06-01T00:00:00Z has passed (section 5.5)",
+      "path": "i201-i203.md"
+    },
+    {
+      "code": "I203",
+      "level": "info",
+      "line": 1,
+      "message": "extension keys without the x- prefix: foo (section 4.1)",
+      "path": "i201-i203.md"
+    },
+    {
+      "code": "I204",
+      "level": "info",
+      "line": 1,
+      "message": "no verification is current: each verified event is older than generated.at, so consumers read the concept as unverified (section 5.3)",
+      "path": "i204.md"
+    },
+    {
+      "code": "I205",
+      "level": "info",
+      "line": 1,
+      "message": "without an attester, consumers cannot show values from this computation as attested (section 10.2)",
+      "path": "i205.md"
+    },
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "generated.at is an RFC 3339 date-time with an offset, such as 2026-06-30T14:00:00Z, or a date such as 2026-06-30 (section 5); found 'yesterday'",
+      "path": "w101.md"
+    },
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "usage_window is a { from, to } mapping of timestamps (section 5.1)",
+      "path": "w101.md"
+    },
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "sources[0].last_modified is an RFC 3339 date-time with an offset, such as 2026-06-30T14:00:00Z, or a date such as 2026-06-30 (section 5); found 'sometime'",
+      "path": "w101.md"
+    },
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "stale_after does not parse, so consumers never treat the concept as fresh (section 5.5); found 'next spring'",
+      "path": "w101.md"
+    },
+    {
+      "code": "W102",
+      "level": "warning",
+      "line": 1,
+      "message": "generated is a mapping with a by field (section 5.2)",
+      "path": "w102.md"
+    },
+    {
+      "code": "W103",
+      "level": "warning",
+      "line": 1,
+      "message": "generated.by is an actor: <producer>/<version> or <scheme>:<id>, such as human:<id> (section 7); found 'someone'",
+      "path": "w103.md"
+    },
+    {
+      "code": "W103",
+      "level": "warning",
+      "line": 1,
+      "message": "verified[0].by is an actor: <producer>/<version> or <scheme>:<id>, such as human:<id> (section 7); found 'bob'",
+      "path": "w103.md"
+    },
+    {
+      "code": "W103",
+      "level": "warning",
+      "line": 1,
+      "message": "sources[0].author is an actor: <producer>/<version> or <scheme>:<id>, such as human:<id> (section 7); found 'nobody'",
+      "path": "w103.md"
+    },
+    {
+      "code": "W104",
+      "level": "warning",
+      "line": 1,
+      "message": "verified[0] needs by and at; consumers ignore it (section 5.2)",
+      "path": "w104.md"
+    },
+    {
+      "code": "W104",
+      "level": "warning",
+      "line": 1,
+      "message": "verified[1] needs by and at; consumers ignore it (section 5.2)",
+      "path": "w104.md"
+    },
+    {
+      "code": "W105",
+      "level": "warning",
+      "line": 1,
+      "message": "status is draft, stable, or deprecated; consumers treat 'Stable' as not current (section 5.4)",
+      "path": "w105-w123.md"
+    },
+    {
+      "code": "W123",
+      "level": "warning",
+      "line": 1,
+      "message": "superseded_by has a meaning only with status: deprecated (section 5.4)",
+      "path": "w105-w123.md"
+    },
+    {
+      "code": "W106",
+      "level": "warning",
+      "line": 1,
+      "message": "sources[0] needs a resource; consumers ignore it (section 5.1)",
+      "path": "w106-w109.md"
+    },
+    {
+      "code": "W107",
+      "level": "warning",
+      "line": 1,
+      "message": "sources[2].id 'a' is not unique (section 5.1)",
+      "path": "w106-w109.md"
+    },
+    {
+      "code": "W109",
+      "level": "warning",
+      "line": 1,
+      "message": "sources[2].usage_count needs a usage_window that gives its period (section 5.1)",
+      "path": "w106-w109.md"
+    },
+    {
+      "code": "W108",
+      "level": "warning",
+      "line": 9,
+      "message": "footnote [^missing] has no sources entry with that id (section 5.1)",
+      "path": "w106-w109.md"
+    },
+    {
+      "code": "W110",
+      "level": "warning",
+      "line": 1,
+      "message": "write tags as a YAML list of strings (section 4.1)",
+      "path": "w110-map.md"
+    },
+    {
+      "code": "W110",
+      "level": "warning",
+      "line": 1,
+      "message": "write tags as a YAML list (sections 4.1 and 11.2); consumers read it as the single tag 'sales, orders'",
+      "path": "w110-scalar.md"
+    },
+    {
+      "code": "W111",
+      "level": "warning",
+      "line": 1,
+      "message": "an Attested Computation needs runtime (section 10.2)",
+      "path": "w111.md"
+    },
+    {
+      "code": "W112",
+      "level": "warning",
+      "line": 1,
+      "message": "no computation: no computation field and no fenced block in a Computation section, so the concept is not attestable (section 10.3)",
+      "path": "w111.md"
+    },
+    {
+      "code": "I205",
+      "level": "info",
+      "line": 1,
+      "message": "without an attester, consumers cannot show values from this computation as attested (section 10.2)",
+      "path": "w111.md"
+    },
+    {
+      "code": "W112",
+      "level": "warning",
+      "line": 1,
+      "message": "with a computation field, do not also put a fenced block in the Computation section (section 10.3)",
+      "path": "w112-both.md"
+    },
+    {
+      "code": "W113",
+      "level": "warning",
+      "line": 1,
+      "message": "parameters[0] needs name and type (section 10.2)",
+      "path": "w113-w114.md"
+    },
+    {
+      "code": "W113",
+      "level": "warning",
+      "line": 1,
+      "message": "parameters[1] needs name and type (section 10.2)",
+      "path": "w113-w114.md"
+    },
+    {
+      "code": "W114",
+      "level": "warning",
+      "line": 1,
+      "message": "executor is a mapping with a resource field (section 10.2)",
+      "path": "w113-w114.md"
+    },
+    {
+      "code": "W114",
+      "level": "warning",
+      "line": 1,
+      "message": "executor.receipt lists the fields that a run returns (section 10.2)",
+      "path": "w114-receipt.md"
+    },
+    {
+      "code": "W116",
+      "level": "warning",
+      "line": 1,
+      "message": "attester.resource '/missing.py' does not resolve to a file in the bundle (section 6.2)",
+      "path": "w114-receipt.md"
+    },
+    {
+      "code": "W115",
+      "level": "warning",
+      "line": 4,
+      "message": "link target 'nope.md' is not in the bundle (section 6.1)",
+      "path": "w115.md"
+    },
+    {
+      "code": "W116",
+      "level": "warning",
+      "line": 1,
+      "message": "resource '/nope.csv' does not resolve to a file in the bundle (section 6.2)",
+      "path": "w116.md"
+    },
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote title: it parses as int, not a string (section 4)",
+      "path": "w117.md"
+    },
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote description: it parses as bool, not a string (section 4)",
+      "path": "w117.md"
+    },
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote status: it parses as int, not a string (section 4)",
+      "path": "w117.md"
+    },
+    {
+      "code": "W105",
+      "level": "warning",
+      "line": 1,
+      "message": "status is draft, stable, or deprecated; consumers treat 7 as not current (section 5.4)",
+      "path": "w117.md"
+    },
+    {
+      "code": "W120",
+      "level": "warning",
+      "line": 1,
+      "message": "not a concept: the frontmatter has no non-empty type (section 3.2)",
+      "path": "w120-blanktype.md"
+    },
+    {
+      "code": "W120",
+      "level": "warning",
+      "line": 1,
+      "message": "not a concept: the file has no frontmatter (section 3.2)",
+      "path": "w120-nofm.md"
+    },
+    {
+      "code": "W120",
+      "level": "warning",
+      "line": 1,
+      "message": "not a concept: the frontmatter has no non-empty type (section 3.2)",
+      "path": "w120-notype.md"
+    },
+    {
+      "code": "W122",
+      "level": "warning",
+      "line": 1,
+      "message": "write generated.at as a date-time, because consumers compare it with verified[].at (section 5)",
+      "path": "w122.md"
+    },
+    {
+      "code": "W122",
+      "level": "warning",
+      "line": 1,
+      "message": "write verified[0].at as a date-time, because consumers compare it with generated.at (section 5)",
+      "path": "w122.md"
+    },
+    {
+      "code": "W126",
+      "level": "warning",
+      "line": 1,
+      "message": "put exactly one fenced block in the Computation section; consumers use the first of 2 (section 10.3)",
+      "path": "w126-two.md"
+    },
+    {
+      "code": "I205",
+      "level": "info",
+      "line": 1,
+      "message": "without an attester, consumers cannot show values from this computation as attested (section 10.2)",
+      "path": "w126-two.md"
+    }
+  ],
+  "info": 6,
+  "okf_version": "0.3",
+  "warnings": 38
+}

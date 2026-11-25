@@ -43,11 +43,11 @@ func TestActivation_SaveWithNothingToCollectGoesStraightToReload(t *testing.T) {
 		t.Fatal("zero pending secrets and logins must go straight to the runtime reload")
 	}
 
-	// Input typed during the reload is queued, never sent.
+	// Input typed during the reload is held locally, never sent.
 	m.ta.InsertString("hello")
 	_, _ = m.sendInput()
-	if len(m.pending) != 1 || m.waiting {
-		t.Fatal("typed input must queue while reloading")
+	if len(m.hold) != 1 || m.waiting {
+		t.Fatal("typed input must be held locally while reloading")
 	}
 
 	reloadOK(m)
@@ -60,8 +60,8 @@ func TestActivation_SaveWithNothingToCollectGoesStraightToReload(t *testing.T) {
 	if !strings.Contains(m.content, "configuration reloaded") {
 		t.Fatal("the transcript must show the reload line")
 	}
-	if !m.waiting || len(m.pending) != 0 {
-		t.Fatal("the steering queue must drain after the reload")
+	if !m.waiting || len(m.hold) != 0 {
+		t.Fatal("the local prompt hold must drain after the reload")
 	}
 }
 

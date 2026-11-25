@@ -1,0 +1,37 @@
+{
+  "errors": 0,
+  "files_checked": 2,
+  "findings": [
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote title: it parses as bool, not a string (section 4)",
+      "path": "c.md"
+    },
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote description: it parses as bool, not a string (section 4)",
+      "path": "c.md"
+    },
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote status: it parses as bool, not a string (section 4)",
+      "path": "c.md"
+    },
+    {
+      "code": "W105",
+      "level": "warning",
+      "line": 1,
+      "message": "status is draft, stable, or deprecated; consumers treat False as not current (section 5.4)",
+      "path": "c.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": "0.3",
+  "warnings": 4
+}

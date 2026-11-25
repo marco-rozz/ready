@@ -67,7 +67,7 @@ func TestBuildTools_MCPServerProfileGating(t *testing.T) {
 		{profileEdit, false},
 	} {
 		t.Run(tc.profile, func(t *testing.T) {
-			tools, runtime, blocked, _ := buildTools(ctx, baseCfg, skillsMgr, skillCache, true, tc.profile, nil, zerolog.Nop(), config.ProfileOverrideInputs{}, nil)
+			tools, runtime, blocked, _ := buildTools(ctx, baseCfg, skillsMgr, skillCache, true, tc.profile, nil, zerolog.Nop(), config.ProfileOverrideInputs{}, nil, nil)
 			if tc.expectDenied {
 				foundBlocked := false
 				for _, b := range blocked {
@@ -146,7 +146,7 @@ func TestBuildTools_ConfigManagerImplicitDefault(t *testing.T) {
 	}
 
 	for _, profile := range []string{"default", "edit"} {
-		tools, runtime, _, _ := buildTools(ctx, loaded, skillsMgr, skillCache, true, profile, nil, zerolog.Nop(), config.ProfileOverrideInputs{}, nil)
+		tools, runtime, _, _ := buildTools(ctx, loaded, skillsMgr, skillCache, true, profile, nil, zerolog.Nop(), config.ProfileOverrideInputs{}, nil, nil)
 		if runtime != nil {
 			defer func() { _ = runtime.Close() }()
 		}
@@ -206,7 +206,7 @@ func TestBuildTools_ConfigManagerExplicitPolicies(t *testing.T) {
 	}
 
 	exposed := func(cfg *config.Config) bool {
-		tools, runtime, _, _ := buildTools(ctx, cfg, skillsMgr, skillCache, true, "admin", nil, zerolog.Nop(), config.ProfileOverrideInputs{}, nil)
+		tools, runtime, _, _ := buildTools(ctx, cfg, skillsMgr, skillCache, true, "admin", nil, zerolog.Nop(), config.ProfileOverrideInputs{}, nil, nil)
 		if runtime != nil {
 			defer func() { _ = runtime.Close() }()
 		}

@@ -1,0 +1,26 @@
+{
+  "bundle": {
+    "description": null,
+    "license": null,
+    "title": "no version"
+  },
+  "concepts": [],
+  "not_concepts": [],
+  "now": "2026-07-01T00:00:00+00:00",
+  "okf_version": null,
+  "summary": {
+    "concepts": 0,
+    "deprecated": 0,
+    "draft": 0,
+    "not_concepts": 0,
+    "not_current": 0,
+    "selected": 0,
+    "stale": 0,
+    "trust": {
+      "human-reviewed": 0,
+      "machine-confirmed": 0,
+      "unverified": 0
+    },
+    "types": {}
+  }
+}

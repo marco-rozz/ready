@@ -1,0 +1,17 @@
+okf-consume (READY. adaptation)
+
+Derived from the `okf-consume` skill of the Open Knowledge Format repository
+(https://github.com/open-knowledge-format/open-knowledge-format, commit
+527e81aff55992be21507e97004286789126f88c), Copyright 2026 Google LLC,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Changes made by READY.:
+- SKILL.md: the `scripts/scan.py` invocations are replaced by `okf_query`
+  actions (list, index, scan, read, compare, validate); the attested-
+  computation execution steps are replaced by the no-execution path; the
+  bundle-discovery step uses the agent's `okfs/` root.
+- references/trust.md: a READY note on the attestation gate was added; the
+  rules themselves are unchanged.
+- SKILL.md: rule 5 states that human confirmation is recorded only through
+  the `/verify` session command, and authoring is directed to `okf-generate`.
+- scripts/ is not shipped: the scanner is implemented natively by `okf_query`.

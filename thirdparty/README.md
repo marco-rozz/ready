@@ -68,8 +68,19 @@ current upstream code, with the test suite as the final authority.
 - **Exact patch** (`schema/stream.go`): add `StreamReader.OnClose` (callbacks compose in registration order) and invoke
   its callbacks from `Close`. Existing reader and tool interfaces are otherwise
   unchanged. The callback is registered before the reader is handed off.
-- **Refresh**: copy the pinned upstream module, reapply the patch, run the
-  activity lifecycle tests and full Go test suite. Remove the replacement when
+- **Why patched (2)**: turn steering must veto the model's proposed tool
+  calls before any of them executes; upstream only has an after-tool-calls
+  hook.
+- **Exact patch (2)** (`adk/chatmodel.go`, `adk/react.go`): add the
+  `beforeToolCallsHook` field next to `afterToolCallsHook` in the run options
+  and exec context (same plumbing at every assignment site), the
+  `WithBeforeToolCallsHook` run option, and fire the hook at the end of the
+  `CancelCheck` node of both the message graph and the agentic graph (between
+  the tool-call branch and the `ToolNode`). A returned error aborts the run
+  before any tool executes. `adk/before_tool_calls_test.go` covers it.
+- **Refresh**: copy the pinned upstream module, reapply both patches, run the
+  activity lifecycle tests, `go test -run TestBeforeToolCallsHook ./adk` and
+  the full Go test suite. Remove the replacement when
   upstream exposes an equivalent close notification.
 
 ## go-zeromq/zmq4

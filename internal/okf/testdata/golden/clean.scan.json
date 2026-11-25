@@ -1,0 +1,113 @@
+{
+  "bundle": {
+    "description": "Fully conformant fixture bundle",
+    "license": "MIT",
+    "title": "Clean home"
+  },
+  "concepts": [
+    {
+      "current": true,
+      "description": null,
+      "generated_at": "2026-06-20T14:00:00Z",
+      "id": "computations/revenue",
+      "notes": [],
+      "path": "computations/revenue.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": "bigquery",
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "Revenue computation",
+      "trust": "unverified",
+      "type": "Attested Computation",
+      "verified_before_change": false
+    },
+    {
+      "current": false,
+      "description": null,
+      "generated_at": null,
+      "id": "metrics/old-revenue",
+      "notes": [],
+      "path": "metrics/old-revenue.md",
+      "replacement_id": "metrics/revenue",
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "deprecated",
+      "superseded_by": "/metrics/revenue.md",
+      "tags": [],
+      "title": "Old revenue",
+      "trust": "unverified",
+      "type": "Metric",
+      "verified_before_change": false
+    },
+    {
+      "current": true,
+      "description": "Recognized revenue.",
+      "generated_at": "2026-06-20T14:00:00Z",
+      "id": "metrics/revenue",
+      "notes": [],
+      "path": "metrics/revenue.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "Revenue",
+      "trust": "machine-confirmed",
+      "type": "Metric",
+      "verified_before_change": false
+    },
+    {
+      "current": true,
+      "description": "One row per order.",
+      "generated_at": "2026-06-20T14:00:00Z",
+      "id": "tables/orders",
+      "notes": [],
+      "path": "tables/orders.md",
+      "replacement_id": null,
+      "resource": "/data/orders.csv",
+      "runtime": null,
+      "stale": false,
+      "stale_after": "2026-12-31T00:00:00Z",
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [
+        "sales"
+      ],
+      "title": "Orders",
+      "trust": "human-reviewed",
+      "type": "BigQuery Table",
+      "verified_before_change": false
+    }
+  ],
+  "not_concepts": [],
+  "now": "2026-07-01T00:00:00+00:00",
+  "okf_version": "0.3",
+  "summary": {
+    "concepts": 4,
+    "deprecated": 1,
+    "draft": 0,
+    "not_concepts": 0,
+    "not_current": 1,
+    "selected": 4,
+    "stale": 0,
+    "trust": {
+      "human-reviewed": 1,
+      "machine-confirmed": 1,
+      "unverified": 2
+    },
+    "types": {
+      "Attested Computation": 1,
+      "BigQuery Table": 1,
+      "Metric": 2
+    }
+  }
+}

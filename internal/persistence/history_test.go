@@ -480,3 +480,28 @@ func TestOmitOldestTurns(t *testing.T) {
 		t.Error("omit 0 must return the input")
 	}
 }
+
+// An open `say` group at restore (process death between the physical delivery
+// and the recorded result — say-mid-turn-notice D9 accepted edge) is closed
+// `[Transient] Interrupted` in the file, like any other interrupted call.
+func TestRestore_OpenSayGroupClosedInterrupted(t *testing.T) {
+	h, path := newTestHistory(t)
+
+	h.Add(user("mostrami il report"))
+	h.Add(turnCtx("ctx"))
+	h.Add(assistant("", call("c1", "say")))
+
+	if err := h.Save(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	r := reopen(t, path)
+	if r.HasOpenToolCallGroup() {
+		t.Fatal("an open say group must be closed at restore")
+	}
+
+	msgs := r.Messages()
+	if last := msgs[len(msgs)-1]; last.Role != RoleTool || last.ToolCallID != "c1" || last.Content != InterruptedToolResult {
+		t.Fatalf("expected the interrupted result for the say call, got %+v", last)
+	}
+}

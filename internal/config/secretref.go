@@ -128,8 +128,6 @@ func parseSecretRefNode(node *yaml.Node) (SecretRef, error) {
 
 // CanonicalSecretName derives the proposed Secret name for a sensitive field
 // path (design S2). Callers that must avoid collisions use UniqueSecretName.
-//
-//nolint:gosec // G602 false positive: every index is guarded by the len(path) test in the same case
 func CanonicalSecretName(path []string) (string, bool) {
 	var raw string
 	switch {

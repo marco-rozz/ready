@@ -10,6 +10,8 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/marco-rozz/ready/internal/steer"
 )
 
 // MaxWaitSeconds is the maximum allowed wait duration to prevent abuse.
@@ -82,9 +84,28 @@ func (t *WaitTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ .
 		}
 	}
 
+	// Turn-steering S12: a pending candidate or a stop ends the wait early
+	// through the per-Turn signal — never the Turn context, which MCP/HA calls
+	// of the same Turn share. No Turn handle or no signal: unchanged.
+	var interrupt <-chan struct{}
+
+	turn := steer.FromContext(ctx)
+	if turn != nil {
+		interrupt = turn.Signal()
+	}
+
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
 	select {
-	case <-time.After(duration):
+	case <-timer.C:
 		return fmt.Sprintf("Waited %d seconds successfully.", args.Seconds), nil
+	case <-interrupt:
+		if turn.Stopping() {
+			return steer.WaitInterruptedStop, nil
+		}
+
+		return steer.WaitInterruptedSteer, nil
 	case <-ctx.Done():
 		return "", fmt.Errorf("wait interrupted after partial duration: %w", ctx.Err())
 	}

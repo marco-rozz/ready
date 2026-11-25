@@ -60,7 +60,7 @@ a target that owns a pending credential, skips such targets when none is
 selected, and reports them in `--status` without network work.
 
 The direct-entry wire protocol is separate from the file schema. ZMQ clients
-and daemons exchange integer `protocol_version: 3` during both
+and daemons exchange integer `protocol_version: 8` during both
 `session_start` rounds. A mismatch is rejected before challenge/HMAC state is
 created; install matching `ready` releases on both ends. The version changes
 only when a strict peer could reject or misinterpret the wire contract.

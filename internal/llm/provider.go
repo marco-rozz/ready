@@ -744,6 +744,9 @@ func buildOpenCodeGoogle(ctx context.Context, modelName, baseURL, key string) (m
 		HTTPClient: streamSafeHTTPClient(nil),
 		HTTPOptions: genai.HTTPOptions{
 			BaseURL: baseURL,
+			// Pinned: newer genai releases default to v1, but the Zen
+			// gateway serves the native format under v1beta.
+			APIVersion: "v1beta",
 			Headers: http.Header{
 				"Authorization":  []string{"Bearer " + key},
 				zenSessionHeader: []string{zenSessionID()}, // OpenCode session, see opencode_session.go

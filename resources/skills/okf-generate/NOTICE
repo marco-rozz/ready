@@ -1,0 +1,24 @@
+okf-generate (READY. adaptation)
+
+Derived from the `okf-generate` skill of the Open Knowledge Format repository
+(https://github.com/open-knowledge-format/open-knowledge-format, commit
+527e81aff55992be21507e97004286789126f88c), Copyright 2026 Google LLC,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Changes made by READY.:
+- SKILL.md: the `scripts/validate.py` invocation is replaced by the findings
+  returned inline by `okf_write` plus `okf_query validate`; files are written
+  with the `okf_write` tool instead of by hand.
+- Rule 3 (record authorship): replaced — the tool stamps `generated` itself
+  (`ready/<version>`, the time, and the attempting model in `x-ready-model`).
+- Rule 4 (verification): DIVERGES from upstream — the model never records a
+  verification; a person confirms content with the `/verify` session command,
+  which the daemon records.
+- Step 5.5 (keep `generated` for format-only changes): removed — every change
+  of any value re-stamps `generated`.
+- Step 5.10 (move or rename keeps `generated`/`verified`): replaced by
+  create + deprecate, after which the new concept needs a new verification.
+- Step 7 (index and log files): replaced — the tool maintains `index.md` and
+  `log.md`; the model never edits them.
+- The update section is rewritten around `base_digest` and the trust receipt.
+- references/ is unchanged. scripts/ is not shipped: validation is native.

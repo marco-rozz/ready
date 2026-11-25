@@ -81,7 +81,7 @@ func loginRequiredTargets(creds []protocol.CredentialInfo) []string {
 // activationBusy reports whether something else owns the editor or the wire
 // right now; the cycle then resumes at its next join point.
 func (m *Model) activationBusy() bool {
-	return m.waiting || len(m.pending) > 0 || m.secretMode || m.oauthMode || m.reloading ||
+	return m.waiting || m.awaitingAnswer() || m.secretMode || m.oauthMode || m.reloading ||
 		m.secretRequestID != "" || m.oauthRequestID != "" || m.quitting
 }
 
@@ -405,7 +405,7 @@ func (m *Model) handleReloadResponse(resp protocol.Response) (tea.Model, tea.Cmd
 	m.applyLayout()
 	m.rebuildViewport()
 
-	return m, tea.Batch(m.recvCmd(), m.startNextQueuedTurn())
+	return m, tea.Batch(m.recvCmd(), m.drainHold())
 }
 
 // handleConfigReloaded consumes the unsolicited config_reloaded event: the

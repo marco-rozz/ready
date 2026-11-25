@@ -1,7 +1,7 @@
 ---
 name: ready-guide
 description: "How to use and configure READY., the self-hosted home-automation assistant. Load this skill whenever the user asks anything about using READY. (commands, chat client, TUI, roles/commands such as /new or /compact), or about configuring it: config.yaml keys, LLM providers and failover, channels (cli/zmqcli/telegram/serial), MCP servers, the HA digital twin, MCP profiles, OAuth, sessions, compaction, logging, skill sync, subagents (background delegation), install/upgrade, or any boot failure and error they saw. Guides a config interview: one YAML block at a time until a complete, valid configuration emerges."
-version: "1.0"
+version: "1.1"
 ---
 
 # Ready Guide — using and configuring READY.
@@ -28,7 +28,7 @@ This SKILL.md is a map. The assets carry the details; load the one you need
 | `assets/config-llm.md` | The `llm:` block: provider instances, wire APIs, credentials, context_window, failover and recovery. |
 | `assets/config-channels.md` | The `channels:` block: cli vs zmqcli, telegram, serial, formatters. |
 | `assets/config-ha.md` | `mcp_servers:`, the `home_assistant:` digital twin, tool profiles, MCP OAuth. |
-| `assets/config-runtime.md` | `sessions:`, `compaction:`, `logging:`, `skills:` keys. |
+| `assets/config-runtime.md` | `sessions:`, `compaction:`, `steering:`, `logging:`, `skills:` keys. |
 | `assets/config-subagents.md` | The `subagents:` block: background delegation, the `subagent_*` tools, definitions and library sync, depth/concurrency caps. |
 | `assets/config-runtime-tuning.md` | Numeric tuning from runtime evidence: context windows, compaction thresholds, failover timing. |
 | `assets/config-timeouts.md` | Every timeout and time-like knob: what it bounds, the ordering invariant, the log line that reveals it fired, and tuning by expectations (before any runtime evidence exists). |
@@ -145,6 +145,10 @@ Interview rules:
   silently exposes nothing. Patterns are glob-style: `*` is the only
   wildcard (it crosses `/`), matched against the unprefixed wire name;
   see the per-profile rules in `assets/config-ha.md`.
+- `say` (shows the user a mid-turn notice) is a builtin tool exposed by the
+  default `builtin_tools` policy under every profile. A profile with an
+  explicit `builtin_tools` `allow:` list must name `say` in it, or the model
+  loses mid-turn visibility (see `assets/troubleshooting.md`).
 - After each agreed block, compose the new YAML section in the style of
   `config.example.yaml` (comments and all), then move to the next block.
 - When the change should actually be applied to the selected agent's configuration,

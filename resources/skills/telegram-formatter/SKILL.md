@@ -1,7 +1,7 @@
 ---
 name: telegram-formatter
 description: "Formatting rules for Telegram output (HTML mode, emoji, structured responses)."
-version: "1.3"
+version: "1.4"
 ---
 
 # Telegram Formatter Rules
@@ -10,6 +10,9 @@ These rules apply to all responses intended for the Telegram channel. You MUST f
 
 Telegram messages are rendered in **HTML parse mode** and are limited to 4096
 characters per message.
+
+These rules also apply to the text you pass to the `say` tool: it is rendered
+by the same pipeline as a final reply, so use the same HTML rules and never Markdown.
 
 ## HTML Formatting
 - Use `<b>bold</b>` for emphasis and device names (e.g. <b>Luce cucina</b>).

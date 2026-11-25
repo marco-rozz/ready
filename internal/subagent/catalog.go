@@ -17,8 +17,9 @@ import (
 )
 
 // structurallyExcludedToolNames are the tools a child NEVER inherits, under
-// any definition: they would let a child mutate the daemon's configuration
-// or handle credentials. Single-sourced here; the config-manager tool is
+// any definition. Two classes: configuration/credential tools (they would
+// let a child mutate the daemon's configuration or handle credentials) and
+// the channel voice (`say`). Single-sourced here; the config-manager tool is
 // the current member (secret entry and runtime reload are ZMQ control
 // request types, never tools — the globs below keep the class honest if
 // such tools ever appear).
@@ -26,6 +27,11 @@ import (
 //nolint:gochecknoglobals // the structural-exclusion single source
 var structurallyExcludedToolNames = map[string]bool{
 	"config_manager": true,
+	// say belongs to a second class (say-mid-turn-notice): the channel
+	// voice. A Mid-turn Notice speaks to the user on the Owner's channel, so
+	// every dispatch — at any depth, internal jobs included — reports only
+	// through its Handback; the Owner is the single voice.
+	"say": true,
 }
 
 // structurallyExcludedToolGlobs catch the tool-name shapes of the same

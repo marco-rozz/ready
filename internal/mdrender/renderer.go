@@ -48,6 +48,10 @@ type Renderer struct {
 	width     int
 	sanitizer *privacy.Sanitizer
 	tr        *glamour.TermRenderer // nil for StyleRaw
+	// preserveNewLines keeps every typed line break as its own rendered line
+	// (the quoted user echo); assistant output renders with normal markdown
+	// soft-wrapping.
+	preserveNewLines bool
 }
 
 // defaultWidth is the fallback word-wrap width when the caller has no terminal
@@ -59,15 +63,31 @@ const defaultWidth = 80
 // For StyleRaw no glamour TermRenderer is built — Render returns the redacted,
 // sanitised raw text.
 func New(width int, style Style, sanitizer *privacy.Sanitizer) *Renderer {
-	r := &Renderer{style: style, width: clampWidth(width), sanitizer: sanitizer}
+	return newRenderer(width, style, sanitizer, false)
+}
+
+// NewPreservingNewLines is New with typed line breaks preserved as visible
+// line breaks — the renderer of the quoted user echo, where every line of the
+// message the user typed must stay its own line (also inside a blockquote).
+func NewPreservingNewLines(width int, style Style, sanitizer *privacy.Sanitizer) *Renderer {
+	return newRenderer(width, style, sanitizer, true)
+}
+
+func newRenderer(width int, style Style, sanitizer *privacy.Sanitizer, preserve bool) *Renderer {
+	r := &Renderer{style: style, width: clampWidth(width), sanitizer: sanitizer, preserveNewLines: preserve}
 	if style == StyleRaw {
 		return r
 	}
 
-	tr, err := glamour.NewTermRenderer(
+	opts := []glamour.TermRendererOption{
 		glamour.WithStandardStyle(style.styleName()),
 		glamour.WithWordWrap(r.width),
-	)
+	}
+	if preserve {
+		opts = append(opts, glamour.WithPreservedNewLines())
+	}
+
+	tr, err := glamour.NewTermRenderer(opts...)
 	if err != nil {
 		// glamour.NewTermRenderer only fails on an unparseable style, and the
 		// three standard styles are builtin — so this is unreachable in
@@ -86,7 +106,7 @@ func New(width int, style Style, sanitizer *privacy.Sanitizer) *Renderer {
 // word-wrap width, for terminal resize. The old renderer is not closed (it has
 // no open resources); callers simply replace their reference.
 func (r *Renderer) Recreate(width int) *Renderer {
-	return New(width, r.style, r.sanitizer)
+	return newRenderer(width, r.style, r.sanitizer, r.preserveNewLines)
 }
 
 // Style returns the renderer's resolved style.

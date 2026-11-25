@@ -1,0 +1,23 @@
+{
+  "errors": 0,
+  "files_checked": 2,
+  "findings": [
+    {
+      "code": "W117",
+      "level": "warning",
+      "line": 1,
+      "message": "quote okf_version as a string, for example \"0.3\" (section 8.1); found 0.3",
+      "path": "index.md"
+    },
+    {
+      "code": "W116",
+      "level": "warning",
+      "line": 1,
+      "message": "license 'my own terms' is not an SPDX expression or a file in the bundle (section 8.1)",
+      "path": "index.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": 0.3,
+  "warnings": 2
+}

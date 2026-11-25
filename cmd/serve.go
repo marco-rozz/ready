@@ -35,6 +35,7 @@ import (
 	"github.com/marco-rozz/ready/internal/logging"
 	homemcp "github.com/marco-rozz/ready/internal/mcp"
 	"github.com/marco-rozz/ready/internal/oauth"
+	"github.com/marco-rozz/ready/internal/okf"
 	"github.com/marco-rozz/ready/internal/orchestrator"
 	"github.com/marco-rozz/ready/internal/persistence"
 	"github.com/marco-rozz/ready/internal/privacy"
@@ -45,6 +46,7 @@ import (
 	"github.com/marco-rozz/ready/internal/skillcache"
 	"github.com/marco-rozz/ready/internal/skills"
 	"github.com/marco-rozz/ready/internal/skillssync"
+	"github.com/marco-rozz/ready/internal/steer"
 	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/twin"
@@ -267,6 +269,14 @@ func Serve(ctx context.Context, opts ServeOptions) (serveErr error) {
 		logger:     rootLogger.With().Str("component", "dispatcher").Logger(),
 	}
 	shell.rt = rt
+
+	// Process-lifetime OKF writer (okf-authoring): shared by the okf_write
+	// tool of every generation and the /verify session command, so one
+	// per-bundle lock registry serialises all daemon writers.
+	if cfg.RuntimeHome != "" {
+		shell.okfWriter = okf.NewWriter(okf.WriterOptions{AgentDir: cfg.RuntimeHome, Version: version, Logger: rootLogger})
+		rt.okf = shell.okfWriter
+	}
 
 	// Subagent Runtime (subagent-runtime task 7.3): process-lifetime, wired
 	// BEFORE the first generation — buildTools reads shell.subagents to
@@ -529,6 +539,8 @@ func configureSessionRuntime(cfg *config.Config, rt *sessionRuntime, aux model.B
 		rt.resets[telegram.ChannelName] = session.RuleFrom(cfg.SessionResetFor("telegram"))
 	}
 
+	rt.steering = steeringPolicyFrom(cfg)
+	rt.observer = &channelObserver{mgr: rt.mgr, logger: rt.logger}
 	rt.compactCfg = cfg.Compaction
 	rt.trigger = compaction.Trigger{
 		Window:   smallestContextWindow(cfg.LLM),
@@ -848,6 +860,7 @@ func buildTools(
 	rootLogger zerolog.Logger,
 	profileOverrides config.ProfileOverrideInputs,
 	subagentRT *subagent.Runtime,
+	okfWriter *okf.Writer,
 	sharedState ...*tools.ConfigManagerState,
 ) ([]tool.BaseTool, homemcp.Runtime, []profile.BlockedTool, *tools.ConfigManager) {
 	logger := rootLogger.With().Str("component", "tools").Logger()
@@ -916,6 +929,32 @@ func buildTools(
 		skills.NewReadSkillAssetTool(skillsMgr, skillCache),
 		skills.NewListSkillAssetsTool(skillsMgr),
 		tools.NewWaitTool(),
+		// say (say-mid-turn-notice): shows text to the user mid-Turn. Gated
+		// by builtin_tools like every builtin; the code-owned default
+		// exposes it under every profile.
+		tools.NewSayTool(),
+	}
+	// okf_query (okf-native-consumption): read-only OKF bundle access under
+	// <agent-dir>/okfs/; gated by builtin_tools like every builtin. Omitted
+	// for a Config built without a runtime home (test seam).
+	if cfg.RuntimeHome != "" {
+		builtinTools = append(builtinTools, okf.NewTool(okf.Options{AgentDir: cfg.RuntimeHome}))
+		// okf_write (okf-authoring): a separate policy point so a profile can
+		// grant authoring independently of reading. The Writer (and its
+		// per-bundle lock registry) is owned by the process shell, so
+		// generations still serving Subagent dispatches share the locks; a
+		// nil writer (test seam) gets a private one.
+		if okfWriter == nil {
+			okfWriter = okf.NewWriter(okf.WriterOptions{AgentDir: cfg.RuntimeHome, Version: version, Logger: rootLogger})
+		}
+		builtinTools = append(builtinTools, okf.NewWriteTool(okf.WriteToolOptions{
+			Writer: okfWriter,
+			ModelFrom: func(ctx context.Context) string {
+				ref, _ := llm.AttemptReference(ctx)
+
+				return ref
+			},
+		}))
 	}
 	if cfgMgr != nil {
 		builtinTools = append(builtinTools, tools.NewConfigManagerTool(cfgMgr))
@@ -973,6 +1012,11 @@ func profileSource(overrides config.ProfileOverrideInputs) string {
 func errDigestClassifier() *errdigest.Classifier {
 	return errdigest.NewClassifier().
 		Register(tools.ErrWaitExceedsTurnBudget, errdigest.Transient).
+		// say (say-mid-turn-notice): a refused text is permanent (shorten or
+		// use the final answer); a delivery failure is transient. delivered/
+		// partial/not_shown are ordinary results and never classified.
+		Register(tools.ErrNoticeRefused, errdigest.Permanent).
+		Register(tools.ErrNoticeDeliveryFailed, errdigest.Transient).
 		Register(homemcp.ErrMCPTimeout, errdigest.Transient).
 		Register(homemcp.ErrMCPConnection, errdigest.Transient).
 		Register(homemcp.ErrMCPAuth, errdigest.Permanent).
@@ -1018,7 +1062,30 @@ func errDigestClassifier() *errdigest.Classifier {
 		// see [PERMANENT] and report the capability as unavailable instead
 		// of retrying or concluding the tool does not exist.
 		Register(subagent.ErrFeatureDisabled, errdigest.Permanent).
-		Register(subagent.ErrModelPinOutsideChain, errdigest.Permanent)
+		Register(subagent.ErrModelPinOutsideChain, errdigest.Permanent).
+		// okf_query (okf-native-consumption D12): argument and confinement
+		// refusals are permanent; filesystem I/O failures are transient.
+		Register(okf.ErrUnknownAction, errdigest.Permanent).
+		Register(okf.ErrUnknownBundle, errdigest.Permanent).
+		Register(okf.ErrUnknownConcept, errdigest.Permanent).
+		Register(okf.ErrInvalidReference, errdigest.Permanent).
+		Register(okf.ErrOutsideBundle, errdigest.Permanent).
+		Register(okf.ErrKnowledgeRootEscape, errdigest.Permanent).
+		Register(okf.ErrIO, errdigest.Transient).
+		// okf_write (okf-authoring): refusals are permanent; a stale
+		// base_digest is the only retryable write failure.
+		Register(okf.ErrReservedField, errdigest.Permanent).
+		Register(okf.ErrUnmergeable, errdigest.Permanent).
+		Register(okf.ErrSymlinkTarget, errdigest.Permanent).
+		Register(okf.ErrAlreadyExists, errdigest.Permanent).
+		Register(okf.ErrInvalidCreationPath, errdigest.Permanent).
+		Register(okf.ErrReservedName, errdigest.Permanent).
+		Register(okf.ErrUnresolvedSuperseded, errdigest.Permanent).
+		Register(okf.ErrGateRefused, errdigest.Permanent).
+		Register(okf.ErrOversize, errdigest.Permanent).
+		Register(okf.ErrTypeProtected, errdigest.Permanent).
+		Register(okf.ErrInvalidWriteArgs, errdigest.Permanent).
+		Register(okf.ErrConflict, errdigest.Transient)
 }
 
 // wrapWithErrorDigest wraps all tools with the error-digestion layer
@@ -1606,10 +1673,10 @@ func terminalMessageFor(outcome agent.TurnOutcome, runErr error) string {
 // (agent + formatter) stays within the client-side reply-timeout window.
 const formatterTimeout = 60 * time.Second
 
-// sessionWorkerBuffer is the queue depth per session worker.  If a single
-// session sends more messages than this while its agent run is in flight, the
-// dispatcher applies back-pressure on Manager.Incoming.
-const sessionWorkerBuffer = 16
+// sessionWorkerBuffer is the queued-item bound of an address inbox
+// (steer.QueueBound). Beyond it the dispatcher drops the message with a WARN
+// instead of blocking Manager.Incoming.
+const sessionWorkerBuffer = steer.QueueBound
 
 // dispatcherWaitGrace bounds the dispatcher drain at shutdown
 // (criticalities-remediation M15).
@@ -1634,15 +1701,24 @@ type dispatcher struct {
 	ctx       context.Context
 	incoming  <-chan channel.Message
 	processFn func(ctx context.Context, msg channel.Message)
+	// handle, when set, replaces processFn and receives the address inbox
+	// and the Work item: the worker opens and closes the steering window of
+	// a Turn through it (turn-steering S4). Tests that only care about
+	// ordering leave it nil and use processFn.
+	handle func(ctx context.Context, in *steer.Inbox, w steer.Work)
+	// stopFn handles an accepted /stop out of band, called from the intake
+	// goroutine's own goroutine (never blocking intake).
+	stopFn func(ctx context.Context, in *steer.Inbox, msg channel.Message, adm steer.Admission)
+	// ackFn reports every admission (message_accepted) before the item can
+	// run; nil = no acknowledgement.
+	ackFn     func(msg channel.Message, adm steer.Admission)
+	isCommand func(content string) bool
 	keyFn     func(msg channel.Message) string
 	logger    zerolog.Logger
 
 	mu      sync.Mutex
-	workers map[string]chan channel.Message
+	workers map[string]*steer.Inbox
 	wg      sync.WaitGroup
-	// dropped tracks per-address message drops when an address's inbox is
-	// saturated (criticalities-remediation M2). Guarded by d.mu.
-	dropped map[string]int
 }
 
 func newDispatcher(ctx context.Context, mgr *channel.Manager, rt *sessionRuntime, rootLogger zerolog.Logger) *dispatcher {
@@ -1651,15 +1727,18 @@ func newDispatcher(ctx context.Context, mgr *channel.Manager, rt *sessionRuntime
 		logger:    rootLogger.With().Str("component", "dispatcher").Logger(),
 		incoming:  mgr.Incoming(),
 		processFn: rt.handleItem,
+		handle:    rt.handleWork,
+		stopFn:    rt.handleStop,
+		ackFn:     rt.ackAdmission,
+		isCommand: isSessionCommandContent,
 		keyFn:     func(m channel.Message) string { return string(session.AddressOf(m)) },
-		workers:   make(map[string]chan channel.Message),
-		dropped:   make(map[string]int),
+		workers:   make(map[string]*steer.Inbox),
 	}
 }
 
-// run reads from the incoming channel and enqueues each message onto the
-// worker for its session key.  On incoming close it flushes every worker
-// queue and waits for them to drain.
+// run reads from the incoming channel and admits each message into the inbox
+// of its address. On incoming close it closes every inbox (workers drain what
+// remains) and waits for them.
 func (d *dispatcher) run() {
 	for msg := range d.incoming {
 		if strings.TrimSpace(msg.Content) == "" {
@@ -1671,7 +1750,7 @@ func (d *dispatcher) run() {
 
 	d.mu.Lock()
 	for _, in := range d.workers {
-		close(in)
+		in.Close()
 	}
 	d.workers = nil
 	d.mu.Unlock()
@@ -1686,15 +1765,23 @@ func (d *dispatcher) wait() {
 	d.wg.Wait()
 }
 
-// enqueue pushes msg onto the worker for sessionKey(msg), creating the worker
-// on first sight.  If the dispatcher context is done it drops the message.
+// enqueue admits msg into the inbox of keyFn(msg), creating the address
+// worker on first sight. Admission never blocks — one saturated address must
+// not block intake and wedge every other channel (head-of-line blocking): a
+// message that finds the queue full is dropped with a structured WARN naming
+// the address, and the drop counter keeps the saturation observable.
 func (d *dispatcher) enqueue(msg channel.Message) {
 	key := d.keyFn(msg)
 
 	d.mu.Lock()
 	in, ok := d.workers[key]
 	if !ok {
-		in = make(chan channel.Message, sessionWorkerBuffer)
+		var opts []steer.Option
+		if d.stopFn != nil {
+			opts = append(opts, steer.WithStopCommand())
+		}
+
+		in = steer.New(d.isCommand, opts...)
 		d.workers[key] = in
 		d.wg.Add(1)
 
@@ -1702,57 +1789,95 @@ func (d *dispatcher) enqueue(msg channel.Message) {
 	}
 	d.mu.Unlock()
 
-	// The enqueue is NON-BLOCKING — one saturated session's inbox must not block enqueue,
-	// which would block m.incoming and wedge the intake of every other
-	// channel (head-of-line blocking). The message is dropped with a
-	// structured WARN naming the session; the drop counter keeps the
-	// saturation observable.
-	select {
-	case in <- msg:
-	case <-d.ctx.Done():
-	default:
-		d.mu.Lock()
-		d.dropped[key]++
-		count := d.dropped[key]
-		d.mu.Unlock()
+	if d.ctx.Err() != nil {
+		return
+	}
 
+	adm := in.Admit(msg)
+
+	switch adm.Disposition {
+	case steer.Dropped:
 		d.logger.Warn().
 			Str("session", key).
 			Str("channel", msg.ChannelName).
 			Int("inbox", sessionWorkerBuffer).
-			Int("dropped_total", count).
+			Int("dropped_total", in.Dropped()).
 			Msg("session inbox saturated — message dropped")
+
+		return
+	case steer.Stop:
+		if d.ackFn != nil {
+			d.ackFn(msg, adm)
+		}
+
+		if d.stopFn != nil {
+			go d.stopFn(d.ctx, in, msg, adm)
+		}
+
+		return
+	}
+
+	if d.ackFn != nil {
+		d.ackFn(msg, adm)
 	}
 }
 
-// serve drains the worker's inbox sequentially, isolating each message with a
+// serve drains the address inbox sequentially, isolating each item with a
 // panic recovery so one bad message cannot tear down the session worker.
-func (d *dispatcher) serve(key string, in <-chan channel.Message) {
+func (d *dispatcher) serve(key string, in *steer.Inbox) {
 	defer d.wg.Done()
 
-	for msg := range in {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					d.logger.Error().
+	for {
+		w, err := in.Next(d.ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if q, c := in.Discard(); q+c > 0 {
+					d.logger.Info().
 						Str("session", key).
-						Str("channel", msg.ChannelName).
-						Str("stack", string(debug.Stack())).
-						Msgf("PANIC in session worker: %v", r)
+						Int("queued_discarded", q).
+						Int("candidates_discarded", c).
+						Msg("shutdown: unprocessed messages discarded")
 				}
-			}()
+			}
 
-			d.processFn(d.ctx, msg)
-		}()
+			return
+		}
+
+		d.process(key, in, w)
 	}
 }
 
-// processMessage runs one Turn of the address's current Session: sends a
+func (d *dispatcher) process(key string, in *steer.Inbox, w steer.Work) {
+	defer func() {
+		if r := recover(); r != nil {
+			d.logger.Error().
+				Str("session", key).
+				Str("channel", w.Msg.ChannelName).
+				Str("stack", string(debug.Stack())).
+				Msgf("PANIC in session worker: %v", r)
+		}
+	}()
+
+	if d.handle != nil {
+		d.handle(d.ctx, in, w)
+
+		return
+	}
+
+	d.processFn(d.ctx, w.Msg)
+}
+
+// processTurn runs one Turn of the address's current Session: sends a
 // Telegram typing indicator, runs the agent (with a timeout), applies the
 // formatter post-step, records the transcript and the Turn's usage delta,
 // and sends the reply. It returns what the post-reply compaction evaluation
 // needs.
-func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Address, msg channel.Message) turnInfo {
+//
+// tc is the Turn's steering control (nil outside the dispatcher): with it the
+// Turn carries the per-Turn preemption source, claims pending steering
+// candidates at every attempt assembly and is wrapped by the turn-control
+// decorator; without it the path is exactly the pre-steering one.
+func (rt *sessionRuntime) processTurn(ctx context.Context, addr session.Address, msg channel.Message, tc *turnControl) turnInfo {
 	logger := rt.logger
 
 	logger.Info().
@@ -1762,6 +1887,18 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		Msg("processing message")
 
 	sKey := string(addr)
+
+	if tc != nil {
+		msg.Metadata = withMetadata(msg.Metadata, "turn_id", tc.id)
+
+		if tc.observer != nil {
+			tc.observer.TurnStarted(msg, turnStartEvent{
+				TurnID:   tc.id,
+				Deferred: tc.deferred,
+				Messages: append([]channel.Message{msg}, tc.preload...),
+			})
+		}
+	}
 
 	// session-lifecycle 4.1: the address resolves to its current Session
 	// before the history is loaded; everything conversational below (history,
@@ -1824,31 +1961,15 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	saveTracker := &turnSaveTracker{}
 	msgCtx = context.WithValue(msgCtx, turnSaveCtxKey{}, saveTracker)
 	if zch := getZMQChannel(rt.mgr, msg.ChannelName); zch != nil &&
-		msg.Metadata["transport"] == "zmq" &&
+		msg.Metadata["transport"] == transportZMQ &&
 		msg.Metadata["request_type"] != string(protocol.RequestTypeExec) &&
 		zch.IsNumericLoopback() {
 		msgCtx = context.WithValue(msgCtx, toolLoopbackTUICtxKey{}, true)
 	}
 	// Activity is scoped to the authenticated ZMQ request; other turns and probes have no tracker.
-	var activityTracker *activity.Tracker
-	if zch := getZMQChannel(rt.mgr, msg.ChannelName); zch != nil && msg.Metadata["transport"] == "zmq" && msg.Metadata[zmqcli.RequestID] != "" {
-		sender := zch.ActivitySender(msg.Metadata[zmqcli.ConnectionID], msg.Metadata[zmqcli.RequestID])
-		if sender != nil {
-			activityTracker = activity.New()
-			go func() {
-				for snapshot := range activityTracker.Updates() {
-					event := protocol.Activity{State: "thinking", Sequence: snapshot.Sequence}
-					if snapshot.ToolName != "" {
-						event.State = "using_tool"
-						event.ToolName = snapshot.ToolName
-						n := snapshot.AdditionalTools
-						event.AdditionalTools = &n
-					}
-					_ = sender(event)
-				}
-			}()
-			defer activityTracker.Close()
-		}
+	activityTracker := rt.startActivityTracker(msg)
+	if activityTracker != nil {
+		defer activityTracker.Close()
 	}
 	// tui-usage-observability: every LLM call under this turn context —
 	// ReAct iterations, failover attempts, formatter post-step — attributes
@@ -1857,6 +1978,12 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	usageAcc := rt.usageStore.Accumulator(cur.ID)
 	usageBefore := usageAcc.Snapshot()
 	msgCtx = usage.WithAccumulator(msgCtx, usageAcc)
+
+	// say-mid-turn-notice: the Turn-scoped deliverer and the per-Turn outcome
+	// counters. The deliverer outlives Turn cancellation by design (D7).
+	noticeStats := &tools.NoticeStats{}
+	msgCtx = tools.WithNoticeStats(msgCtx, noticeStats)
+	msgCtx = tools.WithNoticeDeliverer(msgCtx, rt.newNoticeDeliverer(ctx, addr, msg, logger))
 
 	history.Add(persistence.HistoryMessage{
 		Role:      persistence.RoleUser,
@@ -1870,6 +1997,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	if activityTracker != nil {
 		runCtx = activity.WithTracker(runCtx, activityTracker)
 	}
+	runCtx = tc.arm(runCtx)
 
 	// The turn context (turnID,
 	// timestamp, reminder/directive) is rendered ONCE per turn and recorded
@@ -1906,6 +2034,15 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	// retry or a failover continues the ReAct loop from the last complete
 	// tool-call group recorded by the failed attempt — no tool re-executes.
 	assemble := func(candidateLayout llm.PromptLayout, ref string) []*schema.Message {
+		// The single claim point (turn-steering S5): pending steering
+		// candidates enter the transcript here, at a resume-ready position,
+		// before the prompt is projected. A claim changes the view, so the
+		// Turn-start guard and the compaction lead are re-evaluated on it.
+		if tc != nil && tc.claim(ctx, runCtx, turnID, history, logger) > 0 {
+			omit, extraSkills = rt.turnStartGuard(runCtx, cur, history, parts, agentSkillsSID, msg.ChannelName)
+			lead = rt.leadMessage(runCtx, history, extraSkills)
+		}
+
 		attemptPrefix := append([]*schema.Message(nil), prefix...)
 		if block := runtimePromptContext("current_llm_model", ref); block != "" {
 			attemptPrefix = append(attemptPrefix, schema.SystemMessage(block))
@@ -1953,7 +2090,15 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	// The turn runs through the registry's executor: the orchestrator in
 	// production (per-attempt candidate selection, attempt budget, chain
 	// walking), or the plain-runner adapter in tests.
-	outcome, runErr := rt.agentReg.exec.ExecuteTurn(runCtx, sKey, assemble, resumeReady, onChunk)
+	outcome, stopText, runErr := rt.executeTurn(runCtx, tc, history, sKey, assemble, resumeReady, onChunk)
+	if counts := noticeStats.Counts(); len(counts) > 0 {
+		// Counts only — the Notice text is never logged.
+		logger.Debug().
+			Str("event_type", "say_notices").
+			Str("session_key", sKey).
+			Interface("outcomes", counts).
+			Msg("mid-turn notices this turn")
+	}
 	if activityTracker != nil {
 		activityTracker.Close()
 	}
@@ -1966,6 +2111,9 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	deliverMsg := msg
 	if savedConfig && savedOnTUI {
 		deliverMsg.Metadata = withMetadata(msg.Metadata, zmqcli.ConfigSaved, "true")
+	}
+	if tc != nil {
+		deliverMsg.Metadata = tc.replyMetadata(deliverMsg.Metadata, stopText != "")
 	}
 
 	// Everything after the run completes is delivery bookkeeping — extracted
@@ -1986,6 +2134,7 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 		sanitizer: rt.sanitizer,
 		history:   history,
 		usageAcc:  usageAcc,
+		stopText:  stopText,
 	})
 
 	// session-lifecycle D7: the Turn's usage delta (main calls plus the
@@ -2012,6 +2161,40 @@ func (rt *sessionRuntime) processMessage(ctx context.Context, addr session.Addre
 	}
 }
 
+// startActivityTracker arms request-correlated tool activity for a ZMQ turn
+// (nil for every other turn): snapshots are forwarded to the client as
+// activity frames by a goroutine that ends when the tracker closes. The
+// caller closes the tracker.
+func (rt *sessionRuntime) startActivityTracker(msg channel.Message) *activity.Tracker {
+	zch := getZMQChannel(rt.mgr, msg.ChannelName)
+	if zch == nil || msg.Metadata["transport"] != transportZMQ || msg.Metadata[zmqcli.RequestID] == "" {
+		return nil
+	}
+
+	sender := zch.ActivitySender(msg.Metadata[zmqcli.ConnectionID], msg.Metadata[zmqcli.RequestID])
+	if sender == nil {
+		return nil
+	}
+
+	tracker := activity.New()
+
+	go func() {
+		for snapshot := range tracker.Updates() {
+			event := protocol.Activity{State: "thinking", Sequence: snapshot.Sequence}
+			if snapshot.ToolName != "" {
+				event.State = "using_tool"
+				event.ToolName = snapshot.ToolName
+				n := snapshot.AdditionalTools
+				event.AdditionalTools = &n
+			}
+
+			_ = sender(event)
+		}
+	}()
+
+	return tracker
+}
+
 // deliverArgs bundles the delivery-phase dependencies of deliverTurnResult.
 type deliverArgs struct {
 	ctx       context.Context
@@ -2028,6 +2211,10 @@ type deliverArgs struct {
 	sanitizer *privacy.Sanitizer
 	history   *persistence.ConversationHistory
 	usageAcc  *usage.Accumulator
+	// stopText, when set, ends the Turn as stopped by /stop: it replaces the
+	// reply (bypassing the post-step formatter, like a terminal message) and a
+	// turn_stopped marker closes the Turn in the transcript.
+	stopText string
 }
 
 // deliverTurnResult formats the successful response, persists it, performs
@@ -2057,7 +2244,13 @@ func deliverTurnResult(d deliverArgs) {
 	// keeps the generic path and MUST NOT use the code.
 	llmExhausted := runErr != nil && errors.Is(runErr, llm.ErrChainExhausted)
 
-	if runErr != nil {
+	stopped := d.stopText != ""
+
+	switch {
+	case stopped:
+		terminal = d.stopText
+		response = d.stopText
+	case runErr != nil:
 		logger.Error().
 			Err(runErr).
 			Str("channel", msg.ChannelName).
@@ -2067,14 +2260,14 @@ func deliverTurnResult(d deliverArgs) {
 
 		terminal = terminalMessageFor(outcome, runErr)
 		response = terminal
-	} else {
+	default:
 		response = outcome.Reply
 	}
 
 	// The post-step formatter is an LLM call on the same health domain that
 	// may just have failed — running it for a terminal message would compound
 	// the outage with silence (design A1). Format only successful turns.
-	if runErr == nil {
+	if runErr == nil && !stopped {
 		fmtCtx, fmtCancel := context.WithTimeout(d.msgCtx, formatterTimeout)
 		response = applyFormatterPostStep(fmtCtx, d.fmtr, d.fmtCfg, msg.ChannelName, response, logger)
 		fmtCancel()
@@ -2090,7 +2283,14 @@ func deliverTurnResult(d deliverArgs) {
 	// terminal product string is a delivery artifact, not model output — and
 	// its transcript is closed at the last complete tool-call group so the
 	// next prompt never carries a dangling tool call.
-	if runErr == nil {
+	if stopped {
+		d.history.Add(persistence.HistoryMessage{
+			Role:      persistence.RoleUser,
+			Kind:      persistence.KindTurnStopped,
+			Content:   persistence.TurnStoppedContent,
+			Timestamp: time.Now(),
+		})
+	} else if runErr == nil {
 		d.history.Add(persistence.HistoryMessage{
 			Role:      persistence.RoleAssistant,
 			Content:   response,

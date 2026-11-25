@@ -1,0 +1,86 @@
+{
+  "errors": 0,
+  "files_checked": 19,
+  "findings": [
+    {
+      "code": "I204",
+      "level": "info",
+      "line": 1,
+      "message": "no verification is current: each verified event is older than generated.at, so consumers read the concept as unverified (section 5.3)",
+      "path": "before-change.md"
+    },
+    {
+      "code": "W122",
+      "level": "warning",
+      "line": 1,
+      "message": "write verified[0].at as a date-time, because consumers compare it with generated.at (section 5)",
+      "path": "date-only.md"
+    },
+    {
+      "code": "I204",
+      "level": "info",
+      "line": 1,
+      "message": "no verification is current: each verified event is older than generated.at, so consumers read the concept as unverified (section 5.3)",
+      "path": "date-only.md"
+    },
+    {
+      "code": "W116",
+      "level": "warning",
+      "line": 1,
+      "message": "superseded_by '/gone.md' does not resolve to a file in the bundle (section 6.2)",
+      "path": "deprecated-raw.md"
+    },
+    {
+      "code": "W110",
+      "level": "warning",
+      "line": 1,
+      "message": "write tags as a YAML list (sections 4.1 and 11.2)",
+      "path": "deprecated.md"
+    },
+    {
+      "code": "W120",
+      "level": "warning",
+      "line": 1,
+      "message": "not a concept: the frontmatter has no non-empty type (section 3.2)",
+      "path": "not-a-concept.md"
+    },
+    {
+      "code": "I201",
+      "level": "info",
+      "line": 1,
+      "message": "the concept is stale: stale_after 2026-07-01T00:00:00Z has passed (section 5.5)",
+      "path": "stale-edge.md"
+    },
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "stale_after does not parse, so consumers never treat the concept as fresh (section 5.5); found 'next spring'",
+      "path": "stale-malformed.md"
+    },
+    {
+      "code": "I201",
+      "level": "info",
+      "line": 1,
+      "message": "the concept is stale: stale_after 2026-06-30 has passed (section 5.5)",
+      "path": "stale.md"
+    },
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "verified[1].at is an RFC 3339 date-time with an offset, such as 2026-06-30T14:00:00Z, or a date such as 2026-06-30 (section 5); found 'garbage'",
+      "path": "team.md"
+    },
+    {
+      "code": "W105",
+      "level": "warning",
+      "line": 1,
+      "message": "status is draft, stable, or deprecated; consumers treat 'Stable' as not current (section 5.4)",
+      "path": "unknown-status.md"
+    }
+  ],
+  "info": 4,
+  "okf_version": "0.3",
+  "warnings": 7
+}

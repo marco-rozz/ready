@@ -1,0 +1,23 @@
+{
+  "errors": 0,
+  "files_checked": 2,
+  "findings": [
+    {
+      "code": "W125",
+      "level": "warning",
+      "line": null,
+      "message": "add a bundle-root index.md with okf_version: \"0.3\" (section 8.1)",
+      "path": "."
+    },
+    {
+      "code": "W119",
+      "level": "warning",
+      "line": 1,
+      "message": "resource 'c.md' resolves only from the bundle root, through the v0.2 fallback; write it as /c.md (section 6.2)",
+      "path": "sub/d.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": null,
+  "warnings": 2
+}

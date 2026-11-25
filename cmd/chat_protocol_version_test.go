@@ -11,10 +11,10 @@ import (
 	"github.com/marco-rozz/ready/internal/protocol"
 )
 
-func TestChatProtocolVersionFiveAgainstThree(t *testing.T) {
+func TestChatProtocolVersionCurrentAgainstThree(t *testing.T) {
 	var stderr bytes.Buffer
 	err := checkProtocolVersion(&protocol.Response{ProtocolVersion: 3, ErrorCode: protocol.ErrorCodeProtocolMismatch}, &stderr)
-	if err == nil || !strings.Contains(stderr.String(), "client 6, daemon 3") || !strings.Contains(stderr.String(), "matching") {
+	if err == nil || !strings.Contains(stderr.String(), fmt.Sprintf("client %d, daemon 3", protocol.Version)) || !strings.Contains(stderr.String(), "matching") {
 		t.Fatalf("error=%v message=%q", err, stderr.String())
 	}
 	stderr.Reset()

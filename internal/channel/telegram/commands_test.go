@@ -68,7 +68,7 @@ func TestChannel_RegistersSessionCommands(t *testing.T) {
 	bot.mu.Lock()
 	defer bot.mu.Unlock()
 
-	if len(bot.commands) != 2 || bot.commands[0].Command != "new" || bot.commands[1].Command != "compact" {
+	if len(bot.commands) != 4 || bot.commands[0].Command != "new" || bot.commands[1].Command != "compact" || bot.commands[2].Command != "verify" || bot.commands[3].Command != "stop" {
 		t.Errorf("registered commands = %+v", bot.commands)
 	}
 }
@@ -102,6 +102,7 @@ func TestChannel_StripsBotMentionFromCommands(t *testing.T) {
 	cases := map[string]string{
 		"/new@ReadyBot":                   newCommand,
 		"/compact@readybot keep the plan": "/compact keep the plan",
+		"/stop@ReadyBot":                  "/stop",
 		"/new@OtherBot":                   "/new@OtherBot",
 		"hello @ReadyBot":                 "hello @ReadyBot",
 		newCommand:                        newCommand,

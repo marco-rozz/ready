@@ -45,6 +45,16 @@ that makes it trustworthy rather than merely chatty.
   automatic compaction (`Context compacted.`, `Nothing to compact.`, or
   `Compaction failed; the session is unchanged.`).
 - Neither ever reaches the LLM; neither is recorded in the transcript.
+- `/stop` is different: it is handled the moment it arrives, never queued
+  behind the running Turn. It ends the Turn at its earliest safe point (an
+  action already running finishes and is kept; nothing else runs) and
+  replies `Stopped. Completed actions are kept; nothing else will run.`,
+  or `Nothing to stop.` when idle. It is recorded as a `turn_stopped` entry
+  so the next message does not resume the stopped request.
+- A message you send while the agent is working can steer that Turn instead
+  of waiting: it is taken into account before the next action or answer, and
+  one that arrives too late simply starts the next Turn. Commands, scripted
+  `--exec` requests and daemon-originated items never steer.
 - On the ZMQ client, `/new` also pushes a `session_changed` event (the TUI
   clears its usage segment) and compaction pushes `compacted`
   (`before → after tokens`).

@@ -21,6 +21,7 @@ import (
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/formatter"
 	homemcp "github.com/marco-rozz/ready/internal/mcp"
+	"github.com/marco-rozz/ready/internal/okf"
 	"github.com/marco-rozz/ready/internal/orchestrator"
 	"github.com/marco-rozz/ready/internal/protocol"
 	"github.com/marco-rozz/ready/internal/secretstore"
@@ -297,6 +298,7 @@ type serveShell struct {
 	ctx         context.Context
 	opts        ServeOptions
 	subagents   *subagent.Runtime
+	okfWriter   *okf.Writer
 	resolution  config.Resolution
 	rootLogger  zerolog.Logger
 	logger      zerolog.Logger
@@ -395,7 +397,7 @@ func (s *serveShell) buildGeneration(cfg *config.Config) (g *runtimeGeneration, 
 	g.haTwin = haTwin
 
 	agentTools, mcpRuntime, blockedTools, cfgMgr := buildTools(genCtx, bootCfg, skillsMgr, skillCache, s.opts.MockMCP, profileName, haTwin, s.rootLogger,
-		config.ProfileOverrideInputs{Flag: s.opts.Profile, Env: os.Getenv(config.ProfileEnvName)}, s.subagents, s.configState)
+		config.ProfileOverrideInputs{Flag: s.opts.Profile, Env: os.Getenv(config.ProfileEnvName)}, s.subagents, s.okfWriter, s.configState)
 	g.mcpRuntime, g.cfgMgr = mcpRuntime, cfgMgr
 
 	discloseDenied := activeProfile.DiscloseDeniedTools

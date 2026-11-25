@@ -58,6 +58,14 @@ const (
 	// (user role, in view). The Turn opener is the first record of a
 	// contiguous run [handback_delivery*, user] — see TurnStarts.
 	KindHandbackDelivery MessageKind = "handback_delivery"
+	// KindSteer is a claimed steering candidate (turn-steering S9): a user
+	// message sent while its Turn ran, content rendered once at claim and
+	// stored rendered. It belongs to its Turn: NOT a Turn boundary, NOT
+	// bookkeeping, part of the model view.
+	KindSteer MessageKind = "steer"
+	// KindTurnStopped is the fixed marker closing a Turn ended by /stop
+	// (turn-steering S11). Same classification as KindSteer.
+	KindTurnStopped MessageKind = "turn_stopped"
 )
 
 // Session end reasons carried by the closing record.
@@ -71,6 +79,18 @@ const (
 // tool call that has no recorded result. English product
 // string; the [Transient] prefix mirrors the error-digest observation shape.
 const InterruptedToolResult = "[Transient] Interrupted: no result was recorded for this call; it may or may not have executed. Verify the current state before retrying."
+
+// Fixed English product strings of turn steering (turn-steering S7, S11).
+const (
+	// SupersededToolResult closes a proposed tool call that did not execute
+	// because the user sent a new message first.
+	SupersededToolResult = "[Superseded] Not executed: the user sent a new message before this action ran. Re-plan from the user's latest message."
+	// StoppedToolResult closes a proposed tool call that did not execute
+	// because the user stopped the request.
+	StoppedToolResult = "[Stopped] Not executed: the user stopped the request before this action ran."
+	// TurnStoppedContent is the content of the turn_stopped record.
+	TurnStoppedContent = "[The user stopped this request before it was completed.]"
+)
 
 // Interrupted tool results of the Subagent Runtime (fixed English product
 // strings):
@@ -158,13 +178,15 @@ type HistoryMessage struct {
 }
 
 // IsTurnBoundary reports whether m opens a new turn unit: a user message
-// that is neither the turn-context line nor a handback-delivery record.
+// that is neither the turn-context line, a handback-delivery record, nor a
+// steer / turn_stopped record (both belong to the Turn they sit in).
 // A handback_delivery record belongs to the Turn it precedes (subagent-
 // runtime D6b): the Turn opener is the first record of a contiguous run
 // [handback_delivery*, user] — TurnStarts computes that over a slice, so a
 // delivery is never separated from its Turn by the planner.
 func (m HistoryMessage) IsTurnBoundary() bool {
-	return m.Role == RoleUser && m.Kind != KindTurnContext && m.Kind != KindHandbackDelivery
+	return m.Role == RoleUser && m.Kind != KindTurnContext && m.Kind != KindHandbackDelivery &&
+		m.Kind != KindSteer && m.Kind != KindTurnStopped
 }
 
 // IsRecord reports whether m is a non-message record (compaction,

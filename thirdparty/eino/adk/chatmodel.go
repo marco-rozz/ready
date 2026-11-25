@@ -56,6 +56,9 @@ type typedChatModelAgentExecCtx[M MessageType] struct {
 	retryVerdictSignal *retryVerdictSignal
 
 	afterToolCallsHook func(ctx context.Context) error
+	// beforeToolCallsHook (READY patch) fires between the model's tool-call
+	// branch and the tools node: proposed calls, none executed yet.
+	beforeToolCallsHook func(ctx context.Context) error
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
@@ -91,6 +94,9 @@ type chatModelAgentRunOptions struct {
 	historyModifier func(context.Context, []Message) []Message
 
 	afterToolCallsHook func(ctx context.Context) error
+	// beforeToolCallsHook (READY patch) fires between the model's tool-call
+	// branch and the tools node: proposed calls, none executed yet.
+	beforeToolCallsHook func(ctx context.Context) error
 }
 
 // WithChatModelOptions sets options for the underlying chat model.
@@ -130,6 +136,16 @@ func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunO
 func WithAfterToolCallsHook(fn func(ctx context.Context) error) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.afterToolCallsHook = fn
+	})
+}
+
+// WithBeforeToolCallsHook (READY patch, see thirdparty/README.md) registers a
+// per-run hook that fires synchronously when the model emitted tool calls and
+// before any of them executes. A returned error aborts the run before any tool
+// runs, so the caller can veto the proposed calls.
+func WithBeforeToolCallsHook(fn func(ctx context.Context) error) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.beforeToolCallsHook = fn
 	})
 }
 
@@ -468,6 +484,9 @@ type typedRunParams[M MessageType] struct {
 	composeOpts    []compose.Option
 
 	afterToolCallsHook func(ctx context.Context) error
+	// beforeToolCallsHook (READY patch) fires between the model's tool-call
+	// branch and the tools node: proposed calls, none executed yet.
+	beforeToolCallsHook func(ctx context.Context) error
 }
 
 type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
@@ -1193,6 +1212,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			cancelCtx:                cancelCtx,
 			failoverLastSuccessModel: msgModel,
 			afterToolCallsHook:       mp.afterToolCallsHook,
+			beforeToolCallsHook:      mp.beforeToolCallsHook,
 		})
 
 		if checkPreExecCancel(cancelCtx, mp.generator) {
@@ -1323,6 +1343,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			cancelCtx:                cancelCtx,
 			failoverLastSuccessModel: agenticModel,
 			afterToolCallsHook:       ap.afterToolCallsHook,
+			beforeToolCallsHook:      ap.beforeToolCallsHook,
 		})
 
 		if checkPreExecCancel(cancelCtx, ap.generator) {
@@ -1514,15 +1535,16 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:              input,
-			generator:          generator,
-			store:              newBridgeStore(),
-			instruction:        instruction,
-			returnDirectly:     returnDirectly,
-			cancelCtx:          cancelCtx,
-			cancelCtxOwned:     cancelCtxOwned,
-			composeOpts:        co,
-			afterToolCallsHook: runOps.afterToolCallsHook,
+			input:               input,
+			generator:           generator,
+			store:               newBridgeStore(),
+			instruction:         instruction,
+			returnDirectly:      returnDirectly,
+			cancelCtx:           cancelCtx,
+			cancelCtxOwned:      cancelCtxOwned,
+			composeOpts:         co,
+			afterToolCallsHook:  runOps.afterToolCallsHook,
+			beforeToolCallsHook: runOps.beforeToolCallsHook,
 		})
 	}()
 
@@ -1653,15 +1675,16 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:              &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
-			generator:          generator,
-			store:              newResumeBridgeStore(bridgeCheckpointID, stateByte),
-			instruction:        instruction,
-			returnDirectly:     returnDirectly,
-			cancelCtx:          cancelCtx,
-			cancelCtxOwned:     cancelCtxOwned,
-			composeOpts:        co,
-			afterToolCallsHook: resumeRunOps.afterToolCallsHook,
+			input:               &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
+			generator:           generator,
+			store:               newResumeBridgeStore(bridgeCheckpointID, stateByte),
+			instruction:         instruction,
+			returnDirectly:      returnDirectly,
+			cancelCtx:           cancelCtx,
+			cancelCtxOwned:      cancelCtxOwned,
+			composeOpts:         co,
+			afterToolCallsHook:  resumeRunOps.afterToolCallsHook,
+			beforeToolCallsHook: resumeRunOps.beforeToolCallsHook,
 		})
 	}()
 

@@ -71,7 +71,18 @@ func isValidCut(entries []persistence.HistoryMessage, lines []int, boundaries ma
 		return false
 	}
 
+	// A steer / turn_stopped entry belongs to its Turn: the kept tail never
+	// starts at one nor immediately before one (turn-steering).
+	if isTurnMember(entries[i]) || (i+1 < len(entries) && isTurnMember(entries[i+1])) {
+		return false
+	}
+
 	return boundaries[i] || entries[i].Role == persistence.RoleAssistant
+}
+
+// isTurnMember reports an entry that must stay with the Turn it sits in.
+func isTurnMember(e persistence.HistoryMessage) bool {
+	return e.Kind == persistence.KindSteer || e.Kind == persistence.KindTurnStopped
 }
 
 // PlanCut chooses the first kept entry. ok is false when nothing can be

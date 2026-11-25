@@ -110,10 +110,12 @@ which tools each agent may use.
 | **Commands with evidence** | `ha_command` checks effects against Home Assistant state events and reports an outcome per entity, including pending or unverified results. An acknowledgement alone is not proof of success. |
 | **Your choice of model** | Ollama, OpenRouter and OpenCode integrations, plus an experimental ChatGPT/Codex OAuth provider. Ordered failover tracks health and resumes eligible failed turns from recorded tool results. |
 | **A terminal built for conversations** | Streaming replies, Markdown, multiline input, live tool activity, model status and token usage in the TUI; a one-shot mode for scripts; Telegram for a second way in. |
+| **Mid-turn notices** | The model can show you an intermediate result before it finishes, through the `say` tool. In the TUI it appears as a labelled notice block in order with the rest of the turn; Telegram gets a new message. `--exec`, `--raw` and the piped reader do not render notices. |
 | **Continuity across restarts** | Separate conversations per channel address, append-only session transcripts, `/new`, `/compact`, automatic summaries and configurable retention. |
 | **Guided setup and configuration** | `ready init` creates an agent. An opt-in admin profile lets you review and confirm configuration edits in chat, then complete Secrets and OAuth in the TUI and reload the runtime without a restart. |
 | **Encrypted secrets** | Sensitive fields hold only `!secret` / `!secret_file` references; values live in an age-encrypted store managed by the TUI editor or `ready secrets`. |
 | **Skills and MCP tools** | File-based skills describe your home and workflows; MCP connects additional tools. Profiles control which tools each agent exposes. Shipped skill updates preserve local edits. |
+| **Knowledge bundles** | Open Knowledge Format (OKF v0.3) bundles under `<agent-dir>/okfs/` are read through the read-only `okf_query` tool (scan, read with trust tier, status and freshness, resolved links and citations, conflict ordering and conformance checks, every read confined to the selected bundle) and written through the separate `okf_write` tool, which stamps authorship itself, never lets the model write a verification and maintains `index.md` and `log.md`. A person confirms a concept with the two-step `/verify` command (see `docs/agent-directories.md`). |
 | **Background delegation** | With `subagents.enabled`, the model can spawn bounded Subagents (`subagent_*` tools) that work in the background through the same LLM failover chain and report back with durable, scan-checked results: read-only research via the shipped `explore` type, follow-ups via mail, fan-out with one wait. Definitions are `*.md` assets in `<agent-dir>/subagents/`, library-synced like skills. |
 | **Small machines, independent agents** | A static ARMv6 build supports Raspberry Pi 1-class hosts. Separate agent directories keep configuration, credentials, skills and conversations independent. |
 
@@ -249,7 +251,7 @@ config fails `serve` or `login` naming that path, with no fallback and no
 auto-initialisation.
 
 The agent directory is the root of every runtime path: `sessions/`, `skills/`,
-any relative `logging.file_path`, and the agent's encrypted Secret store
+`okfs/` (operator-provided knowledge bundles; the agent reads them and writes concepts inside them, never creating a bundle), any relative `logging.file_path`, and the agent's encrypted Secret store
 (`secrets.age` + its key, see [Secrets](#secrets)). Configured writable paths must stay
 inside the agent directory after resolving links; the shipped skill library
 (below) is the one read-only program-content exception.
@@ -282,6 +284,9 @@ version rules, backup policy and migration-author checklist.
 ├── skills/                          # runtime skill copy (prepared by init;
 │                                    #   kept current by the boot sync)
 ├── sessions/                        # session transcripts
+├── okfs/                            # OKF knowledge bundles you add (reserved;
+│                                    #   copy or clone INSIDE, never symlink;
+│                                    #   deleted by purge; see docs/agent-directories.md)
 ├── secrets.age                      # encrypted Secrets + OAuth Credentials
 ├── secrets.key                      # the Store key (0600; see "Secrets")
 └── oauth/                           # per-target coordination locks only
@@ -402,7 +407,7 @@ command. Values are entered in the authenticated ZMQ TUI under a profile
 that exposes `config-manager` (e.g. `--profile admin`) on a numeric loopback listener (use SSH forwarding for
 remote access; the editor opens by itself at the end of a turn that left
 something pending), or offline with `ready secrets set <name>`. Select the admin
-profile on `ready serve`, not on `ready chat`. READY's chat wire protocol (the JSON messages `ready chat` and the daemon exchange over ZMQ; not the ZMTP transport version) is version 6 and must match exactly on both ends. Upgrade the daemon and all chat clients together; rollback likewise requires matching older binaries on both ends. No data migration is needed.
+profile on `ready serve`, not on `ready chat`. READY's chat wire protocol (the JSON messages `ready chat` and the daemon exchange over ZMQ; not the ZMTP transport version) is version 8 and must match exactly on both ends. Upgrade the daemon and all chat clients together; rollback likewise requires matching older binaries on both ends. No data migration is needed.
 
 The RED editor masks the input (bullets and a character count); **Ctrl+R**
 shows the current field, a value with leading/trailing whitespace is flagged
@@ -520,6 +525,40 @@ A removed flag fails loudly: `--config` is gone (use `--agent-dir`).
 | `124` | Timeout (`timeout(1)` convention) |
 | `130` | SIGINT |
 
+#### Messages while the agent is working (turn steering)
+
+`Return` always sends. A message you send while *your* turn is still running
+enters that turn at its next safe point, so a correction ("no, the *upstairs*
+lights") reaches the agent before it acts or answers: proposed tool calls are
+vetoed before they execute (they come back to the model as `[Superseded]`),
+a running tool call always finishes, and an answer already being delivered is
+never interrupted. A message that arrives too late opens the next turn
+immediately, ahead of anything queued after it. The same applies on Telegram
+(the injected message gets a 👀 reaction) and on the stdin CLI; commands
+(`/new`, `/compact`, `/verify`), scripted `--exec` requests and daemon-originated
+items never steer, and a command queued behind the turn keeps strict order
+(`/new` followed by a question runs the question in the new Session).
+
+Every message you send is echoed as a quote, with a one-line label when it took
+part in steering: `⋯ steer pending`, `↳ steer · N actions superseded`,
+`↷ arrived after the reply · new turn`, `⋯ queued`, `⊘ not processed · stopped`.
+While the client cannot send (during a runtime reload) your prompts are held
+locally (`⋯ held`) and sent in order afterwards.
+
+`/stop` ends your running turn at its earliest safe point (an in-flight model
+call or `wait` is cancelled, a running tool finishes and is recorded), drops the
+messages you sent meanwhile (reported) and replies
+`Stopped. Completed actions are kept; nothing else will run.`; with nothing to
+stop it answers `Nothing to stop.`. Disable steering with `steering.enabled:
+false` or per channel (`channels.<name>.steering`); `steering.max_steers_per_turn`,
+`max_restarts_per_turn` and `min_remaining_budget` bound it (reaching a limit
+defers the message to the next turn, never an error).
+
+**Upgrade note (wire protocol 8):** `ready chat` and `ready serve` must be
+upgraded together — the handshake requires exact protocol equality and a
+mismatch is rejected before authentication. Clients must send a `request_id` on
+every `message`.
+
 `chat` never writes files outside the config the daemon uses, and never
 initialises logging: errors are single human-readable lines on stderr.
 The `llm_unavailable` failure is a *completed request that failed*: its
@@ -549,7 +588,7 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
   verification, stale thresholds).
 - `skills` — path, hot reload, `sync`, `library_path` (see above).
 - `sessions` — per-address transcript files, reset rules (`daily`/`idle`),
-  retention; `/new` and `/compact` are session commands. Each Session is a
+  retention; `/new` and `/compact` are session commands (`/stop` ends the running Turn and is handled out of band). Each Session is a
   folder with `session.jsonl` (subagent-runtime BREAKING: one folder per
   Session — delete old `sessions/` once on upgrade); a Subagent hierarchy
   lives in the owner folder's `subagents/` subtree and retention operates
@@ -563,6 +602,10 @@ scripts distinguish it by the reply's `error_code: llm_unavailable` field.
   Subagent turns and jobs, and queueing never demotes a candidate for
   liveness.
 - `compaction` — automatic context compaction with a summariser skill.
+- `steering` — mid-turn steering of a running turn by the user's own messages
+  (`enabled`, `max_steers_per_turn`, `max_restarts_per_turn`,
+  `min_remaining_budget`) plus a per-channel `channels.<name>.steering`
+  override; on by default.
 - `default_profile` + per-owner `profiles.<name>.{allow,deny}` — tool gating
   (fail-closed); `disclose_denied_tools` turns blocked calls into an explicit
   disclosure. Internal builtin tools follow the same model: when

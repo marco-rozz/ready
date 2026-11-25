@@ -1,0 +1,71 @@
+{
+  "bundle": {
+    "description": null,
+    "license": null,
+    "title": "Legacy"
+  },
+  "concepts": [
+    {
+      "current": false,
+      "description": null,
+      "generated_at": null,
+      "id": "sub/c",
+      "notes": [],
+      "path": "sub/c.md",
+      "replacement_id": null,
+      "resource": "data/x.csv",
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "deprecated",
+      "superseded_by": "data/x.csv",
+      "tags": [],
+      "title": "c",
+      "trust": "unverified",
+      "type": "Note",
+      "verified_before_change": false
+    },
+    {
+      "current": true,
+      "description": null,
+      "generated_at": "2026-06-20T14:00:00Z",
+      "id": "sub/ts",
+      "notes": [
+        "verified only before the last change"
+      ],
+      "path": "sub/ts.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "ts",
+      "trust": "unverified",
+      "type": "Note",
+      "verified_before_change": true
+    }
+  ],
+  "not_concepts": [],
+  "now": "2026-07-01T00:00:00+00:00",
+  "okf_version": "0.2",
+  "summary": {
+    "concepts": 2,
+    "deprecated": 1,
+    "draft": 0,
+    "not_concepts": 0,
+    "not_current": 1,
+    "selected": 2,
+    "stale": 0,
+    "trust": {
+      "human-reviewed": 0,
+      "machine-confirmed": 0,
+      "unverified": 2
+    },
+    "types": {
+      "Note": 2
+    }
+  }
+}

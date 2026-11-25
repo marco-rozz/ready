@@ -198,7 +198,16 @@ const (
 // computed daemon-side); a strict protocol-5 peer would reject the unknown
 // field, so the version bumps. Same-repo co-release, exact-equality
 // handshake unchanged.
-const Version = 6
+// Version 7 (turn-steering, BREAKING): a `message` sent while another is
+// unanswered is admitted (no more blanket request_in_flight); every
+// `message` carries a required request_id; the `turn` response object and the
+// message_accepted / turn_started / steer_injected control events join the
+// wire. Same-repo co-release, exact-equality handshake unchanged.
+// Version 8 (say-mid-turn-notice, BREAKING): the `renders_notices` client
+// capability on session_start, the `notice` response object and the `notice`
+// control event (Mid-turn Notices) join the wire. Same-repo co-release,
+// exact-equality handshake unchanged.
+const Version = 8
 
 // PredatesVersioningGuess is the client's message when a handshake response
 // cannot carry a protocol version at all — an unmarshal refusal or an error
@@ -249,9 +258,12 @@ type Request struct {
 	// (guided-init D11a): the daemon requires exact equality before any
 	// authentication work. Zero here means a peer that predates protocol
 	// versioning — a mismatch by definition.
-	ProtocolVersion int                 `json:"protocol_version,omitempty"`
-	SecretEntry     *SecretEntryRequest `json:"secret_entry,omitempty"`
-	OAuthLogin      *OAuthLoginRequest  `json:"oauth_login,omitempty"`
+	ProtocolVersion int `json:"protocol_version,omitempty"`
+	// RendersNotices rides session_start only (say-mid-turn-notice): the
+	// client declares it renders Mid-turn Notices. Absent means false.
+	RendersNotices bool                `json:"renders_notices,omitempty"`
+	SecretEntry    *SecretEntryRequest `json:"secret_entry,omitempty"`
+	OAuthLogin     *OAuthLoginRequest  `json:"oauth_login,omitempty"`
 }
 
 // OAuthLoginRequest is the strict, dedicated OAuth login control payload
@@ -439,6 +451,51 @@ type Response struct {
 	OAuthLogin  *OAuthLoginResponse  `json:"oauth_login,omitempty"`
 	ConfigSaved bool                 `json:"config_saved,omitempty"`
 	Activity    *Activity            `json:"activity,omitempty"`
+	// Turn carries the Turn correlation of message_accepted, turn_started,
+	// steer_injected and the final reply (turn-steering); see TurnInfo for
+	// the combination each response may carry.
+	Turn *TurnInfo `json:"turn,omitempty"`
+	// Notice rides the unsolicited `notice` control event only
+	// (say-mid-turn-notice): the Mid-turn Notice text, redacted daemon-side.
+	Notice *NoticeInfo `json:"notice,omitempty"`
+}
+
+// NoticeInfo is the `notice` response object (protocol 8): the text of one
+// Mid-turn Notice after daemon-side redaction.
+type NoticeInfo struct {
+	Text string `json:"text"`
+}
+
+// Disposition values of message_accepted (TurnInfo.Disposition).
+const (
+	// DispositionQueued: the message will be (or already is) processed as
+	// its own item.
+	DispositionQueued = "queued"
+	// DispositionSteer: the message is a steering candidate of the running
+	// Turn.
+	DispositionSteer = "steer"
+	// DispositionStop: the message is the /stop command.
+	DispositionStop = "stop"
+)
+
+// TurnInfo is the `turn` response object (protocol 7). TurnID is the
+// daemon-minted Turn ID (never the formatter turn nonce). Which fields may
+// appear depends on the response:
+//
+//	message_accepted: turn_id (when known), disposition (required)
+//	turn_started:     turn_id, request_ids (required), deferred
+//	steer_injected:   turn_id, request_ids (required), superseded_tool_calls
+//	final reply:      turn_id, request_ids, dropped_request_ids
+//
+// SupersededToolCalls is a pointer so an explicit zero is distinguishable
+// from absent.
+type TurnInfo struct {
+	TurnID              string   `json:"turn_id,omitempty"`
+	Disposition         string   `json:"disposition,omitempty"`
+	RequestIDs          []string `json:"request_ids,omitempty"`
+	Deferred            bool     `json:"deferred,omitempty"`
+	SupersededToolCalls *int     `json:"superseded_tool_calls,omitempty"`
+	DroppedRequestIDs   []string `json:"dropped_request_ids,omitempty"`
 }
 
 // CompactionInfo carries a Compaction's estimated prompt size before and
@@ -504,6 +561,19 @@ const (
 	// result's content itself still lands at the head of the owner's next
 	// turn — this event is a visibility signal, never a delivery.
 	ControlSubagentHandback = "subagent_handback"
+	// ControlMessageAccepted acknowledges every admitted `message` request
+	// (turn-steering): carries Turn.Disposition.
+	ControlMessageAccepted = "message_accepted"
+	// ControlTurnStarted precedes every Turn delivered to the Connection
+	// (turn-steering): carries Turn.TurnID/RequestIDs/Deferred.
+	ControlTurnStarted = "turn_started"
+	// ControlSteerInjected reports candidates claimed into a Turn
+	// (turn-steering): carries Turn.TurnID/RequestIDs/SupersededToolCalls.
+	ControlSteerInjected = "steer_injected"
+	// ControlNotice delivers one Mid-turn Notice (say-mid-turn-notice):
+	// carries Notice.Text and Turn.TurnID; never a reply, never touches the
+	// pending slot or the unanswered set.
+	ControlNotice = "notice"
 )
 
 // Validate checks structural and semantic invariants on a Request. It returns
@@ -538,8 +608,14 @@ func (r Request) Validate() error {
 
 	// Missing and differing session_start versions reach the daemon gate,
 	// which returns protocol_mismatch with the daemon's version before auth.
+	if r.Type == RequestTypeMessage && r.RequestID == "" {
+		return fmt.Errorf("%w: message requires a request_id", ErrMalformedRequest)
+	}
 	if r.Type != RequestTypeSessionStart && r.ProtocolVersion != 0 {
 		return fmt.Errorf("%w: protocol_version is carried on session_start only", ErrMalformedRequest)
+	}
+	if r.Type != RequestTypeSessionStart && r.RendersNotices {
+		return fmt.Errorf("%w: renders_notices is carried on session_start only", ErrMalformedRequest)
 	}
 	if r.Type == RequestTypeSecretEntry {
 		if r.RequestID == "" || r.Content != "" || r.AuthToken != "" || r.SecretEntry == nil {
@@ -604,6 +680,12 @@ func (r Response) Validate() error {
 			return fmt.Errorf("%w: invalid activity state", ErrMalformedResponse)
 		}
 	}
+	if err := r.validateTurn(); err != nil {
+		return err
+	}
+	if err := r.validateNotice(); err != nil {
+		return err
+	}
 	if r.SecretEntry != nil {
 		if !validSecretAction(r.SecretEntry.Action) || !validSecretOutcome(r.SecretEntry.Outcome) {
 			return fmt.Errorf("%w: invalid secret_entry response", ErrMalformedResponse)
@@ -613,6 +695,115 @@ func (r Response) Validate() error {
 		if (r.OAuthLogin.Action != "" && !validOAuthLoginAction(r.OAuthLogin.Action)) || !validOAuthLoginOutcome(r.OAuthLogin.Outcome) {
 			return fmt.Errorf("%w: invalid oauth_login response", ErrMalformedResponse)
 		}
+	}
+
+	return nil
+}
+
+// validateTurn enforces the per-response combinations of the `turn` object.
+func (r Response) validateTurn() error {
+	t := r.Turn
+	if t == nil {
+		return nil
+	}
+
+	bad := func(msg string) error { return fmt.Errorf("%w: invalid turn object: %s", ErrMalformedResponse, msg) }
+
+	switch {
+	case r.ResponseType == ResponseTypeControl && r.Content == ControlMessageAccepted:
+		return validateAcceptedTurn(t, bad)
+	case r.ResponseType == ResponseTypeControl && r.Content == ControlTurnStarted:
+		return validateStartedTurn(t, bad)
+	case r.ResponseType == ResponseTypeControl && r.Content == ControlSteerInjected:
+		return validateInjectedTurn(t, bad)
+	case r.ResponseType == ResponseTypeControl && r.Content == ControlNotice:
+		return validateNoticeTurn(t, bad)
+	case r.ResponseType == ResponseTypeReply:
+		if t.Disposition != "" || t.Deferred || t.SupersededToolCalls != nil {
+			return bad("a final reply carries only turn_id, request_ids and dropped_request_ids")
+		}
+
+		return nil
+	default:
+		return bad("not allowed on this response")
+	}
+}
+
+func validateAcceptedTurn(t *TurnInfo, bad func(string) error) error {
+	switch t.Disposition {
+	case DispositionQueued, DispositionSteer, DispositionStop:
+	default:
+		return bad("message_accepted requires a valid disposition")
+	}
+
+	if len(t.RequestIDs) != 0 || t.Deferred || t.SupersededToolCalls != nil || len(t.DroppedRequestIDs) != 0 {
+		return bad("message_accepted carries only turn_id and disposition")
+	}
+
+	return nil
+}
+
+func validateStartedTurn(t *TurnInfo, bad func(string) error) error {
+	if t.TurnID == "" || len(t.RequestIDs) == 0 {
+		return bad("turn_started requires turn_id and request_ids")
+	}
+
+	if t.Disposition != "" || t.SupersededToolCalls != nil || len(t.DroppedRequestIDs) != 0 {
+		return bad("turn_started carries only turn_id, request_ids and deferred")
+	}
+
+	return nil
+}
+
+func validateInjectedTurn(t *TurnInfo, bad func(string) error) error {
+	if t.TurnID == "" || len(t.RequestIDs) == 0 {
+		return bad("steer_injected requires turn_id and request_ids")
+	}
+
+	if t.Disposition != "" || t.Deferred || len(t.DroppedRequestIDs) != 0 {
+		return bad("steer_injected carries only turn_id, request_ids and superseded_tool_calls")
+	}
+
+	if t.SupersededToolCalls != nil && *t.SupersededToolCalls < 0 {
+		return bad("superseded_tool_calls must not be negative")
+	}
+
+	return nil
+}
+
+func validateNoticeTurn(t *TurnInfo, bad func(string) error) error {
+	if t.TurnID == "" {
+		return bad("notice requires turn_id")
+	}
+
+	if t.Disposition != "" || len(t.RequestIDs) != 0 || t.Deferred || t.SupersededToolCalls != nil || len(t.DroppedRequestIDs) != 0 {
+		return bad("notice carries only turn_id")
+	}
+
+	return nil
+}
+
+// validateNotice enforces the `notice` object / `notice` event pairing.
+func (r Response) validateNotice() error {
+	isEvent := r.ResponseType == ResponseTypeControl && r.Content == ControlNotice
+	if r.Notice == nil {
+		if isEvent {
+			return fmt.Errorf("%w: notice event requires the notice object", ErrMalformedResponse)
+		}
+
+		return nil
+	}
+
+	if !isEvent {
+		return fmt.Errorf("%w: notice object is allowed only on the notice event", ErrMalformedResponse)
+	}
+
+	if r.Notice.Text == "" {
+		return fmt.Errorf("%w: notice.text is required", ErrMalformedResponse)
+	}
+
+	if r.Status != ResponseStatusOK || r.ErrorCode != "" || r.RequestID != "" || r.Usage != nil {
+		return fmt.Errorf("%w: invalid notice event", ErrMalformedResponse)
 	}
 
 	return nil

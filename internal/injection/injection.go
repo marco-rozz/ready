@@ -55,6 +55,10 @@ const (
 	// TagTaskHeader is the base of the child dispatch's task/mail harness
 	// header.
 	TagTaskHeader = "subagent_task"
+	// TagUserSteer is the base of the mid-turn steering envelope
+	// (steer.RenderSteer). The user's own text is never scanned; imitations
+	// inside handbacks and compaction summaries are neutralised.
+	TagUserSteer = "user_steer"
 )
 
 // reservedTags lists every reserved base name the scanner neutralises.
@@ -70,6 +74,7 @@ func reservedTags() []string {
 		TagScanHeader,
 		TagHarnessNote,
 		TagTaskHeader,
+		TagUserSteer,
 	}
 }
 

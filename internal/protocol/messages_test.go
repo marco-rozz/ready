@@ -281,7 +281,7 @@ func TestRequestValidate_AcceptsAllowedTypes(t *testing.T) {
 				// guided-init C.19: session_start carries the wire version.
 				req.ProtocolVersion = Version
 			}
-			if typ == RequestTypeRuntimeReload {
+			if typ == RequestTypeRuntimeReload || typ == RequestTypeMessage {
 				req.RequestID = "r1"
 			}
 			if err := req.Validate(); err != nil {

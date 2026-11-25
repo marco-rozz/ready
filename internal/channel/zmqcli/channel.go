@@ -55,6 +55,7 @@ const errNoActiveSession = "no_active_session"
 var (
 	_ channel.Channel            = (*Channel)(nil)
 	_ channel.ConnectionOriented = (*Channel)(nil)
+	_ channel.NoticeSender       = (*Channel)(nil)
 )
 
 // sessionState holds the mutable per-session fields protected by a single mutex.
@@ -68,12 +69,21 @@ type sessionState struct {
 	openedAt     time.Time // used for duration logging on close
 	lastActivity time.Time // touched on every inbound message/exec
 	lastPing     time.Time // last received heartbeat; zero = client never pinged (liveness exempt)
+	// rendersNotices is the capability declared by the authenticating
+	// session_start round (say-mid-turn-notice); fixed for the Connection.
+	rendersNotices bool
 }
 
 // tryAcquire attempts to open a new session. Returns true and records the
 // identity + connectionID if no session is active; returns false otherwise.
 // Callers must not hold ss.mu.
 func (ss *sessionState) tryAcquire(connectionID string, identity []byte) bool {
+	return ss.tryAcquireWith(connectionID, identity, false)
+}
+
+// tryAcquireWith is tryAcquire recording the Notice rendering capability the
+// authenticating session_start declared.
+func (ss *sessionState) tryAcquireWith(connectionID string, identity []byte, rendersNotices bool) bool {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 
@@ -85,6 +95,7 @@ func (ss *sessionState) tryAcquire(connectionID string, identity []byte) bool {
 	ss.generation++
 	ss.connectionID = connectionID
 	ss.identity = identity
+	ss.rendersNotices = rendersNotices
 	ss.openedAt = now
 	ss.lastActivity = now
 
@@ -107,6 +118,7 @@ func (ss *sessionState) releaseConnection(connectionID string) {
 	}
 	ss.connectionID = ""
 	ss.identity = nil
+	ss.rendersNotices = false
 	ss.openedAt = time.Time{}
 	ss.lastActivity = time.Time{}
 	ss.lastPing = time.Time{}
@@ -132,6 +144,7 @@ func (ss *sessionState) releaseGeneration(generation uint64) {
 	}
 	ss.connectionID = ""
 	ss.identity = nil
+	ss.rendersNotices = false
 	ss.openedAt = time.Time{}
 	ss.lastActivity = time.Time{}
 	ss.lastPing = time.Time{}
@@ -209,6 +222,12 @@ type pendingEntry struct {
 	requestID   string
 	activityKey *activityKey
 }
+
+// The `pending` map holds, per Connection, the SLOT of the Turn in flight: the
+// opener request that progress, activity and the final reply correlate to.
+// Every unanswered request of the Connection (the opener, steering candidates,
+// queued messages, an `exec`) is tracked by request id in `unanswered`
+// (turn.go): turn-steering replaced the single pending slot by that set.
 
 // Channel is the daemon-side ZMQ CLI channel. It embeds a *zmq.Listener for
 // raw ROUTER-socket I/O and owns the session lock, the reply-pending map, and
@@ -309,6 +328,11 @@ type Channel struct {
 	// of the final reply (ResponseType:"reply") or on session release.
 	pendingMu sync.Mutex
 	pending   map[string]pendingEntry
+	// unanswered lists, per Connection and in arrival order, every request
+	// still waiting for its final reply; acks holds the not-yet-written
+	// message_accepted of each admitted `message` (turn.go).
+	unanswered map[string][]unansweredReq
+	acks       map[string]chan struct{}
 
 	// incoming queues channel.Messages ready for the Manager's receive loop.
 	incoming chan channel.Message
@@ -372,6 +396,8 @@ func NewChannel(
 		logger:                sessionLogger,
 		payloadsEnabled:       payloadsEnabled,
 		pending:               make(map[string]pendingEntry),
+		unanswered:            make(map[string][]unansweredReq),
+		acks:                  make(map[string]chan struct{}),
 		incoming:              make(chan channel.Message, 16),
 		ctx:                   ctx,
 		cancel:                cancel,
@@ -816,10 +842,33 @@ func (c *Channel) Send(_ context.Context, msg channel.Message) error {
 		return fmt.Errorf("zmqcli: reply dropped — no connection_id in metadata")
 	}
 
+	// turn-steering: the reply is routed by request id. The Turn's opener
+	// (Metadata[RequestID]) names the request it answers; every id the Turn
+	// consumed (and the candidates a /stop dropped) is removed from the
+	// unanswered set with it — each `message` id gets exactly one reply.
+	replyTo := msg.Metadata[RequestID]
+	consumed := decodeIDs(msg.Metadata[MetaTurnRequestIDs])
+	dropped := decodeIDs(msg.Metadata[MetaTurnDroppedIDs])
+
 	c.pendingMu.Lock()
-	entry, ok := c.pending[connectionID]
-	if ok {
+	rec, ok := c.lookupUnansweredLocked(connectionID, replyTo)
+	slot, hasSlot := c.pending[connectionID]
+	slotMatches := hasSlot && (replyTo == "" || slot.requestID == replyTo)
+
+	if !ok && slotMatches {
+		rec, ok = unansweredReq{requestID: slot.requestID, identity: slot.identity}, true
+	}
+
+	entry := pendingEntry{identity: rec.identity, requestID: rec.requestID}
+	if slotMatches {
+		entry = slot
 		delete(c.pending, connectionID)
+	}
+
+	if ok {
+		answered := append([]string{rec.requestID}, consumed...)
+		answered = append(answered, dropped...)
+		c.consumeLocked(connectionID, answered)
 	}
 	c.pendingMu.Unlock()
 
@@ -843,6 +892,7 @@ func (c *Channel) Send(_ context.Context, msg channel.Message) error {
 		// cumulative totals (success AND failure — a failed attempt still
 		// consumed tokens); nil keeps pre-usage payloads valid.
 		Usage: c.currentUsage(),
+		Turn:  replyTurnInfo(msg.Metadata, consumed, dropped, rec.requestID),
 	})
 	if err != nil {
 		// Marshal failure is a bug — put the identity back and surface the error.
@@ -1181,7 +1231,7 @@ func (c *Channel) handleSessionStart(identity []byte, req protocol.Request) {
 	}
 
 	// Auth OK — attempt to acquire the single-session lock.
-	if !c.sess.tryAcquire(req.ConnectionID, identity) {
+	if !c.sess.tryAcquireWith(req.ConnectionID, identity, req.RendersNotices) {
 		c.logger.Info().
 			Str(ConnectionID, req.ConnectionID).
 			Msg("session_busy_rejected")
@@ -1332,15 +1382,14 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 	// Update last-activity and register the pending reply entry.
 	c.sess.touchActivity()
 
-	// criticalities-remediation (M8): a second request while another is
-	// still in flight is rejected structurally instead of silently
-	// overwriting the pending slot (which mis-routed or dropped the first
-	// request's reply).
-	c.pendingMu.Lock()
-	existing, inFlight := c.pending[req.ConnectionID]
-	c.pendingMu.Unlock()
+	// turn-steering (protocol 7): conversational `message` requests are
+	// admitted whatever other messages are unanswered — the address inbox
+	// decides whether each one steers the running Turn, is queued, or stops
+	// it. Only an `exec` overlapping anything (or anything overlapping an
+	// `exec`), and a reused request id, are rejected structurally.
+	isExec := req.Type == protocol.RequestTypeExec
 
-	if inFlight && existing.requestID != req.RequestID {
+	if !c.admitRequest(req.ConnectionID, identity, req.RequestID, isExec) {
 		c.secretMu.Unlock()
 		c.logger.Warn().Str(ConnectionID, req.ConnectionID).Msg("request_in_flight_rejected")
 		resp, _ := protocol.Marshal(protocol.Response{
@@ -1355,18 +1404,17 @@ func (c *Channel) handleMessage(identity []byte, req protocol.Request) {
 		return
 	}
 
-	c.pendingMu.Lock()
-	c.pending[req.ConnectionID] = pendingEntry{
-		identity:    identity,
-		requestID:   req.RequestID,
-		activityKey: &activityKey{},
-	}
-	c.pendingMu.Unlock()
 	c.secretMu.Unlock()
+
+	origin := channel.OriginHuman
+	if isExec {
+		origin = channel.OriginScripted
+	}
 
 	msg := channel.Message{
 		Content:     req.Content,
 		ChannelName: ChannelName,
+		Origin:      origin,
 		Metadata: map[string]string{
 			ConnectionID:   req.ConnectionID,
 			RequestID:      req.RequestID,
@@ -1486,10 +1534,7 @@ func (c *Channel) handleSecretEntry(identity []byte, req protocol.Request) {
 		return
 	}
 	if req.SecretEntry.Action == protocol.SecretEntryActionBegin {
-		c.pendingMu.Lock()
-		_, pending := c.pending[req.ConnectionID]
-		c.pendingMu.Unlock()
-		if pending {
+		if c.hasPending(req.ConnectionID) {
 			c.secretMu.Unlock()
 			_ = c.sendSecretResponse(identity, protocol.Response{ConnectionID: req.ConnectionID, RequestID: req.RequestID, Status: protocol.ResponseStatusError, ResponseType: protocol.ResponseTypeReply, ErrorCode: protocol.ErrorCodeRequestInFlight})
 
@@ -1607,10 +1652,7 @@ func (c *Channel) handleOAuthLogin(identity []byte, req protocol.Request) {
 		return
 	}
 	if req.OAuthLogin.Action == protocol.OAuthLoginActionBegin {
-		c.pendingMu.Lock()
-		_, pending := c.pending[req.ConnectionID]
-		c.pendingMu.Unlock()
-		if pending {
+		if c.hasPending(req.ConnectionID) {
 			c.secretMu.Unlock()
 			_ = c.sendSecretResponse(identity, protocol.Response{
 				ConnectionID: req.ConnectionID, RequestID: req.RequestID,
@@ -1722,10 +1764,7 @@ func (c *Channel) handleRuntimeReload(identity []byte, req protocol.Request) {
 
 		return
 	}
-	c.pendingMu.Lock()
-	_, pending := c.pending[req.ConnectionID]
-	c.pendingMu.Unlock()
-	if pending {
+	if c.hasPending(req.ConnectionID) {
 		c.secretMu.Unlock()
 		_ = c.sendSecretResponse(identity, protocol.Response{
 			ConnectionID: req.ConnectionID, RequestID: req.RequestID,
@@ -1789,9 +1828,7 @@ func (c *Channel) handleSessionEnd(identity []byte, req protocol.Request) {
 	c.sess.release()
 	c.releaseSecretOperation(req.ConnectionID)
 
-	c.pendingMu.Lock()
-	delete(c.pending, req.ConnectionID)
-	c.pendingMu.Unlock()
+	c.clearPending(req.ConnectionID)
 
 	duration := time.Since(openedAt)
 	c.logger.Info().
@@ -1898,11 +1935,7 @@ func (c *Channel) checkIdleTimeout() {
 	// has been inactive for longer than the agent run timeout + buffer, the
 	// client is likely dead and the agent either hung or already tried to Send
 	// (which would have released via send_failure). This is a safety net.
-	c.pendingMu.Lock()
-	_, hasPending := c.pending[connectionID]
-	c.pendingMu.Unlock()
-
-	if hasPending && idle > c.replyTimeout {
+	if c.hasPending(connectionID) && idle > c.replyTimeout {
 		c.releaseTimedOut(connectionID, identity, openedAt, "reply_timeout")
 	}
 }
@@ -1918,9 +1951,7 @@ func (c *Channel) releaseTimedOut(connectionID string, _ []byte, openedAt time.T
 	c.sess.release()
 	c.releaseSecretOperation(connectionID)
 
-	c.pendingMu.Lock()
-	delete(c.pending, connectionID)
-	c.pendingMu.Unlock()
+	c.clearPending(connectionID)
 
 	duration := time.Since(openedAt)
 	c.logger.Info().
@@ -2022,4 +2053,48 @@ func (c *Channel) SendSubagentHandbackEvent(name, status string, elapsedMS int64
 	}
 
 	return nil
+}
+
+// SendNotice shows one Mid-turn Notice on the address's active Connection
+// (say-mid-turn-notice): the unsolicited `notice` control event, sent only to
+// a Connection that declared it renders Notices. It never touches the pending
+// reply slot, the unanswered set or usage. meta[MetaTurnID] names the Turn.
+// A frame written is "delivered"; a write failure is an error (nothing was
+// shown), reported under the existing bounded-write rules.
+func (c *Channel) SendNotice(_ context.Context, meta map[string]string, text string) (channel.NoticeResult, error) {
+	c.sess.mu.Lock()
+	connectionID, identity, renders := c.sess.connectionID, c.sess.identity, c.sess.rendersNotices
+	c.sess.mu.Unlock()
+
+	if connectionID == "" || len(identity) == 0 {
+		return channel.NoticeResult{Outcome: channel.NoticeNotShown, Reason: channel.NoticeReasonNoConnection}, nil
+	}
+
+	if !renders {
+		return channel.NoticeResult{Outcome: channel.NoticeNotShown, Reason: channel.NoticeReasonClientDoesNotRender}, nil
+	}
+
+	event := protocol.Response{
+		ConnectionID: connectionID,
+		Status:       protocol.ResponseStatusOK,
+		ResponseType: protocol.ResponseTypeControl,
+		Content:      protocol.ControlNotice,
+		Notice:       &protocol.NoticeInfo{Text: text},
+	}
+	if id := meta[MetaTurnID]; id != "" {
+		event.Turn = &protocol.TurnInfo{TurnID: id}
+	}
+
+	resp, err := protocol.Marshal(event)
+	if err != nil {
+		return channel.NoticeResult{}, fmt.Errorf("zmqcli: marshal %s event: %w", protocol.ControlNotice, err)
+	}
+
+	if sendErr := c.listener.Send(identity, resp); sendErr != nil {
+		c.logger.Warn().Err(sendErr).Str(ConnectionID, connectionID).Str("event", protocol.ControlNotice).Msg("failed to send notice event")
+
+		return channel.NoticeResult{}, fmt.Errorf("zmqcli: send %s event: %w", protocol.ControlNotice, sendErr)
+	}
+
+	return channel.NoticeResult{Outcome: channel.NoticeDelivered, Parts: 1, DeliveredParts: 1}, nil
 }

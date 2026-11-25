@@ -34,6 +34,7 @@ import (
 	"github.com/marco-rozz/ready/internal/privacy"
 	"github.com/marco-rozz/ready/internal/protocol"
 	"github.com/marco-rozz/ready/internal/session"
+	"github.com/marco-rozz/ready/internal/steer"
 	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/usage"
 )
@@ -961,7 +962,7 @@ func newSubagentWaitTool(r *subagent.Runtime, rt *sessionRuntime, logger zerolog
 func (t *waitTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: "subagent_wait",
-		Desc: "Wait for one or more Subagents. Returns every pending result of the targets immediately, or blocks until the first arrives or the timeout expires. A timeout does not stop the Subagents: their results arrive later.",
+		Desc: "Wait for one or more Subagents. Returns every pending result of the targets immediately, or blocks until the first arrives or the timeout expires. A timeout does not stop the Subagents: their results arrive later. To show a result to the user before your final answer, pass its content (or a summary) to `say` when that tool is available.",
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"targets": {Type: schema.Array, Desc: "Subagent ids or names", Required: true, ElemInfo: &schema.ParameterInfo{Type: schema.String}},
 			"timeout": {Type: schema.Integer, Desc: "Optional timeout in seconds (default 60)"},
@@ -980,8 +981,40 @@ func (t *waitTool) InvokableRun(ctx context.Context, args string, _ ...tool.Opti
 		return "", argErr
 	}
 
-	res, err := t.runtime.Wait(ctx, owner, a.Targets, time.Duration(a.Timeout)*time.Second)
+	// Turn-steering S12: the wait ends early on a candidate or a stop via the
+	// per-Turn signal, on a derived context so the Turn's own context (shared
+	// with MCP/HA calls) is never cancelled. Pending results stay pending.
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	defer cancelWait()
+
+	turn := steer.FromContext(ctx)
+	interrupted := make(chan struct{})
+
+	if turn != nil {
+		if sig := turn.Signal(); sig != nil {
+			go func() {
+				select {
+				case <-sig:
+					close(interrupted)
+					cancelWait()
+				case <-waitCtx.Done():
+				}
+			}()
+		}
+	}
+
+	res, err := t.runtime.Wait(waitCtx, owner, a.Targets, time.Duration(a.Timeout)*time.Second)
 	if err != nil {
+		select {
+		case <-interrupted:
+			if turn.Stopping() {
+				return steer.SubagentWaitInterruptedStop, nil
+			}
+
+			return steer.SubagentWaitInterruptedSteer, nil
+		default:
+		}
+
 		return "", err
 	}
 

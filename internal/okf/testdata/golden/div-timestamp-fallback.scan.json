@@ -1,0 +1,51 @@
+{
+  "bundle": {
+    "description": null,
+    "license": null,
+    "title": null
+  },
+  "concepts": [
+    {
+      "current": true,
+      "description": null,
+      "generated_at": "2026-06-20T14:00:00Z",
+      "id": "c",
+      "notes": [
+        "verified only before the last change"
+      ],
+      "path": "c.md",
+      "replacement_id": null,
+      "resource": null,
+      "runtime": null,
+      "stale": false,
+      "stale_after": null,
+      "status": "stable",
+      "superseded_by": null,
+      "tags": [],
+      "title": "c",
+      "trust": "unverified",
+      "type": "Note",
+      "verified_before_change": true
+    }
+  ],
+  "not_concepts": [],
+  "now": "2026-07-01T00:00:00+00:00",
+  "okf_version": "0.3",
+  "summary": {
+    "concepts": 1,
+    "deprecated": 0,
+    "draft": 0,
+    "not_concepts": 0,
+    "not_current": 0,
+    "selected": 1,
+    "stale": 0,
+    "trust": {
+      "human-reviewed": 0,
+      "machine-confirmed": 0,
+      "unverified": 1
+    },
+    "types": {
+      "Note": 1
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "errors": 0,
+  "files_checked": 1,
+  "findings": [
+    {
+      "code": "W125",
+      "level": "warning",
+      "line": 1,
+      "message": "add okf_version: \"0.3\" to the root index.md (section 8.1)",
+      "path": "index.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": null,
+  "warnings": 1
+}

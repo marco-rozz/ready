@@ -112,12 +112,17 @@ func (s turnState) Label() string {
 // (D3 / D18). The "completed-turns render cache" is completedRenderd; it is
 // invalidated (completedDirty) on finalise and on resize.
 type completedTurn struct {
-	echo  string
+	echo string
+	// heads holds the turn's opener (the message that opened it; a lone
+	// dropped message is also stored here). A turn with heads ignores echo.
+	heads []echoBlock
 	reply string
-	// midInfo holds informational lines that arrived while this turn was
-	// in flight (a Subagent handback trace): rendered between the echo and
-	// the reply — their chronological position.
-	midInfo []string
+	// body holds, in the order the matching events arrived, the injected
+	// steers, Mid-turn Notices and informational lines of the turn: rendered
+	// between the opener and the reply (their chronological position).
+	body []bodyItem
+	// notice is a standalone Mid-turn Notice block (no turn of this client).
+	notice string
 	// info is a one-line informational transcript entry (session-lifecycle:
 	// `── new session ──`, `── context compacted · … ──`) — faint styled
 	// text, never markdown, never a turn.
@@ -182,6 +187,8 @@ type Model struct {
 	styleResolved bool
 	renderer      *mdrender.Renderer
 	echoRenderer  *mdrender.Renderer // Markdown renderer for the inset user echo (width - 2*inset)
+	// noticeRenderer renders Mid-turn Notice bodies (width - noticeIndent).
+	noticeRenderer *mdrender.Renderer
 
 	subagents       *protocol.SubagentsInfo // the latest fleet snapshot (D11); nil = hidden
 	subagentsScroll int
@@ -216,11 +223,14 @@ type Model struct {
 	completedRenderd string
 	completedDirty   bool
 
-	// curInfo holds informational transcript lines that arrived while the
-	// current model turn is in flight (appendInfoLine): rendered IMMEDIATELY
-	// at arrival inside the live region — between the prompt echo and the
-	// (streaming → final) reply — and archived there by completeTurn.
-	curInfo []string
+	// body holds the live turn's injected steers, Notices and informational
+	// lines (appendInfoLine) in arrival order: rendered IMMEDIATELY at
+	// arrival inside the live region — between the opener and the
+	// (streaming → final) reply — and archived there by finishTurn.
+	body []bodyItem
+	// standalone holds Notices that arrived while ANOTHER turn than their own
+	// was live: rendered at the transcript tail, archived when it ends.
+	standalone []string
 
 	curEcho     string // raw markdown of the current turn's user echo
 	livePreview string // rendered current-turn preview (streamed or final)
@@ -263,12 +273,18 @@ type Model struct {
 	// transcript blocks even while a model turn is in flight.
 	pendingCtrl map[string]protocol.RequestType
 
-	// pending is the steering queue (Amendment 3): prompts submitted while a
-	// turn is in flight. FIFO: the first entry is sent automatically when
-	// the in-flight turn completes (startNextQueuedTurn), each as a normal
-	// turn with a fresh reply timeout. The daemon never sees concurrent
-	// message requests.
-	pending []string
+	// Turn steering (protocol 7): every user message is an echoBlock placed
+	// by daemon events. live is the head of the in-flight turn (the opener
+	// and the injected steers, consumption order); tail holds messages that
+	// are not part of a turn yet (sending, steer pending, queued); hold is the
+	// local prompt hold used only while the client cannot send (reloading).
+	// sentIDs are the request ids of messages awaiting their final reply.
+	live        []echoBlock
+	tail        []echoBlock
+	hold        []echoBlock
+	sentIDs     map[string]bool
+	turnCounted bool   // the current turn's sequence was already advanced
+	turnID      string // daemon Turn ID of the live turn ("" before turn_started)
 
 	// Secret entry is deliberately separate from chat drafts and steering.
 	secretMode          bool
@@ -374,6 +390,7 @@ func NewModel(d dealer, opts Options) *Model {
 		m.pingInterval = opts.LivenessTimeout / 3
 	}
 	m.pendingPings = make(map[string]struct{})
+	m.sentIDs = make(map[string]bool)
 
 	m.vp = viewport.New()
 	m.vp.MouseWheelEnabled = true
@@ -649,21 +666,25 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 	}
 	if text == "/secrets" || strings.HasPrefix(text, "/secrets ") {
 		m.ta.Reset()
-		if m.waiting || m.reloading || len(m.pending) > 0 {
+		if m.waiting || m.reloading || m.awaitingAnswer() {
 			return m, nil
 		}
 
 		return m, m.secretsCommand(strings.Fields(text)[1:])
 	}
 
-	if m.waiting || m.reloading {
-		// Steering: queue the prompt, clear the editor, send nothing.
-		m.pending = append(m.pending, text)
-		m.ta.Reset()
-		m.applyLayout()
-		m.rebuildViewport()
+	// Local prompt hold: only while the client cannot send (reloading). A
+	// turn in flight never holds a prompt — the daemon decides what a
+	// mid-turn message is.
+	if m.holdApplies() {
+		if _, reserved := reservedCommand(text); !reserved {
+			m.hold = append(m.hold, echoBlock{text: text, stage: stHeld})
+			m.ta.Reset()
+			m.applyLayout()
+			m.rebuildViewport()
 
-		return m, nil
+			return m, nil
+		}
 	}
 
 	// Reserved slash commands: intercept and forward as control requests.
@@ -674,28 +695,17 @@ func (m *Model) sendInput() (tea.Model, tea.Cmd) {
 		return m, m.sendCmdWithID(reqType, "", reqID)
 	}
 
-	// Echo at send (raw markdown stored; rendered at draw time).
-	m.curEcho = text
+	// Echo at send (raw markdown stored; rendered at draw time). RETURN always
+	// sends: the daemon acknowledges the message and says what it is.
 	m.ta.Reset()
-	m.state = stateThinking
-	m.buffer.Reset()
-	m.livePreview = ""
-	m.dirty = false
-	m.waiting = true
-	m.tickOn = true
-	m.turnSeq++
-	m.timeoutSeq++
+	cmd := m.dispatchChat(text)
 	// applyLayout already sized the viewport for the editor's new (empty)
 	// content. Rebuild now: the user echo is visible at send time, before any
 	// progress chunk or final reply arrives.
 	m.applyLayout()
 	m.rebuildViewport()
 
-	return m, tea.Batch(
-		m.sendCmd(protocol.RequestTypeMessage, text),
-		m.timeoutCmd(),
-		m.tickCmd(),
-	)
+	return m, cmd
 }
 
 // sendCmd builds and queues a protocol request with a fresh request ID.
@@ -733,7 +743,7 @@ func (m *Model) sendCmdWithID(reqType protocol.RequestType, content, reqID strin
 }
 
 func (m *Model) beginSecretCmd() tea.Cmd {
-	if m.secretRequestID != "" || m.secretMode || m.waiting || len(m.pending) > 0 {
+	if m.secretRequestID != "" || m.secretMode || m.waiting || m.awaitingAnswer() {
 		return nil
 	}
 	requestID := uuid.New().String()
@@ -893,7 +903,7 @@ func (m *Model) handleReply(resp protocol.Response) (tea.Model, tea.Cmd) {
 	default:
 		// ok — render the reply as the turn's final content, then drain the
 		// steering queue (the first pending prompt becomes the live turn).
-		drain := m.completeTurn(resp.Content)
+		drain := m.finishTurn(resp, resp.Content)
 		// A save committed in this Turn starts (or joins) the Post-save
 		// activation cycle; otherwise only incomplete items start one.
 		if resp.ConfigSaved {
@@ -940,7 +950,7 @@ func (m *Model) handleSecretResponse(resp protocol.Response) (tea.Model, tea.Cmd
 			// open editor keeps its contents.
 			return m, m.recvCmd()
 		}
-		if len(m.secretPending) == 0 || m.waiting || len(m.pending) > 0 {
+		if len(m.secretPending) == 0 || m.waiting || m.awaitingAnswer() {
 			m.rebuildViewport()
 
 			return m, tea.Batch(m.recvCmd(), m.advanceActivation())
@@ -953,7 +963,7 @@ func (m *Model) handleSecretResponse(resp protocol.Response) (tea.Model, tea.Cmd
 	}
 	if action == protocol.SecretEntryActionBegin {
 		m.secretOperation = resp.SecretEntry.OperationID
-		if m.waiting || len(m.pending) > 0 {
+		if m.waiting || m.awaitingAnswer() {
 			return m, tea.Batch(m.recvCmd(), m.endSecretCmd())
 		}
 		m.chatEditor = m.ta
@@ -1052,7 +1062,7 @@ func (m *Model) handleLLMUnavailable(resp protocol.Response) (tea.Model, tea.Cmd
 		reply = partial + "\n\n" + reply
 	}
 
-	drain := m.completeTurn(reply)
+	drain := m.finishTurn(resp, reply)
 
 	return m, tea.Batch(m.recvCmd(), drain)
 }
@@ -1069,7 +1079,7 @@ func (m *Model) handleLLMUnavailable(resp protocol.Response) (tea.Model, tea.Cmd
 // beat the owner's reply).
 func (m *Model) appendInfoLine(line string) {
 	if m.state == stateThinking || m.state == stateStreaming {
-		m.curInfo = append(m.curInfo, line)
+		m.body = append(m.body, bodyItem{kind: bodyInfo, text: line})
 		m.rebuildViewport()
 
 		return
@@ -1089,59 +1099,11 @@ func (m *Model) completeCommandBlock(content string) {
 	m.rebuildViewport()
 }
 
-// completeTurn finalises the current turn with the given reply content:
-// archives the echo + reply as a completed turn, clears the live preview,
-// and stops the render tick. Shared by the success path and the
-// llm_unavailable path. Returns the command that sends the first queued
-// steering prompt (nil when the queue is empty).
-func (m *Model) completeTurn(reply string) tea.Cmd {
-	m.activityTool = ""
-	m.activityRequestID = ""
-	// The info lines that arrived inside the turn (a Subagent handback
-	// trace) are archived WITH the turn, between echo and reply.
-	m.completed = append(m.completed, completedTurn{echo: m.curEcho, reply: reply, midInfo: m.curInfo})
-	m.curInfo = nil
-
-	m.curEcho = ""
-	m.buffer.Reset()
-	m.livePreview = ""
-	m.state = stateIdle
-	m.waiting = false
-	m.tickOn = false
-	m.completedDirty = true
-	m.rebuildViewport()
-
-	return m.startNextQueuedTurn()
-}
-
-// startNextQueuedTurn promotes the first queued steering prompt to the live
-// turn: echo it, clear the preview state, arm a FRESH reply timeout (one per
-// sent turn — a queued prompt never inherits the previous turn's), and send.
-// nil when the queue is empty.
-func (m *Model) startNextQueuedTurn() tea.Cmd {
-	if len(m.pending) == 0 {
-		return nil
-	}
-
-	text := m.pending[0]
-	m.pending = m.pending[1:]
-	m.curEcho = text
-	m.buffer.Reset()
-	m.livePreview = ""
-	m.dirty = false
-	m.state = stateThinking
-	m.waiting = true
-	m.tickOn = true
-	m.turnSeq++
-	m.timeoutSeq++
-	m.applyLayout()
-	m.rebuildViewport()
-
-	return tea.Batch(
-		m.sendCmd(protocol.RequestTypeMessage, text),
-		m.timeoutCmd(),
-		m.tickCmd(),
-	)
+// completeTurn finalises the live turn with the given reply content and no
+// wire correlation (a reply that names no request): the live opener, if any,
+// is the consumed message. The wire path is finishTurn.
+func (m *Model) completeTurn(reply string) {
+	_ = m.finishTurn(protocol.Response{}, reply)
 }
 
 func (m *Model) handleActivity(resp protocol.Response) (tea.Model, tea.Cmd) {
@@ -1184,6 +1146,9 @@ func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
 	if resp.Activity != nil {
 		return m.handleActivity(resp)
 	}
+	if model, cmd, ok := m.handleTurnEvent(resp); ok {
+		return model, cmd
+	}
 	if resp.Status == protocol.ResponseStatusError && resp.ErrorCode == protocol.ErrorCodeSecretEntryExpired {
 		m.leaveSecretEditor()
 		m.secretOperation = ""
@@ -1206,7 +1171,7 @@ func (m *Model) handleControl(resp protocol.Response) (tea.Model, tea.Cmd) {
 
 			return m, tea.Batch(m.recvCmd(), m.sendSecretRequest(uuid.New().String(), &protocol.SecretEntryRequest{Action: protocol.SecretEntryActionList}))
 		}
-		if !m.secretMode && m.secretRequestID == "" && !m.waiting && len(m.pending) == 0 && m.actPhase == phaseNone {
+		if !m.secretMode && m.secretRequestID == "" && !m.waiting && !m.awaitingAnswer() && m.actPhase == phaseNone {
 			return m, tea.Batch(m.recvCmd(), m.startActivation())
 		}
 		m.rebuildViewport()
@@ -1565,32 +1530,21 @@ func (m *Model) ensureRenderer() *mdrender.Renderer {
 func (m *Model) invalidateRenderers() {
 	m.renderer = nil
 	m.echoRenderer = nil
-}
-
-// renderEcho renders a user-turn echo block: the dim `❯❯` prefix on the
-// first content line, followed by the rendered markdown, all wrapped in the
-// Pi Agent user-message highlight band (D13).
-func (m *Model) renderEcho(raw string) string {
-	// Trim glamour's leading/trailing newlines before prepending the prefix,
-	// so `❯❯` lands on the first content line instead of its own band row.
-	rendered := strings.Trim(m.ensureEchoRenderer().Render(raw), "\n")
-
-	prefix := lipgloss.NewStyle().Faint(true).Render(echoPromptPrefix)
-
-	return userMessageBlock(prefix+rendered, m.width, m.style == mdrender.StyleDark)
+	m.noticeRenderer = nil
 }
 
 // ensureEchoRenderer lazily constructs the user-echo renderer at the inset
-// width (viewport width minus the two one-cell side insets and the `❯❯`
-// prefix, which occupies band space on the first line), mirroring
-// ensureRenderer's 80-column fallback before the first WindowSizeMsg.
+// width (viewport width minus the two one-cell side insets), mirroring
+// ensureRenderer's 80-column fallback before the first WindowSizeMsg. It
+// preserves typed line breaks: the echo is a blockquote of what the user
+// typed, line for line.
 func (m *Model) ensureEchoRenderer() *mdrender.Renderer {
 	if m.echoRenderer == nil {
-		w := m.width - 2*userMessageInset - lipgloss.Width(echoPromptPrefix)
+		w := m.width - 2*userMessageInset
 		if w < 1 {
 			w = 1
 		}
-		m.echoRenderer = mdrender.New(w, m.style, m.sanitizer)
+		m.echoRenderer = mdrender.NewPreservingNewLines(w, m.style, m.sanitizer)
 	}
 
 	return m.echoRenderer
@@ -1665,15 +1619,29 @@ func (m *Model) renderCompleted() string {
 			continue
 		}
 
-		var b strings.Builder
-		if t.echo != "" {
-			b.WriteString(m.renderEcho(t.echo))
+		if t.notice != "" {
+			blocks = append(blocks, m.renderNoticeBlock(t.notice))
+
+			continue
 		}
-		for _, line := range t.midInfo {
+
+		var b strings.Builder
+		if len(t.heads) > 0 {
+			for i, h := range t.heads {
+				if i > 0 {
+					b.WriteString("\n")
+				}
+
+				b.WriteString(m.renderEchoBlock(h))
+			}
+		} else if t.echo != "" {
+			b.WriteString(m.renderEchoBlock(echoBlock{text: t.echo}))
+		}
+		for _, part := range m.renderBody(t.body) {
 			if b.Len() > 0 {
 				b.WriteString("\n\n")
 			}
-			b.WriteString(infoLabelStyle().Render(line))
+			b.WriteString(part)
 		}
 		if t.reply != "" {
 			if b.Len() > 0 {
@@ -1698,21 +1666,32 @@ func (m *Model) buildContent() string {
 	var parts []string
 	if head != "" {
 		parts = append(parts, head)
-		if m.completedRenderd != "" || m.curEcho != "" || m.livePreview != "" {
+		if m.completedRenderd != "" || len(m.live) > 0 || m.curEcho != "" || m.livePreview != "" {
 			parts = append(parts, "") // blank row between the head block and the transcript
 		}
 	}
 	if m.completedRenderd != "" {
 		parts = append(parts, m.completedRenderd)
 	}
-	if m.curEcho != "" {
-		parts = append(parts, m.renderEcho(m.curEcho))
+	liveHead := m.live
+	if len(liveHead) == 0 && m.curEcho != "" {
+		// A live turn recorded only as raw echo text (no wire correlation).
+		liveHead = []echoBlock{{text: m.curEcho}}
 	}
-	// Info lines that arrived inside the live turn (a Subagent handback
-	// trace) render at their chronological position: after the echo, before
-	// the streaming/final reply.
-	for _, line := range m.curInfo {
-		parts = append(parts, infoLabelStyle().Render(line))
+
+	for _, b := range liveHead {
+		parts = append(parts, m.renderEchoBlock(b))
+	}
+	// The live turn's body (injected steers, Notices, handback traces)
+	// renders at its chronological position: after the opener, before the
+	// streaming/final reply.
+	for i, part := range m.renderBody(m.body) {
+		// A Notice is set off by a blank row; so is whatever follows it.
+		if m.body[i].kind == bodyNotice || (i > 0 && m.body[i-1].kind == bodyNotice) {
+			parts = append(parts, "")
+		}
+
+		parts = append(parts, part)
 	}
 	if m.livePreview != "" {
 		if len(parts) > 0 {
@@ -1721,14 +1700,28 @@ func (m *Model) buildContent() string {
 		parts = append(parts, m.livePreview)
 	}
 
-	// Steering queue (Amendment 3): prompts submitted while a turn is in
-	// flight render as pending echo blocks below the live reply — visible
-	// ahead of their turn, sent FIFO on completion.
-	for _, text := range m.pending {
+	// Notices of another turn than the live one sit at the tail.
+	for _, text := range m.standalone {
 		if len(parts) > 0 {
 			parts = append(parts, "")
 		}
-		parts = append(parts, m.renderEcho(text))
+		parts = append(parts, m.renderNoticeBlock(text))
+	}
+
+	// Messages that are not part of a turn yet render at the live tail: sent
+	// but unacknowledged, steering candidates awaiting their claim, queued
+	// behind the turn, and prompts held locally while the client cannot send.
+	for _, b := range m.tail {
+		if len(parts) > 0 {
+			parts = append(parts, "")
+		}
+		parts = append(parts, m.renderEchoBlock(b))
+	}
+	for _, b := range m.hold {
+		if len(parts) > 0 {
+			parts = append(parts, "")
+		}
+		parts = append(parts, m.renderEchoBlock(b))
 	}
 
 	return strings.Join(parts, "\n")

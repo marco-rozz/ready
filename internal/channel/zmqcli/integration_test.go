@@ -191,6 +191,7 @@ func TestIntegration_HappyPath(t *testing.T) {
 	resp := sendAndRecv(t, req, protocol.Request{
 		ConnectionID: sessionID,
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "hello",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -276,6 +277,7 @@ func TestIntegration_BusyRejection(t *testing.T) {
 	resp := sendAndRecv(t, reqA, protocol.Request{
 		ConnectionID: sessionIDA,
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "still alive",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -452,6 +454,7 @@ func TestIntegration_SessionTimeout(t *testing.T) {
 	resp := sendAndRecv(t, req, protocol.Request{
 		ConnectionID: sessionID,
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "too late",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -537,6 +540,7 @@ func TestIntegration_NoTokenInLogs(t *testing.T) {
 	sendAndRecv(t, req, protocol.Request{
 		ConnectionID: sessionID,
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "test message",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -591,6 +595,7 @@ func TestIntegration_SendFailureReleasesSession(t *testing.T) {
 	msgData, _ := protocol.Marshal(protocol.Request{
 		ConnectionID: sessionID,
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "hello",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})
@@ -708,6 +713,7 @@ func TestIntegration_ReplyTimeoutReleasesSession(t *testing.T) {
 	msgData, _ := protocol.Marshal(protocol.Request{
 		ConnectionID: sessionID,
 		Type:         protocol.RequestTypeMessage,
+		RequestID:    autoReqID,
 		Content:      "please wait",
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
 	})

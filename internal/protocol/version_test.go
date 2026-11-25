@@ -52,6 +52,7 @@ func TestRequestVersionFieldRules(t *testing.T) {
 				Type:            typ,
 				Timestamp:       "2026-10-25T10:00:00Z",
 				ProtocolVersion: Version,
+				RequestID:       "r1",
 			}
 			if err := req.Validate(); err == nil || !strings.Contains(err.Error(), "session_start only") {
 				t.Fatalf("type %s accepted protocol_version: %v", typ, err)
@@ -93,8 +94,8 @@ func TestVersionResponseFieldRoundTrip(t *testing.T) {
 }
 
 func TestErrorCodeConstants(t *testing.T) {
-	if Version != 6 {
-		t.Fatalf("subagent-panel-observability is protocol 6, got %d", Version)
+	if Version != 8 {
+		t.Fatalf("say-mid-turn-notice is protocol 8, got %d", Version)
 	}
 	if ErrorCodeProtocolMismatch != "protocol_mismatch" {
 		t.Fatalf("unexpected mismatch code %q", ErrorCodeProtocolMismatch)

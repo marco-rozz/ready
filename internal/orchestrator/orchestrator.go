@@ -413,6 +413,16 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 				return outcome, nil
 			}
 
+			// Turn-control sentinel (turn-steering S16): a steer or stop is
+			// caller control, never provider health — no retry, no advance,
+			// no demotion/cooldown, no chain exhaustion, no promotion. It
+			// returns before every context and classification branch below.
+			if _, preempted := agent.IsPreempt(err); preempted {
+				candidateCancel()
+
+				return outcome, err
+			}
+
 			lastErr, lastOutcome = err, outcome
 			if errors.Is(err, errdigest.ErrGuardRepeated) || errors.Is(err, errdigest.ErrGuardCapacity) || errors.Is(err, errdigest.ErrGuardEditRetries) {
 				candidateCancel()
@@ -469,7 +479,7 @@ func (o *Orchestrator) RunTurn(ctx context.Context, req TurnRequest, onChunk fun
 				Dur("backoff", backoff).
 				Msg("LLM retrying same candidate in turn")
 
-			if waitErr := waitRetry(candidateCtx, backoff); waitErr != nil {
+			if waitErr := waitRetry(candidateCtx, backoff, retrySignal(ctx)); waitErr != nil {
 				if ctx.Err() != nil {
 					candidateCancel()
 
@@ -544,6 +554,9 @@ func (o *Orchestrator) attemptRunner(
 		}
 	}
 
+	// Tools run during this attempt see the attempting candidate's reference.
+	ctx = llm.WithAttemptReference(ctx, cand.Ref)
+
 	if onChunk == nil {
 		return runner.RunMessagesStreaming(ctx, req.SessionKey, conversation, nil)
 	}
@@ -599,12 +612,26 @@ func retryBackoff(base, maxDelay time.Duration, attempt int) time.Duration {
 	return d
 }
 
-func waitRetry(ctx context.Context, d time.Duration) error {
+// retrySignal returns the per-Turn steering signal armed in ctx (nil when
+// none): it ends an in-turn retry backoff early, without cancelling the Turn
+// context, so the next assembly can claim the pending candidate.
+func retrySignal(ctx context.Context) <-chan struct{} {
+	if src := agent.PreemptSourceFrom(ctx); src != nil {
+		return src.Signal()
+	}
+
+	return nil
+}
+
+// waitRetry sleeps for d, ending early (nil error) when wake fires.
+func waitRetry(ctx context.Context, d time.Duration, wake <-chan struct{}) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 
 	select {
 	case <-timer.C:
+		return nil
+	case <-wake:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

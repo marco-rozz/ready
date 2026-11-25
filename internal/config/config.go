@@ -57,6 +57,7 @@ type Config struct {
 	Subagents     SubagentsConfig            `yaml:"subagents"`
 	Sessions      SessionsConfig             `yaml:"sessions"`
 	Compaction    CompactionConfig           `yaml:"compaction"`
+	Steering      SteeringConfig             `yaml:"steering"`
 	Logging       LoggingConfig              `yaml:"logging"`
 	HomeAssistant HomeAssistantConfig        `yaml:"home_assistant"`
 	// DefaultProfile names the active MCP exposure profile resolved at boot. It
@@ -557,6 +558,8 @@ type ZMQCLIChannelConfig struct {
 	// channel. Evaluated only when a new Connection begins (connection-
 	// oriented channel).
 	SessionReset *SessionResetConfig `yaml:"session_reset"`
+	// Steering overrides steering.enabled for this channel (nil = inherit).
+	Steering *bool `yaml:"steering"`
 }
 
 // CLIChannelConfig holds CLI-specific settings.
@@ -566,6 +569,7 @@ type CLIChannelConfig struct {
 	FormatterPostStep bool                `yaml:"formatter_post_step"`
 	Bootstrap         []string            `yaml:"bootstrap"`
 	SessionReset      *SessionResetConfig `yaml:"session_reset"`
+	Steering          *bool               `yaml:"steering"`
 }
 
 // SerialChannelConfig holds serial/PETSCII-specific settings.
@@ -577,6 +581,7 @@ type SerialChannelConfig struct {
 	FormatterPostStep bool                `yaml:"formatter_post_step"`
 	Bootstrap         []string            `yaml:"bootstrap"`
 	SessionReset      *SessionResetConfig `yaml:"session_reset"`
+	Steering          *bool               `yaml:"steering"`
 }
 
 // TelegramChannelConfig holds Telegram bot settings.
@@ -588,6 +593,7 @@ type TelegramChannelConfig struct {
 	FormatterPostStep bool                `yaml:"formatter_post_step"`
 	Bootstrap         []string            `yaml:"bootstrap"`
 	SessionReset      *SessionResetConfig `yaml:"session_reset"`
+	Steering          *bool               `yaml:"steering"`
 }
 
 // HomeAssistantConfig holds settings for the HA WebSocket digital twin and
@@ -1195,6 +1201,11 @@ func (c *Config) validate() error {
 	if err := c.validateStateConfined(); err != nil {
 		return err
 	}
+	// The reserved knowledge root okfs/ is disjoint from every configurable
+	// runtime path (okf-native-consumption D7).
+	if err := c.validateKnowledgeRootDisjoint(); err != nil {
+		return err
+	}
 
 	// A skill used as formatter_skill must not also appear in that channel's
 	// bootstrap list — the two mechanisms are mutually exclusive.
@@ -1205,10 +1216,10 @@ func (c *Config) validate() error {
 	}
 
 	channelChecks := []channelCheck{
-		{"cli", c.Channels.CLI.FormatterSkill, c.Channels.CLI.Bootstrap},
-		{"zmqcli", c.Channels.ZMQCLI.FormatterSkill, c.Channels.ZMQCLI.Bootstrap},
-		{"serial", c.Channels.Serial.FormatterSkill, c.Channels.Serial.Bootstrap},
-		{"telegram", c.Channels.Telegram.FormatterSkill, c.Channels.Telegram.Bootstrap},
+		{chanCLI, c.Channels.CLI.FormatterSkill, c.Channels.CLI.Bootstrap},
+		{segZmqcli, c.Channels.ZMQCLI.FormatterSkill, c.Channels.ZMQCLI.Bootstrap},
+		{chanSerial, c.Channels.Serial.FormatterSkill, c.Channels.Serial.Bootstrap},
+		{segTelegram, c.Channels.Telegram.FormatterSkill, c.Channels.Telegram.Bootstrap},
 	}
 
 	for _, ch := range channelChecks {

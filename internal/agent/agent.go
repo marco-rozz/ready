@@ -202,10 +202,13 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 	// A derived context so an abandoned turn (the caller's deadline arrived
 	// while the executor was still running) stops scheduling further model
 	// calls; on the normal path the cancel is a post-return no-op.
+	ctx, runOpts, guard := armAttempt(ctx)
+	defer guard.stop()
+
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
-	iter := r.Run(runCtx, adkMessages)
+	iter := r.Run(runCtx, adkMessages, runOpts...)
 	events := pumpIterator(iter)
 
 	// Start a per-turn thought tap; no-op when tap is nil or disabled.
@@ -227,6 +230,12 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 	var forwarded func(string)
 	if onChunk != nil {
 		forwarded = func(chunk string) {
+			// Delivery CAS: once preempted no chunk is forwarded; once the
+			// first chunk is forwarded the call is no longer preemptible.
+			if !guard.commit() {
+				return
+			}
+
 			if chunk != "" {
 				contentDelivered = true
 			}
@@ -336,7 +345,7 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 	// A complete final answer means the caller received content even on the
 	// non-streaming path (onChunk == nil), so ContentDelivered stays accurate
 	// for both delivery modes.
-	if finalContent != "" {
+	if finalContent != "" && guard.result() == nil {
 		contentDelivered = true
 	}
 
@@ -345,6 +354,12 @@ func (a *Agent) RunMessagesStreaming(ctx context.Context, sessionKey string, mes
 		ToolCallStarted:   toolCallStarted,
 		ToolCallCompleted: toolCallCompleted,
 		ContentDelivered:  contentDelivered,
+	}
+
+	// A preempted attempt is not a failure: surface the turn-control
+	// sentinel (never the stream error the cancellation caused).
+	if pe := guard.result(); pe != nil {
+		return outcome, pe
 	}
 
 	// Any error in the turn fails the turn, even when partial content was

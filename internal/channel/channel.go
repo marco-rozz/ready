@@ -21,6 +21,38 @@ type Channel interface {
 	Close() error
 }
 
+// Origin says who produced an inbound Message. It affects steering
+// eligibility only: an item of any origin, including OriginUnspecified, is
+// still processed as an ordinary Turn or command.
+type Origin uint8
+
+const (
+	// OriginUnspecified is the zero value: a producer that did not set the
+	// field. It is never steerable (fail-closed).
+	OriginUnspecified Origin = iota
+	// OriginHuman is a message typed by a person on an attended channel.
+	OriginHuman
+	// OriginHarness is an item produced by the daemon itself (triggers,
+	// alerts, wakes, synthetic Turns).
+	OriginHarness
+	// OriginScripted is a one-shot scripted request (ZMQ exec).
+	OriginScripted
+)
+
+// String returns the origin's log/diagnostic name.
+func (o Origin) String() string {
+	switch o {
+	case OriginHuman:
+		return "human"
+	case OriginHarness:
+		return "harness"
+	case OriginScripted:
+		return "scripted"
+	default:
+		return "unspecified"
+	}
+}
+
 // Message represents a single communication unit exchanged between
 // a channel and the agent.
 type Message struct {
@@ -33,6 +65,9 @@ type Message struct {
 	// Metadata holds optional per-channel key-value data
 	// (e.g., Telegram chat_id).
 	Metadata map[string]string
+
+	// Origin identifies who produced the message (set by every producer).
+	Origin Origin
 }
 
 // ConnectionInfo is what a Connection start hook reports back to a
@@ -63,4 +98,57 @@ type ConnectionOriented interface {
 	// OnConnectionStart wires the hook invoked at every successful
 	// Connection start.
 	OnConnectionStart(hook ConnectionStartHook)
+}
+
+// NoticeOutcome is the result class of one Mid-turn Notice delivery
+// (say-mid-turn-notice). A failure before any part was accepted is not an
+// outcome: SendNotice returns an error instead.
+type NoticeOutcome string
+
+const (
+	// NoticeDelivered: the channel transport accepted the whole Notice for
+	// display (never "read by the human").
+	NoticeDelivered NoticeOutcome = "delivered"
+	// NoticePartial: parts 1..DeliveredParts of Parts were accepted, then the
+	// transport failed.
+	NoticePartial NoticeOutcome = "partial"
+	// NoticeNotShown: no client can show the Notice; Reason says why.
+	NoticeNotShown NoticeOutcome = "not_shown"
+)
+
+// Reasons of a NoticeNotShown outcome.
+const (
+	// NoticeReasonClientDoesNotRender: the active Connection did not declare
+	// the Notice rendering capability (--exec, --raw, piped line reader).
+	NoticeReasonClientDoesNotRender = "client_does_not_render"
+	// NoticeReasonNoConnection: no client is attached to the address.
+	NoticeReasonNoConnection = "no_connection"
+	// NoticeReasonChannelUnsupported: the channel implements no NoticeSender.
+	NoticeReasonChannelUnsupported = "channel_unsupported"
+	// NoticeReasonNoChannel: the Turn context carries no deliverer (probes,
+	// auxiliary consumers).
+	NoticeReasonNoChannel = "no_channel"
+)
+
+// NoticeResult is the outcome of NoticeSender.SendNotice.
+type NoticeResult struct {
+	Outcome NoticeOutcome
+	// Parts and DeliveredParts are set for NoticePartial (and may be set for
+	// NoticeDelivered by multi-part transports).
+	Parts          int
+	DeliveredParts int
+	// Reason is set for NoticeNotShown only.
+	Reason string
+}
+
+// NoticeSender is the optional capability of a channel that can show a
+// Mid-turn Notice: a new, self-contained act (never a preview, never an edit
+// of a streamed message). A channel without it yields
+// NoticeNotShown/channel_unsupported.
+type NoticeSender interface {
+	// SendNotice shows text on the conversation identified by meta. A
+	// non-nil error means the transport failed before any part was accepted;
+	// a failure after at least one accepted part is reported as NoticePartial
+	// with a nil error.
+	SendNotice(ctx context.Context, meta map[string]string, text string) (NoticeResult, error)
 }

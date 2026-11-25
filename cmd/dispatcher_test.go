@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/marco-rozz/ready/internal/channel"
+	"github.com/marco-rozz/ready/internal/steer"
 )
 
 // TestDispatcher_SeparateSessionsRunInParallel verifies the core requirement:
@@ -41,7 +42,7 @@ func TestDispatcher_SeparateSessionsRunInParallel(t *testing.T) {
 
 			return m.ChannelName
 		},
-		workers: make(map[string]chan channel.Message),
+		workers: make(map[string]*steer.Inbox),
 		processFn: func(_ context.Context, msg channel.Message) {
 			started <- struct{}{}
 			start := time.Now()
@@ -135,7 +136,7 @@ func TestDispatcher_SameSessionFIFO(t *testing.T) {
 		keyFn: func(m channel.Message) string {
 			return m.ChannelName
 		},
-		workers: make(map[string]chan channel.Message),
+		workers: make(map[string]*steer.Inbox),
 		processFn: func(_ context.Context, msg channel.Message) {
 			mu.Lock()
 			active++
@@ -195,7 +196,7 @@ func TestDispatcher_RecoversFromPanic(t *testing.T) {
 		ctx:      ctx,
 		incoming: in,
 		keyFn:    func(m channel.Message) string { return m.ChannelName },
-		workers:  make(map[string]chan channel.Message),
+		workers:  make(map[string]*steer.Inbox),
 		processFn: func(_ context.Context, msg channel.Message) {
 			if msg.Content == "boom" {
 				panic("boom")

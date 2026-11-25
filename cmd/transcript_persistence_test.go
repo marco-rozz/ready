@@ -91,7 +91,7 @@ func (m *transcriptModel) callCount() int {
 type lampTool struct{ runs atomic.Int32 }
 
 func (t *lampTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{Name: lampToolName, Desc: "turns a light on"}, nil
+	return &schema.ToolInfo{Name: lampToolName, Desc: lampDesc}, nil
 }
 
 func (t *lampTool) InvokableRun(_ context.Context, args string, _ ...tool.Option) (string, error) {
@@ -100,7 +100,7 @@ func (t *lampTool) InvokableRun(_ context.Context, args string, _ ...tool.Option
 	}
 	t.runs.Add(1)
 
-	return `{"state":"on"}`, nil
+	return lampOnJSON, nil
 }
 
 // lampCall is an Ollama-shaped tool call: no id.
@@ -118,7 +118,7 @@ func finalAnswer(text string) func([]*schema.Message) (*schema.Message, error) {
 // useOrchestrator swaps the env's plain runner for a single-candidate
 // orchestrator over a real agent.Agent, so the restart gate and per-attempt
 // re-assembly are exercised.
-func (e *termEnv) useOrchestrator(t *testing.T, m model.ToolCallingChatModel, lamp *lampTool, retries int) {
+func (e *termEnv) useOrchestrator(t *testing.T, m model.ToolCallingChatModel, lamp tool.BaseTool, retries int) {
 	t.Helper()
 
 	a, err := agent.New(context.Background(), agent.Config{ChatModel: m, Tools: []tool.BaseTool{lamp}}, nil)
@@ -128,7 +128,7 @@ func (e *termEnv) useOrchestrator(t *testing.T, m model.ToolCallingChatModel, la
 
 	orch := orchestrator.New(orchestrator.Config{
 		Candidates: []orchestrator.Candidate{{
-			CandidateDescriptor: llm.CandidateDescriptor{Ref: "o::m", Provider: "o", ModelID: "m", API: "ollama", Layout: llm.LayoutTailDynamic},
+			CandidateDescriptor: llm.CandidateDescriptor{Ref: "o::m", Provider: "o", ModelID: "m", API: wireOllama, Layout: llm.LayoutTailDynamic},
 			Runner:              a,
 		}},
 		Recovery: config.LLMRecoveryConfig{
@@ -251,7 +251,7 @@ func TestTranscriptGuardClosesToolGroupWithoutRepeatingSideEffect(t *testing.T) 
 		t.Fatal(err)
 	}
 	orch := orchestrator.New(orchestrator.Config{Candidates: []orchestrator.Candidate{{
-		CandidateDescriptor: llm.CandidateDescriptor{Ref: "o::m", Provider: "o", ModelID: "m", API: "ollama", Layout: llm.LayoutTailDynamic}, Runner: a,
+		CandidateDescriptor: llm.CandidateDescriptor{Ref: "o::m", Provider: "o", ModelID: "m", API: wireOllama, Layout: llm.LayoutTailDynamic}, Runner: a,
 	}}, Recovery: config.LLMRecoveryConfig{Soft: config.LadderConfig{InitialCooldown: time.Minute, MaxCooldown: time.Hour}, Hard: config.LadderConfig{InitialCooldown: time.Minute, MaxCooldown: time.Hour}, BackoffFactor: 2, ProbeTimeout: time.Second, IdleProbeWindow: time.Minute}}, zerolog.Nop())
 	env.agentReg = &agentRegistry{exec: orch, orch: orch, layout: llm.LayoutTailDynamic}
 	env.run(cliMsg("run a failing tool"))
@@ -299,7 +299,7 @@ func TestTranscript_StreamingToolTurnPersistsGroupsMidTurn(t *testing.T) {
 	}
 
 	final := env.jsonlLines(t)
-	if got := roles(final); got != "user,turn_context,assistant,tool,assistant" {
+	if got := roles(final); got != kindsToolAnswer {
 		t.Fatalf("expected the final reply appended once, got %q", got)
 	}
 	if final[4].Content != "the kitchen light is on" {
@@ -413,7 +413,7 @@ func TestTranscript_RetryResumesFromGrownHistory(t *testing.T) {
 	}
 	assertStrictPairing(t, resumed)
 
-	if got := roles(env.jsonlLines(t)); got != "user,turn_context,assistant,tool,assistant" {
+	if got := roles(env.jsonlLines(t)); got != kindsToolAnswer {
 		t.Fatalf("expected one transcript for the turn (no duplicated group), got %q", got)
 	}
 }

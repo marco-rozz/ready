@@ -6,6 +6,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,25 @@ const MaxMessageLength = 4096
 
 // MetadataChatID is the Metadata key carrying the Telegram chat_id (base-10 string).
 const MetadataChatID = "chat_id"
+
+// MetadataUserID carries the sender's numeric user id (base-10 string); it is
+// absent when the update has no sender. MetadataChatType carries the Bot API
+// chat type ("private", "group", "supergroup", "channel"). Together they let
+// the daemon decide whether a message comes from an authenticated principal
+// (see VerifyPrincipal).
+const (
+	// MetadataPreformatted marks an outgoing message whose content is HTML the
+	// daemon built itself (escaped, with at most <pre>/<code> wrappers): Send
+	// skips the sanitizer, which would otherwise keep allowed-looking tags
+	// found inside quoted content as live markup.
+	MetadataPreformatted = "preformatted_html"
+
+	MetadataUserID = "user_id"
+	// MetadataMessageID carries the incoming Telegram message id (base-10
+	// string): the target of the injected-steer reaction.
+	MetadataMessageID = "message_id"
+	MetadataChatType  = "chat_type"
+)
 
 // Sentinel errors surfaced by the channel.
 var (
@@ -65,12 +85,22 @@ type commandRegistrar interface {
 	SetCommands(ctx context.Context, commands []tgbotapi.BotCommand) error
 }
 
+// reactor is the optional bot surface for acknowledging an injected steering
+// message (turn-steering S17): a setMessageReaction request, which the
+// vendored library predates and is therefore sent as a raw Bot API call. The
+// live wrapper implements it; mocks that do not are simply skipped.
+type reactor interface {
+	SetReaction(ctx context.Context, chatID int64, messageID int, emoji string) error
+}
+
 // sessionCommands are the daemon-side Session commands registered in the
 // Bot API command menu.
 func sessionCommands() []tgbotapi.BotCommand {
 	return []tgbotapi.BotCommand{
 		{Command: "new", Description: "Start a new session"},
 		{Command: "compact", Description: "Compact the conversation context"},
+		{Command: "verify", Description: "Verify a knowledge concept (two-step)"},
+		{Command: "stop", Description: "Stop the current request"},
 	}
 }
 
@@ -167,6 +197,31 @@ func (w *botWrapper) SetCommands(ctx context.Context, commands []tgbotapi.BotCom
 	return nil
 }
 
+// SetReaction sets one emoji reaction on a message (setMessageReaction) through
+// the library's raw request path.
+func (w *botWrapper) SetReaction(ctx context.Context, chatID int64, messageID int, emoji string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("telegram: setMessageReaction cancelled: %w", err)
+	}
+
+	reaction, err := json.Marshal([]map[string]string{{"type": "emoji", "emoji": emoji}})
+	if err != nil {
+		return fmt.Errorf("telegram: encode reaction: %w", err)
+	}
+
+	params := tgbotapi.Params{
+		"chat_id":    strconv.FormatInt(chatID, 10),
+		"message_id": strconv.Itoa(messageID),
+		"reaction":   string(reaction),
+	}
+
+	if _, err := w.api.MakeRequest("setMessageReaction", params); err != nil {
+		return fmt.Errorf("telegram: setMessageReaction failed: %w", err)
+	}
+
+	return nil
+}
+
 func (w *botWrapper) GetUpdates(config tgbotapi.UpdateConfig) ([]tgbotapi.Update, error) {
 	return w.api.GetUpdates(config)
 }
@@ -180,10 +235,14 @@ func (w *botWrapper) StopReceivingUpdates() {
 var (
 	_ botAPI           = (*botWrapper)(nil)
 	_ commandRegistrar = (*botWrapper)(nil)
+	_ reactor          = (*botWrapper)(nil)
 )
 
 // Guarantees at compile time that Channel implements channel.Channel.
-var _ channel.Channel = (*Channel)(nil)
+var (
+	_ channel.Channel      = (*Channel)(nil)
+	_ channel.NoticeSender = (*Channel)(nil)
+)
 
 // Channel is the Telegram implementation of channel.Channel.
 type Channel struct {
@@ -422,13 +481,68 @@ func (c *Channel) translate(upd tgbotapi.Update) *channel.Message {
 		return nil
 	}
 
+	md := map[string]string{MetadataChatID: chatIDStr, MetadataMessageID: strconv.Itoa(upd.Message.MessageID)}
+	if upd.Message.From != nil {
+		md[MetadataUserID] = strconv.FormatInt(upd.Message.From.ID, 10)
+	}
+	if upd.Message.Chat.Type != "" {
+		md[MetadataChatType] = upd.Message.Chat.Type
+	}
+
 	return &channel.Message{
 		Content:     c.stripBotMention(text),
 		ChannelName: ChannelName,
-		Metadata: map[string]string{
-			MetadataChatID: chatIDStr,
-		},
+		Metadata:    md,
+		Origin:      channel.OriginHuman,
 	}
+}
+
+// steerReaction is the emoji set on a message the agent absorbed mid-turn.
+const steerReaction = "👀"
+
+// AcknowledgeSteer sets the 👀 reaction on a message that was injected into a
+// running Turn. It is best-effort by design: a failed or unsupported call is
+// DEBUG-logged and never affects the Turn.
+func (c *Channel) AcknowledgeSteer(ctx context.Context, md map[string]string) {
+	r, ok := c.bot.(reactor)
+	if !ok {
+		return
+	}
+
+	chatID, err := strconv.ParseInt(md[MetadataChatID], 10, 64)
+	if err != nil {
+		return
+	}
+
+	messageID, err := strconv.Atoi(md[MetadataMessageID])
+	if err != nil || messageID == 0 {
+		return
+	}
+
+	if err := r.SetReaction(ctx, chatID, messageID, steerReaction); err != nil {
+		c.logger.Debug().Err(err).Str("chat_id", md[MetadataChatID]).Msg("steer reaction failed (ignored)")
+	}
+}
+
+// VerifyPrincipal reports whether a message with the given metadata comes
+// from an authenticated principal for human verification: a private chat
+// whose sender's numeric user id appears verbatim in allow_from. A matching
+// chat id or username never qualifies (a whitelisted group admits every
+// member; usernames are mutable) and an empty allow_from never qualifies.
+func (c *Channel) VerifyPrincipal(md map[string]string) bool {
+	if len(c.allowFrom) == 0 || md[MetadataChatType] != "private" {
+		return false
+	}
+	uid := md[MetadataUserID]
+	if uid == "" {
+		return false
+	}
+	if _, err := strconv.ParseInt(uid, 10, 64); err != nil {
+		return false
+	}
+	_, ok := c.allowFrom[uid]
+
+	return ok
 }
 
 // isAllowed reports whether the sender of msg is permitted by the whitelist.
@@ -505,25 +619,74 @@ func (c *Channel) Send(ctx context.Context, msg channel.Message) error {
 		return fmt.Errorf("%w: %q", ErrInvalidChatID, chatIDStr)
 	}
 
-	sanitized := sanitizeHTML(msg.Content)
+	_, _, err = c.sendParts(ctx, chatID, msg.Content, msg.Metadata[MetadataPreformatted] == "1")
 
-	for _, chunk := range splitMessage(sanitized, MaxMessageLength) {
+	return err
+}
+
+// sendParts is the shared send pipeline of the final reply and of Mid-turn
+// Notices: supported-tag sanitisation (skipped when preformatted), splitting
+// at the message limit, per-part tag balancing and the plain-text fallback.
+// It returns how many parts were accepted and how many there were; on error
+// the parts before the failing one were already sent.
+func (c *Channel) sendParts(ctx context.Context, chatID int64, content string, preformatted bool) (sent, total int, err error) {
+	sanitized := sanitizeHTML(content)
+	if preformatted {
+		sanitized = content
+	}
+
+	chunks := splitMessage(sanitized, MaxMessageLength)
+	total = len(chunks)
+
+	for _, chunk := range chunks {
 		// A chunk boundary can fall between an opening and a closing tag of
 		// a globally balanced message; rebalance each chunk for delivery.
 		chunk = balanceTags(chunk)
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("telegram: send cancelled: %w", ctx.Err())
+			return sent, total, fmt.Errorf("telegram: send cancelled: %w", ctx.Err())
 		default:
 		}
 
 		if sendErr := c.sendChunk(ctx, chatID, chunk); sendErr != nil {
-			return sendErr
+			return sent, total, sendErr
 		}
+
+		sent++
 	}
 
-	return nil
+	return sent, total, nil
+}
+
+// SendNotice shows a Mid-turn Notice as new message(s) to the Turn's chat
+// through the same pipeline as the final reply (say-mid-turn-notice). It
+// never edits a streaming message and leaves the typing loop untouched.
+// Accepted parts are counted: all ⇒ delivered; some ⇒ partial (nil error);
+// none ⇒ an error (nothing was shown).
+func (c *Channel) SendNotice(ctx context.Context, meta map[string]string, text string) (channel.NoticeResult, error) {
+	chatIDStr := meta[MetadataChatID]
+	if chatIDStr == "" {
+		return channel.NoticeResult{}, ErrMissingChatID
+	}
+
+	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+	if err != nil {
+		return channel.NoticeResult{}, fmt.Errorf("%w: %q", ErrInvalidChatID, chatIDStr)
+	}
+
+	sent, total, err := c.sendParts(ctx, chatID, text, false)
+
+	switch {
+	case err == nil:
+		return channel.NoticeResult{Outcome: channel.NoticeDelivered, Parts: total, DeliveredParts: sent}, nil
+	case sent > 0:
+		c.logger.Warn().Err(err).Int("parts", total).Int("delivered_parts", sent).Msg("notice partially delivered")
+
+		return channel.NoticeResult{Outcome: channel.NoticePartial, Parts: total, DeliveredParts: sent}, nil
+	default:
+		return channel.NoticeResult{}, err
+	}
 }
 
 // sendChunk sends a single text chunk to chatID in HTML mode.  If the

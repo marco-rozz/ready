@@ -90,6 +90,14 @@ func reqSendRecv(t *testing.T, req zmq4.Socket, payload []byte) []byte {
 func doHandshake(t *testing.T, req zmq4.Socket, sessionID, secret string) protocol.Response {
 	t.Helper()
 
+	return doHandshakeNotices(t, req, sessionID, secret, false)
+}
+
+// doHandshakeNotices is doHandshake declaring the Notice rendering capability
+// on the authenticating round when rendersNotices is set.
+func doHandshakeNotices(t *testing.T, req zmq4.Socket, sessionID, secret string, rendersNotices bool) protocol.Response {
+	t.Helper()
+
 	// Round 1: probe.
 	probe, _ := protocol.Marshal(protocol.Request{
 		ConnectionID:    sessionID,
@@ -114,6 +122,7 @@ func doHandshake(t *testing.T, req zmq4.Socket, sessionID, secret string) protoc
 		ProtocolVersion: protocol.Version,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 		AuthToken:       hmacHex(secret, challengeResp.Content),
+		RendersNotices:  rendersNotices,
 	})
 	raw = reqSendRecv(t, req, verify)
 

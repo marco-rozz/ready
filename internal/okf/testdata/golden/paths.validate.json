@@ -1,0 +1,16 @@
+{
+  "errors": 0,
+  "files_checked": 5,
+  "findings": [
+    {
+      "code": "W115",
+      "level": "warning",
+      "line": 7,
+      "message": "link target 'nope.md' is not in the bundle (section 6.1)",
+      "path": "a/b/c.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": "0.3",
+  "warnings": 1
+}

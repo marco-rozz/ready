@@ -70,7 +70,7 @@ func TestSecretEditorIsolatesDraftsLiteralSlashValuesAndCorrelation(t *testing.T
 			if m.secretMode || m.ta.Value() != "saved chat draft" || m.secretEditor.Value() != "" {
 				t.Fatal("secret editor did not restore separate chat draft")
 			}
-			chatState := m.curEcho + strings.Join(m.pending, " ") + fmt.Sprint(m.completed) + m.content
+			chatState := m.curEcho + fmt.Sprint(m.hold) + fmt.Sprint(m.tail) + fmt.Sprint(m.completed) + m.content
 			if strings.Contains(chatState, value) || strings.Contains(m.secretEditor.Value(), value) {
 				t.Fatal("credential leaked into chat state")
 			}
@@ -118,11 +118,16 @@ func TestSecretEditorRefusalGuidanceAndSteeringGate(t *testing.T) {
 		}
 	}
 	m, _ := steeringTestModel(t)
-	m.pending = []string{"queued chat"}
+	m.hold = []echoBlock{{text: "held chat", stage: stHeld}}
 	if m.beginSecretCmd() != nil {
-		t.Fatal("steering queue did not block entry")
+		t.Fatal("the local prompt hold did not block entry")
 	}
-	m.pending = nil
+	m.hold = nil
+	m.sentIDs["r1"] = true
+	if m.beginSecretCmd() != nil {
+		t.Fatal("an unanswered message did not block entry")
+	}
+	delete(m.sentIDs, "r1")
 	m.waiting = true
 	if m.beginSecretCmd() != nil {
 		t.Fatal("in-flight turn did not block entry")

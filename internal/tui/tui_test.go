@@ -171,8 +171,8 @@ func TestProgressiveRenderAndReplyFlushNoDup(t *testing.T) {
 	if m.completed[0].reply != "Hello world!" {
 		t.Errorf("completed reply = %q, want %q", m.completed[0].reply, "Hello world!")
 	}
-	if m.completed[0].echo != testEchoMessage {
-		t.Errorf("completed echo = %q, want %q", m.completed[0].echo, testEchoMessage)
+	if heads := m.completed[0].heads; len(heads) != 1 || heads[0].text != testEchoMessage {
+		t.Errorf("completed heads = %+v, want the one echo %q", heads, testEchoMessage)
 	}
 	// No double print: livePreview cleared, curEcho cleared.
 	if m.livePreview != "" || m.curEcho != "" {
@@ -621,12 +621,12 @@ func TestEchoRedactedBeforeRender(t *testing.T) {
 	m := NewModel(d, Options{ConnectionID: "s", Sanitizer: san})
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	echo := m.renderEcho("my path is " + home + "/secret")
+	echo := m.renderEchoBlock(echoBlock{text: "my path is " + home + "/secret"})
 	if strings.Contains(echo, home) {
 		t.Errorf("echo rendered an un-redacted home prefix: %q", echo)
 	}
-	if !strings.Contains(echo, "❯❯") {
-		t.Errorf("echo missing ❯❯ prompt prefix: %q", echo)
+	if strings.Contains(echo, "❯❯") {
+		t.Errorf("the quoted echo must not carry the editor prompt: %q", echo)
 	}
 }
 
@@ -643,7 +643,7 @@ func TestEchoUserMessageBlockShape(t *testing.T) {
 	m := NewModel(d, Options{ConnectionID: "s"})
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 
-	echo := m.renderEcho(testEchoMessage)
+	echo := m.renderEchoBlock(echoBlock{text: testEchoMessage})
 	lines := strings.Split(echo, "\n")
 	if len(lines) < 3 {
 		t.Fatalf("echo block = %d lines, want at least 3 (padding + content): %q", len(lines), echo)
@@ -668,7 +668,7 @@ func TestEchoUserMessageBlockLightTheme(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 	m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 255, G: 255, B: 255, A: 255}})
 
-	echo := m.renderEcho(testEchoMessage)
+	echo := m.renderEchoBlock(echoBlock{text: testEchoMessage})
 	if !strings.Contains(echo, "48;2;232;232;232") { // #e8e8e8 as truecolor bg SGR
 		t.Errorf("echo missing light background colour %s: %q", userMessageBgLight, echo)
 	}
@@ -686,7 +686,7 @@ func TestEchoBlockSinglePaddingBand(t *testing.T) {
 	m := NewModel(d, Options{ConnectionID: "s", Sanitizer: privacy.New(nil)})
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 
-	lines := strings.Split(m.renderEcho(testEchoMessage), "\n")
+	lines := strings.Split(m.renderEchoBlock(echoBlock{text: testEchoMessage}), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("echo block = %d lines, want exactly 3 (top pad + text + bottom pad): %q",
 			len(lines), lines)
@@ -703,7 +703,7 @@ func TestEchoBackgroundSurvivesInlineResets(t *testing.T) {
 	m := NewModel(d, Options{ConnectionID: "s", Sanitizer: privacy.New(nil)})
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
 
-	echo := m.renderEcho(testEchoMessage)
+	echo := m.renderEchoBlock(echoBlock{text: testEchoMessage})
 	const band = "\x1b[48;2;52;53;65"
 	for _, reset := range []string{"\x1b[m", "\x1b[0m", "\x1b[49m"} {
 		rest := echo

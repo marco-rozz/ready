@@ -1,7 +1,7 @@
 ---
 name: humanizer-formatter
 description: "Formatter skill: rewrite the reply so it does not read as AI-generated, then output ONLY the final humanized text. No drafts, no audits, no change summaries."
-version: "1.0"
+version: "1.1"
 ---
 
 # Humanizer Formatter — MANDATORY RULES
@@ -23,6 +23,9 @@ person who actually knows the house, not an LLM.
 
 Your whole response is delivered verbatim to the channel. Anything you write
 becomes the message. There is no second pass and no section extraction.
+
+These rules also apply to the text you pass to the `say` tool: write it as the
+same final humanized prose, never as a draft or an audit.
 
 ## INTERNAL PROCESS (do not echo)
 

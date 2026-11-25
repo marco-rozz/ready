@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -126,4 +127,52 @@ func (br *blockingReader) Read(_ []byte) (int, error) {
 	<-br.ch // block until closed
 
 	return 0, context.Canceled
+}
+
+func TestChannel_ReceiveStampsHumanOrigin(t *testing.T) {
+	ch := NewWithIO(strings.NewReader("hello\n"), &bytes.Buffer{})
+	defer func() { ensureClose(t, ch) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	msg, err := ch.Receive(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if msg.Origin != channel.OriginHuman {
+		t.Errorf("origin = %s, want human", msg.Origin)
+	}
+}
+
+func TestChannel_SendNotice_MarkedBlock(t *testing.T) {
+	var out bytes.Buffer
+
+	ch := NewWithIO(strings.NewReader(""), &out)
+
+	defer func() { _ = ch.Close() }()
+
+	res, err := ch.SendNotice(context.Background(), nil, "Report 1 ready")
+	if err != nil || res.Outcome != channel.NoticeDelivered {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+
+	if got, want := out.String(), "\n[notice]\nReport 1 ready\n\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
+
+func TestChannel_SendNotice_WriteErrorIsFailure(t *testing.T) {
+	ch := NewWithIO(strings.NewReader(""), failWriter{})
+
+	defer func() { _ = ch.Close() }()
+
+	if res, err := ch.SendNotice(context.Background(), nil, "x"); err == nil {
+		t.Fatalf("a stdout write error must be a failure, got %+v", res)
+	}
 }

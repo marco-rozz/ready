@@ -500,7 +500,7 @@ func chatHandshakeDirect(_ context.Context, dealer zmq4.Socket, connectionID, to
 	}
 
 	// Round 2 — authenticated.
-	return chatHandshakeVerify(dealer, connectionID, token, challengeResp.Content, timeout, stderr, sigIntFired, recvDirect)
+	return chatHandshakeVerify(dealer, connectionID, token, challengeResp.Content, timeout, stderr, sigIntFired, true, recvDirect)
 }
 
 // chatHandshakeLoop performs the handshake over the recvLoop (non-TUI path).
@@ -530,7 +530,7 @@ func chatHandshakeLoop(chatCtx context.Context, dealer zmq4.Socket, connectionID
 		return protocol.Response{}, verr
 	}
 
-	return chatHandshakeVerify(dealer, connectionID, token, challengeResp.Content, timeout, stderr, sigIntFired, func(_ zmq4.Socket, t time.Duration, sig chan struct{}) (protocol.Response, error) {
+	return chatHandshakeVerify(dealer, connectionID, token, challengeResp.Content, timeout, stderr, sigIntFired, false, func(_ zmq4.Socket, t time.Duration, sig chan struct{}) (protocol.Response, error) {
 		return recv.waitControl(chatCtx, t, sig)
 	})
 }
@@ -602,10 +602,11 @@ func checkProtocolVersion(resp *protocol.Response, stderr io.Writer) error {
 	return nil
 }
 
-// chatHandshakeVerify sends the authenticated session_start and maps the auth
+// chatHandshakeVerify sends the authenticated session_start (declaring the
+// Notice rendering capability when rendersNotices) and maps the auth
 // response to an exit code. On success it returns the authenticated response
 // (carrying the daemon's model status, llm-status-visibility).
-func chatHandshakeVerify(dealer zmq4.Socket, connectionID, token, nonceHex string, timeout time.Duration, stderr io.Writer, sigIntFired chan struct{}, recv recvFn) (protocol.Response, error) {
+func chatHandshakeVerify(dealer zmq4.Socket, connectionID, token, nonceHex string, timeout time.Duration, stderr io.Writer, sigIntFired chan struct{}, rendersNotices bool, recv recvFn) (protocol.Response, error) {
 	authToken, hmacErr := chatHMAC(token, nonceHex)
 	if hmacErr != nil {
 		_, _ = fmt.Fprintf(stderr, "auth: %v\n", hmacErr)
@@ -621,6 +622,9 @@ func chatHandshakeVerify(dealer zmq4.Socket, connectionID, token, nonceHex strin
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 		AuthToken:       authToken,
 		ProtocolVersion: protocol.Version,
+		// say-mid-turn-notice: only the interactive TUI renders Notices;
+		// --exec, --raw and the line reader declare nothing.
+		RendersNotices: rendersNotices,
 	})
 	if err := chatSendDealer(dealer, verify); err != nil {
 		return protocol.Response{}, mapSendError(stderr, err, sigIntFired)
@@ -850,7 +854,52 @@ func isModelStatusControl(resp protocol.Response) bool {
 		// subagent-runtime: the fleet snapshot is a TUI-only view; the non-
 		// TUI paths ignore it (task 6.3).
 		resp.Content == protocol.ControlSubagents ||
-		resp.Content == protocol.ControlSubagentHandback
+		resp.Content == protocol.ControlSubagentHandback ||
+		// turn-steering (protocol 7): acknowledgement and Turn-correlation
+		// events are TUI-only; --exec, --raw and the line reader ignore them.
+		resp.Content == protocol.ControlMessageAccepted ||
+		resp.Content == protocol.ControlTurnStarted ||
+		resp.Content == protocol.ControlSteerInjected ||
+		// say-mid-turn-notice (protocol 8): these paths declare no Notice
+		// rendering, so a stray notice is ignored defensively.
+		resp.Content == protocol.ControlNotice
+}
+
+// replyAnswers reports whether a final reply answers request reqID: it is the
+// reply of that request, or of a Turn that consumed it (turn.request_ids). A
+// reply carrying no request id at all (an older fixture) is accepted.
+func replyAnswers(resp protocol.Response, reqID string) bool {
+	if resp.RequestID == "" || resp.RequestID == reqID {
+		return true
+	}
+
+	if resp.Turn != nil {
+		for _, id := range resp.Turn.RequestIDs {
+			if id == reqID {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// waitReplyForRequest waits for the final reply that answers reqID, ignoring
+// model-status/lifecycle noise and any reply addressed to another request.
+func waitReplyForRequest(ctx context.Context, recv *recvLoop, timeout time.Duration, sigIntFired chan struct{}, reqID string) (protocol.Response, error) {
+	deadline := time.Now().Add(timeout)
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return protocol.Response{}, context.DeadlineExceeded
+		}
+
+		resp, err := waitReplyIgnoringModelStatus(ctx, recv, remaining, sigIntFired)
+		if err != nil || replyAnswers(resp, reqID) {
+			return resp, err
+		}
+	}
 }
 
 // waitReplyIgnoringModelStatus wraps recvLoop.waitReply, skipping
@@ -902,7 +951,7 @@ func chatExec(
 		return mapSendError(stderr, err, sigIntFired)
 	}
 
-	resp, err := waitReplyIgnoringModelStatus(chatCtx, recv, replyTimeout, sigIntFired)
+	resp, err := waitReplyForRequest(chatCtx, recv, replyTimeout, sigIntFired, reqID)
 	if err != nil {
 		if errors.Is(err, errControlAfter) {
 			return handleControlAfter(resp, stderr, doSessionEnd)
@@ -1002,7 +1051,7 @@ func chatInteractive(
 			return mapSendError(stderr, err, sigIntFired)
 		}
 
-		resp, err := waitReplyIgnoringModelStatus(chatCtx, recv, replyTimeout, sigIntFired)
+		resp, err := waitReplyForRequest(chatCtx, recv, replyTimeout, sigIntFired, reqID)
 		if err != nil {
 			if errors.Is(err, errControlAfter) {
 				return handleControlAfter(resp, stderr, doSessionEnd)

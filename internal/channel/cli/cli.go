@@ -16,7 +16,10 @@ import (
 const ChannelName = "cli"
 
 // Guarantees at compile time that Channel implements the interface channel.Channel.
-var _ channel.Channel = (*Channel)(nil)
+var (
+	_ channel.Channel      = (*Channel)(nil)
+	_ channel.NoticeSender = (*Channel)(nil)
+)
 
 // Channel implements the channel.Channel interface for interactive CLI usage.
 type Channel struct {
@@ -96,6 +99,7 @@ func (c *Channel) Receive(ctx context.Context) (channel.Message, error) {
 		return channel.Message{
 			Content:     result.line,
 			ChannelName: ChannelName,
+			Origin:      channel.OriginHuman,
 		}, nil
 	case <-ctx.Done():
 		return channel.Message{}, ctx.Err()
@@ -110,6 +114,17 @@ func (c *Channel) Send(_ context.Context, msg channel.Message) error {
 	}
 
 	return nil
+}
+
+// SendNotice prints a Mid-turn Notice as a marked block on stdout: a blank
+// line, the `[notice]` marker line, the text, a blank line. A write error
+// means nothing was shown.
+func (c *Channel) SendNotice(_ context.Context, _ map[string]string, text string) (channel.NoticeResult, error) {
+	if _, err := fmt.Fprintf(c.writer, "\n[notice]\n%s\n\n", text); err != nil {
+		return channel.NoticeResult{}, fmt.Errorf("failed to write notice to CLI output: %w", err)
+	}
+
+	return channel.NoticeResult{Outcome: channel.NoticeDelivered, Parts: 1, DeliveredParts: 1}, nil
 }
 
 // Writer returns the channel's output writer, used by the streaming callback

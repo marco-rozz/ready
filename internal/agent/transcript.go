@@ -385,7 +385,9 @@ func (m *toolCallIDModel) Generate(ctx context.Context, input []*schema.Message,
 func (m *toolCallIDModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	waitTranscript(ctx, trailingToolResults(input))
 
-	reader, err := m.inner.Stream(ctx, input, opts...)
+	reader, err := gatedStream(ctx, func(c context.Context) (*schema.StreamReader[*schema.Message], error) {
+		return m.inner.Stream(c, input, opts...)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -483,5 +485,7 @@ func (m *transcriptBarrierAgenticModel) Generate(ctx context.Context, input []*s
 func (m *transcriptBarrierAgenticModel) Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
 	waitTranscript(ctx, trailingAgenticToolResults(input))
 
-	return m.inner.Stream(ctx, input, opts...)
+	return gatedStream(ctx, func(c context.Context) (*schema.StreamReader[*schema.AgenticMessage], error) {
+		return m.inner.Stream(c, input, opts...)
+	})
 }

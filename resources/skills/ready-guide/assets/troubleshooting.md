@@ -96,6 +96,11 @@ user-visible text to look for, and the actionable next step.
 - `policy owner does not declare the active profile` — an MCP server, the
   twin, or builtin_tools lacks the current profile block; that owner
   exposes zero tools (fail-closed). Add the profile to the owner.
+- Mid-turn visibility degraded (no `say` tool for a profile) — the profile
+  has an explicit `builtin_tools.profiles.<name>.allow` list that does not
+  name `say`. The daemon keeps serving, but the model cannot show
+  intermediate results before the final answer. Add `say` to that allow-list
+  (through config-manager or by editing `config.yaml`) and restart.
 - `profile gating: pattern matches zero tools` (dead pattern) — a
   `allow/deny` glob matched nothing; check wire-name spelling.
 
@@ -171,6 +176,12 @@ you decide what to fix:
 - `session history restored with skipped corrupt lines` — same, aggregate.
 - `session inbox saturated — message dropped` — one address pushed more
   than 16 messages while its worker was busy; slow down that flood source.
+- A message sent while the agent works did not steer it — the Turn was
+  opened by a daemon item or `--exec`, a command is queued behind it, a
+  steering limit was reached, or `steering.enabled`/`channels.<name>.steering`
+  is false: the message simply runs as the next Turn, which is by design.
+- `/stop` answered `Nothing to stop.` — the address was idle or the final
+  answer was already being delivered.
 - `PANIC in session worker` + recovery — the turn died, the address keeps
   serving; capture the stack and report.
 

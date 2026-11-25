@@ -45,7 +45,7 @@ func TestBuildTools_SubagentToolsRegisteredWhenRuntimeWired(t *testing.T) {
 		},
 	}
 
-	tools, mcpRuntime, blocked, cfgMgr := buildTools(ctx, cfg, skillsMgr, sc, true, rejectedChatProfileName, nil, zerolog.Nop(), config.ProfileOverrideInputs{}, runtime)
+	tools, mcpRuntime, blocked, cfgMgr := buildTools(ctx, cfg, skillsMgr, sc, true, rejectedChatProfileName, nil, zerolog.Nop(), config.ProfileOverrideInputs{}, runtime, nil)
 	if mcpRuntime != nil {
 		defer func() { _ = mcpRuntime.Close() }()
 	}

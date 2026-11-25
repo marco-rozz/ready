@@ -132,6 +132,8 @@ func (c *Config) applySessionDefaults() {
 		s.Retention.MaxTotalSize = defaultRetentionTotalSize
 	}
 
+	c.applySteeringDefaults()
+
 	cp := &c.Compaction
 	if cp.Skill == "" {
 		cp.Skill = defaultCompactionSkill
@@ -161,10 +163,10 @@ func (c *Config) applySessionDefaults() {
 // channelSessionResets maps each channel name to its optional override.
 func (c *Config) channelSessionResets() map[string]*SessionResetConfig {
 	return map[string]*SessionResetConfig{
-		"cli":      c.Channels.CLI.SessionReset,
-		"zmqcli":   c.Channels.ZMQCLI.SessionReset,
-		"serial":   c.Channels.Serial.SessionReset,
-		"telegram": c.Channels.Telegram.SessionReset,
+		chanCLI:     c.Channels.CLI.SessionReset,
+		segZmqcli:   c.Channels.ZMQCLI.SessionReset,
+		chanSerial:  c.Channels.Serial.SessionReset,
+		segTelegram: c.Channels.Telegram.SessionReset,
 	}
 }
 
@@ -223,6 +225,10 @@ func (c *Config) validateSessions() error {
 
 	if d := c.Sessions.Retention.Days(); d < 0 {
 		return fmt.Errorf("sessions.retention.retention_days must be >= 0, got %d", d) // user-facing config error
+	}
+
+	if err := c.validateSteering(); err != nil {
+		return err
 	}
 
 	cp := c.Compaction

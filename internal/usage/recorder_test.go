@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -426,4 +427,80 @@ func TestDetachedNilOwnerIsInert(t *testing.T) {
 	if c := child.Snapshot(); c == nil || c.LLMCalls != 1 {
 		t.Fatalf("child = %+v", c)
 	}
+}
+
+// A stream that reported usage and then ended in an error (a preempted or
+// failed call) still counts as one LLM call with the usage it reported;
+// a stream that errored before any usage records nothing.
+func TestStreamErrorAfterUsageStillCounts(t *testing.T) {
+	cases := []struct {
+		name      string
+		usageSeen bool
+		wantCalls int
+	}{
+		{"usage then error", true, 1},
+		{"error before usage", false, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore()
+			acc := store.Accumulator("cli")
+			ctx := WithAccumulator(context.Background(), acc)
+
+			base := &erroringStreamModel{usage: tc.usageSeen}
+			sr, err := NewRecordedChatModel(base).Stream(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for {
+				if _, err := sr.Recv(); err != nil {
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("recv err = %v, want context.Canceled", err)
+					}
+
+					break
+				}
+			}
+
+			time.Sleep(10 * time.Millisecond)
+
+			got := acc.Snapshot()
+			if tc.wantCalls == 0 {
+				if got != nil && got.LLMCalls != 0 {
+					t.Fatalf("recorded %+v, want nothing", got)
+				}
+
+				return
+			}
+
+			if got == nil || got.LLMCalls != 1 || got.ReadTokens != 50 || got.WrittenTokens != 5 {
+				t.Fatalf("totals = %+v, want one call read=50 written=5", got)
+			}
+		})
+	}
+}
+
+type erroringStreamModel struct{ usage bool }
+
+func (m *erroringStreamModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return nil, errors.New("unused")
+}
+
+func (m *erroringStreamModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	sr, sw := schema.Pipe[*schema.Message](3)
+
+	if m.usage {
+		sw.Send(&schema.Message{ResponseMeta: &schema.ResponseMeta{Usage: usagePtr(tok(50, 0, 5))}}, nil)
+	}
+
+	sw.Send(nil, context.Canceled)
+	sw.Close()
+
+	return sr, nil
+}
+
+func (m *erroringStreamModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
 }

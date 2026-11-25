@@ -74,7 +74,7 @@ configuration and personalize the agent, one question at a time.
 The terminal client. It connects to a running daemon over ZeroMQ and
 authenticates with HMAC-SHA256 challenge-response (`session_start` →
 `challenge` nonce → `hex(HMAC-SHA256(token, nonce))`).
-The ZMQ wire protocol is version 3 and must match on client and server.
+The ZMQ wire protocol is version 8 and must match on client and server.
 Select the profile when starting `serve`; the chat command stays the same.
 
 Flags:
@@ -107,9 +107,32 @@ new-content indicator).
   terminal, see `READY_SHIFT_ENTER` below); `Ctrl+C` quits (exit 130);
   `Ctrl+D` quits on an empty editor (exit 0), else forward-deletes;
   `Ctrl+G` jumps to the bottom; mouse wheel scrolls.
-- Typing a message while a turn is in flight queues it; the queue drains
-  FIFO when the turn completes. The daemon itself rejects concurrent
-  requests (`request_in_flight`), so nothing double-fires.
+- `Return` always sends. A message typed while your turn is running steers
+  that turn (turn steering): proposed tool calls are vetoed before they run,
+  a running tool finishes, a final answer already being delivered is never
+  interrupted, and a message that arrives too late opens the next turn. Every
+  message is echoed as a quote with a one-line label when it steered
+  (`⋯ steer pending`, `↳ steer · N actions superseded`,
+  `↷ arrived after the reply · new turn`, `⋯ queued`,
+  `⊘ not processed · stopped`). During a runtime reload prompts are held
+  locally (`⋯ held`) and sent in order afterwards. `/stop` ends the running
+  turn at its earliest safe point (reply
+  `Stopped. Completed actions are kept; nothing else will run.`, or
+  `Nothing to stop.`). Commands (`/new`, `/compact`, `/verify`) and `--exec`
+  never steer; `steering.enabled: false` (or `channels.<name>.steering`)
+  restores plain queueing.
+- **Notices**: the model can show you a short message mid-turn with the
+  `say` tool, without ending the turn. In the TUI it is a block with a dim
+  `✦ notice` label above the markdown text. The turn body is chronological:
+  your message, then steers, notices and informational lines (such as
+  subagent handback traces) in the order they arrived, then the answer. A
+  notice resets the reply timeout; one arriving with no live turn (for
+  example after a reconnect) appears as a standalone block at the end of the
+  transcript. Only `say` and the final answer reach you: text the model writes
+  between tool calls is never shown. `--exec`, `--raw` and the piped line
+  reader do not render notices (their output and exit codes are unchanged);
+  Telegram sends a notice as a new message, the stdin CLI prints a
+  `[notice]` block.
 - `/session` and `/context` are TUI-reserved: they are answered by the
   daemon directly (no LLM call, no history change) and render as transcript
   blocks — Session ID, address, compaction count, token totals, model.

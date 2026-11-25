@@ -22,12 +22,14 @@ import (
 	"github.com/marco-rozz/ready/internal/config"
 	"github.com/marco-rozz/ready/internal/formatter"
 	"github.com/marco-rozz/ready/internal/injection"
+	"github.com/marco-rozz/ready/internal/okf"
 	"github.com/marco-rozz/ready/internal/orchestrator"
 	"github.com/marco-rozz/ready/internal/persistence"
 	"github.com/marco-rozz/ready/internal/privacy"
 	"github.com/marco-rozz/ready/internal/protocol"
 	"github.com/marco-rozz/ready/internal/session"
 	"github.com/marco-rozz/ready/internal/skills"
+	"github.com/marco-rozz/ready/internal/steer"
 	"github.com/marco-rozz/ready/internal/subagent"
 	"github.com/marco-rozz/ready/internal/tools"
 	"github.com/marco-rozz/ready/internal/usage"
@@ -49,6 +51,7 @@ const (
 const (
 	cmdNew     = "new"
 	cmdCompact = "compact"
+	cmdVerify  = "verify"
 )
 
 // parseSessionCommand recognises `/new` (exact) and `/compact [instructions]`
@@ -65,7 +68,20 @@ func parseSessionCommand(content string) (cmd, arg string, ok bool) {
 		return cmdCompact, strings.TrimSpace(rest), true
 	}
 
+	// `/verify` alone or followed by whitespace; `/verifyall` is not the command.
+	if rest, found := strings.CutPrefix(text, "/"+cmdVerify); found && (rest == "" || rest[0] == ' ' || rest[0] == '\n' || rest[0] == '\t') {
+		return cmdVerify, strings.TrimSpace(rest), true
+	}
+
 	return "", "", false
+}
+
+// isSessionCommandContent reports whether content is a Session command (never
+// a steering candidate).
+func isSessionCommandContent(content string) bool {
+	_, _, ok := parseSessionCommand(content)
+
+	return ok
 }
 
 // ── Session-keyed history store ─────────────────────────────────────────
@@ -263,6 +279,19 @@ type sessionRuntime struct {
 
 	stdinResetOnce sync.Once
 
+	// notices serialises Mid-turn Notice deliveries per address.
+	notices noticeLocks
+
+	// steering is the current generation's steering policy (read per Turn
+	// under genMu); observer reports Turn starts and claims to the channels
+	// (nil until a channel wires one).
+	steering steeringPolicy
+	observer turnObserver
+
+	// okf is the process-lifetime OKF writer behind /verify (nil without an
+	// agent directory).
+	okf *okf.Writer
+
 	// coord is the reload coordinator; the process-lifetime current
 	// generation accessor for the Subagent services.
 	coord *reloadCoordinator
@@ -387,10 +416,28 @@ func (rt *sessionRuntime) resetRule(channelName string) session.Rule {
 	return rt.resets[channelName]
 }
 
-// handleItem is the worker's per-item entry point: apply a pending reset,
-// evaluate the reset rule for the channel kind, then run a Session command
-// or a Turn followed by the post-reply compaction evaluation.
+// handleWork is the dispatcher's per-item entry point: it receives the
+// address inbox so the Turn can open and close its steering window
+// (turn-steering S4). Items run strictly one at a time per address.
+func (rt *sessionRuntime) handleWork(ctx context.Context, in *steer.Inbox, w steer.Work) {
+	rt.handle(ctx, in, w)
+}
+
+// handleItem runs one item without a steering inbox (tests and callers that
+// do not go through the dispatcher): the Turn is never steerable.
 func (rt *sessionRuntime) handleItem(ctx context.Context, msg channel.Message) {
+	rt.handle(ctx, nil, steer.Work{Msg: msg})
+}
+
+// handle is the worker's per-item entry point: apply a pending reset,
+// evaluate the reset rule for the channel kind, then run a Session command
+// or a Turn followed by the post-reply compaction evaluation. A Turn opens
+// its steering window on the inbox just before it runs and closes it right
+// after its reply is delivered; candidates left unclaimed are deferred to the
+// next Turn by the inbox itself.
+func (rt *sessionRuntime) handle(ctx context.Context, in *steer.Inbox, w steer.Work) {
+	msg := w.Msg
+
 	rt.genMu.RLock()
 	addr := session.AddressOf(msg)
 
@@ -404,7 +451,8 @@ func (rt *sessionRuntime) handleItem(ctx context.Context, msg channel.Message) {
 		return
 	}
 
-	info := rt.processMessage(ctx, addr, msg)
+	tc := rt.openTurn(in, w)
+	info := rt.runTurnClosing(ctx, addr, msg, tc)
 	rt.afterReply(ctx, addr, msg, info)
 	onAutoReload := rt.onAutoReload
 	rt.genMu.RUnlock()
@@ -412,6 +460,17 @@ func (rt *sessionRuntime) handleItem(ctx context.Context, msg channel.Message) {
 	if info.autoReload && onAutoReload != nil {
 		onAutoReload(ctx, msg)
 	}
+}
+
+// runTurnClosing runs the Turn and always closes its steering window — also
+// when the Turn panics, so unclaimed candidates are deferred instead of
+// stranded in a window nobody will ever close.
+func (rt *sessionRuntime) runTurnClosing(ctx context.Context, addr session.Address, msg channel.Message, tc *turnControl) turnInfo {
+	if tc != nil {
+		defer tc.close(rt.logger)
+	}
+
+	return rt.processTurn(ctx, addr, msg, tc)
 }
 
 // evaluateReset evaluates the reset rule by channel kind: connection-
@@ -469,6 +528,8 @@ func (rt *sessionRuntime) handleCommand(ctx context.Context, addr session.Addres
 		// refilled by a late reply.
 		rt.sendFixed(ctx, msg, msgSessionStarted)
 		rt.sendSessionEvent(msg, protocol.ControlSessionChanged, next.ID, nil)
+	case cmdVerify:
+		rt.handleVerify(ctx, addr, msg, arg)
 	case cmdCompact:
 		cur, history := rt.sessions.History(ctx, addr)
 

@@ -63,6 +63,22 @@ compaction:
   (the file is untouched; a WARN states this).
 - `/compact [instructions]` runs the same machinery on demand.
 
+## steering
+
+```yaml
+steering:
+  enabled: true              # false = plain FIFO queueing on every channel
+  max_steers_per_turn: 8     # 1..32
+  max_restarts_per_turn: 4   # 1..16
+  min_remaining_budget: 30s  # 0..300s
+# channels.<name>.steering: false  # per-channel override
+```
+
+- Mid-turn messages from a human steer the running Turn at safe points;
+  reaching a limit defers the message to the next Turn and never errors.
+- Out-of-range values fail validation naming the key; a reload applies the
+  limits from the next Turn. `/stop` is not configurable.
+
 ## logging
 
 ```yaml

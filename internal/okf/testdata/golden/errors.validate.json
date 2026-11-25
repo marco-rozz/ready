@@ -1,0 +1,79 @@
+{
+  "errors": 8,
+  "files_checked": 10,
+  "findings": [
+    {
+      "code": "E002",
+      "level": "error",
+      "line": 1,
+      "message": "frontmatter does not parse as a YAML mapping: frontmatter is not a YAML mapping (section 4)",
+      "path": "e002-notmap.md"
+    },
+    {
+      "code": "E002",
+      "level": "error",
+      "line": 1,
+      "message": "frontmatter does not parse as a YAML mapping: the closing --- line is missing (section 4)",
+      "path": "e002-unclosed.md"
+    },
+    {
+      "code": "E002",
+      "level": "error",
+      "line": 1,
+      "message": "frontmatter does not parse as a YAML mapping: invalid YAML (while parsing a flow sequence) (section 4)",
+      "path": "e002-yaml.md"
+    },
+    {
+      "code": "E007",
+      "level": "error",
+      "line": 7,
+      "message": "frontmatter repeats the key 'by'; keys must be unique (section 4)",
+      "path": "e007-nested.md"
+    },
+    {
+      "code": "E007",
+      "level": "error",
+      "line": 5,
+      "message": "frontmatter repeats the key 'title'; keys must be unique (section 4)",
+      "path": "e007-top.md"
+    },
+    {
+      "code": "W120",
+      "level": "warning",
+      "line": 1,
+      "message": "not a concept: the frontmatter has no non-empty type (section 3.2)",
+      "path": "empty-fm.md"
+    },
+    {
+      "code": "E006",
+      "level": "error",
+      "line": 1,
+      "message": "log.md has no frontmatter (section 9)",
+      "path": "log.md"
+    },
+    {
+      "code": "E005",
+      "level": "error",
+      "line": 6,
+      "message": "a log.md date heading must be YYYY-MM-DD (section 9); found 'not-a-date'",
+      "path": "log.md"
+    },
+    {
+      "code": "E004",
+      "level": "error",
+      "line": 1,
+      "message": "an index.md below the bundle root has no frontmatter (section 8)",
+      "path": "sub/index.md"
+    },
+    {
+      "code": "W118",
+      "level": "warning",
+      "line": 3,
+      "message": "log.md puts the newest date first (section 9); 2026-02-01 follows 2026-01-01",
+      "path": "sub/log.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": "0.3",
+  "warnings": 2
+}

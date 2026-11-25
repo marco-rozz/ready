@@ -1,0 +1,23 @@
+{
+  "errors": 0,
+  "files_checked": 3,
+  "findings": [
+    {
+      "code": "W101",
+      "level": "warning",
+      "line": 1,
+      "message": "generated.at is an RFC 3339 date-time with an offset, such as 2026-06-30T14:00:00Z, or a date such as 2026-06-30 (section 5); found 'yesterday'",
+      "path": "c.md"
+    },
+    {
+      "code": "W102",
+      "level": "warning",
+      "line": 1,
+      "message": "generated is a mapping with a by field (section 5.2)",
+      "path": "d.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": "0.3",
+  "warnings": 2
+}

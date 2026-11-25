@@ -28,6 +28,7 @@ import (
 	"github.com/marco-rozz/ready/internal/session"
 	"github.com/marco-rozz/ready/internal/skillcache"
 	"github.com/marco-rozz/ready/internal/skills"
+	"github.com/marco-rozz/ready/internal/steer"
 	"github.com/marco-rozz/ready/internal/usage"
 )
 
@@ -259,8 +260,7 @@ func TestSessionCommand_NewQueuedBehindInFlightTurn(t *testing.T) {
 		processFn: env.runtime().handleItem,
 		keyFn:     func(m channel.Message) string { return string(session.AddressOf(m)) },
 		logger:    zerolog.Nop(),
-		workers:   map[string]chan channel.Message{},
-		dropped:   map[string]int{},
+		workers:   map[string]*steer.Inbox{},
 	}
 
 	done := make(chan struct{})

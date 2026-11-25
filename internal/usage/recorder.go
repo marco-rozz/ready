@@ -167,6 +167,13 @@ func forwardRecorded[M interface {
 			break
 		}
 		if recvErr != nil {
+			// A call that already reported usage consumed those tokens even
+			// when it then ended in an error — a preempted (cancelled) or
+			// failed stream still counts as an LLM call.
+			if seen {
+				record(ctx, last)
+			}
+
 			sw.Send(nil, recvErr)
 
 			return

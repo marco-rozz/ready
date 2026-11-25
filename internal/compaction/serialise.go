@@ -49,6 +49,21 @@ func serialiseParts(entries []persistence.HistoryMessage) []string {
 				continue
 			}
 
+			// A claimed steering candidate: labelled so the summariser keeps it
+			// as a correction/extension the user sent while the Turn ran; a
+			// stop marker records that the Turn was cut short.
+			if e.Kind == persistence.KindSteer {
+				parts = append(parts, "[User (mid-turn)]: "+e.Content)
+
+				continue
+			}
+
+			if e.Kind == persistence.KindTurnStopped {
+				parts = append(parts, "[Turn stopped by the user]")
+
+				continue
+			}
+
 			parts = append(parts, "[User]: "+e.Content)
 		case e.Role == persistence.RoleSystem:
 			parts = append(parts, "[System]: "+e.Content)

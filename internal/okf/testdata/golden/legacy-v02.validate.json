@@ -1,0 +1,30 @@
+{
+  "errors": 0,
+  "files_checked": 3,
+  "findings": [
+    {
+      "code": "W119",
+      "level": "warning",
+      "line": 1,
+      "message": "superseded_by 'data/x.csv' resolves only from the bundle root, through the v0.2 fallback; write it as /data/x.csv (section 6.2)",
+      "path": "sub/c.md"
+    },
+    {
+      "code": "W119",
+      "level": "warning",
+      "line": 1,
+      "message": "resource 'data/x.csv' resolves only from the bundle root, through the v0.2 fallback; write it as /data/x.csv (section 6.2)",
+      "path": "sub/c.md"
+    },
+    {
+      "code": "W115",
+      "level": "warning",
+      "line": 7,
+      "message": "link target 'data/x.csv' is not in the bundle (section 6.1)",
+      "path": "sub/c.md"
+    }
+  ],
+  "info": 0,
+  "okf_version": "0.2",
+  "warnings": 3
+}

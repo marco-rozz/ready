@@ -91,6 +91,14 @@ interactive `ready chat` TUI shows the directory too — reported by the
 daemon itself after authentication. See `agent-directories.md` for the full
 isolation contract.
 
+## Chat wire protocol version
+
+The `ready chat` / `ready serve` wire protocol is version 8 (it added mid-turn
+notices) and must match exactly: the handshake is rejected before
+authentication on a mismatch. Upgrade the daemon and every chat client
+together; rollback likewise needs matching older binaries on both ends. No
+data migration is involved.
+
 ## Config schema version
 
 Every complete configuration requires top-level `config_version: 2`, independent
